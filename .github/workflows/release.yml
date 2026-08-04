@@ -47,6 +47,9 @@ jobs:
       - name: Run updater self-test
         run: php bin/update.php --self-test
 
+      - name: Test isolated updater activation and rollback
+        run: php tests/updater-integration.php
+
       - name: Validate embedded JavaScript
         run: node tests/validate-js.mjs
 

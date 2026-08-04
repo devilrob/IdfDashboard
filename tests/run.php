@@ -121,6 +121,47 @@ $assert(
     ], 1) === ['IdfDashboard.backup-20260803-120000-v0.9.0'],
     'backup retention keeps newest matching backup'
 );
+$assert(
+    IdfDashboardUpdater::backupsToPrune([
+        'IdfDashboard.backup-20260803-120000-v0.9.0',
+        'IdfDashboard.backup-20260804-120000-v1.0.0',
+    ], 1, 'IdfDashboard.backup-20260803-120000-v0.9.0') === [],
+    'backup retention never deletes protected backup'
+);
+$assert(IdfDashboardUpdater::isLegacyPluginDirectoryName('IdfDashboard.old-recovery'), 'legacy old directory detected');
+$assert(IdfDashboardUpdater::isLegacyPluginDirectoryName('.IdfDashboard.pending-deadbeef'), 'legacy pending directory detected');
+$assert(
+    array_reduce([
+        'IdfDashboard.backup-20260804-203726-v1.0.1',
+        'IdfDashboard.old-copy',
+        'IdfDashboard.new-copy',
+        'IdfDashboard.failed-copy',
+        'IdfDashboard.rollback-copy',
+    ], fn (bool $valid, string $name): bool => $valid && IdfDashboardUpdater::isLegacyPluginDirectoryName($name), true),
+    'all required legacy directory variants detected'
+);
+$assert(! IdfDashboardUpdater::isLegacyPluginDirectoryName('IdfDashboard'), 'active plugin directory is never migrated');
+$assert(! IdfDashboardUpdater::executionUserIsAllowed(0, 0, false), 'root updater install rejected');
+$assert(! IdfDashboardUpdater::executionUserIsAllowed(1001, 1000, false), 'wrong updater user rejected');
+$assert(IdfDashboardUpdater::executionUserIsAllowed(1000, 1000, false), 'plugin owner updater accepted');
+$assert(
+    str_contains(IdfDashboardUpdater::lockOpenFailureMessage('Permission denied'), 'Permission denied'),
+    'lock permission detail preserved'
+);
+
+$updaterSource = (string) file_get_contents($root . '/bin/update.php');
+$assert(
+    str_contains($updaterSource, "'plugin-backups'") && str_contains($updaterSource, "'IdfDashboard'"),
+    'updater defaults to external LibreNMS backup storage'
+);
+$assert(
+    str_contains($updaterSource, '$staging = $this->storageRoot . DIRECTORY_SEPARATOR'),
+    'updater never stages beside active plugin'
+);
+$assert(
+    str_contains($updaterSource, "\$this->assertPluginTreeClean();\n        \$artisan"),
+    'updater checks plugin tree immediately before artisan'
+);
 
 $pageSource = (string) file_get_contents($root . '/Page.php');
 $deviceAccessSource = (string) file_get_contents($root . '/Support/DeviceAccess.php');

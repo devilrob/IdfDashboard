@@ -48,9 +48,13 @@ final class IdfDashboardUpdater
 
     private string $parentDirectory;
 
+    private string $libreNmsRoot;
+
+    private string $storageRoot;
+
     private string $auditLog;
 
-    public function __construct(?string $pluginRoot = null)
+    public function __construct(?string $pluginRoot = null, ?string $storageRoot = null)
     {
         $resolved = realpath($pluginRoot ?? dirname(__DIR__));
 
@@ -60,7 +64,10 @@ final class IdfDashboardUpdater
 
         $this->pluginRoot = $resolved;
         $this->parentDirectory = dirname($resolved);
-        $this->auditLog = $this->parentDirectory . DIRECTORY_SEPARATOR . 'IdfDashboard-update.log';
+        $this->libreNmsRoot = dirname($resolved, 3);
+        $this->setStorageRoot($storageRoot ?? $this->libreNmsRoot
+            . DIRECTORY_SEPARATOR . 'plugin-backups'
+            . DIRECTORY_SEPARATOR . 'IdfDashboard');
     }
 
     public function run(array $arguments): int
@@ -70,6 +77,10 @@ final class IdfDashboardUpdater
         }
 
         $options = $this->parseOptions($arguments);
+
+        if ($options['backup_dir'] !== null) {
+            $this->setStorageRoot($options['backup_dir']);
+        }
 
         if ($options['help']) {
             $this->printHelp();
@@ -217,7 +228,7 @@ final class IdfDashboardUpdater
             && self::isTrustedGithubHost((string) ($parts['host'] ?? ''));
     }
 
-    public static function backupsToPrune(array $names, int $keep): array
+    public static function backupsToPrune(array $names, int $keep, ?string $protected = null): array
     {
         if ($keep < 1 || $keep > 50) {
             throw new RuntimeException('Backup retention must be between 1 and 50.');
@@ -230,7 +241,10 @@ final class IdfDashboardUpdater
         ));
         rsort($backups, SORT_STRING);
 
-        return array_slice($backups, $keep);
+        return array_values(array_filter(
+            array_slice($backups, $keep),
+            fn (string $name): bool => $protected === null || ! hash_equals($protected, $name)
+        ));
     }
 
     public function validateReleasePackage(string $root, string $expectedVersion): void
@@ -256,6 +270,7 @@ final class IdfDashboardUpdater
             'allow_downgrade' => false,
             'reinstall' => false,
             'keep_backups' => 5,
+            'backup_dir' => null,
         ];
 
         $explicitCheck = false;
@@ -307,6 +322,17 @@ final class IdfDashboardUpdater
                 continue;
             }
 
+            if (str_starts_with($argument, '--backup-dir=')) {
+                $path = substr($argument, 13);
+
+                if ($path === '') {
+                    throw new RuntimeException('--backup-dir requires an absolute path.');
+                }
+
+                $options['backup_dir'] = $path;
+                continue;
+            }
+
             if (str_starts_with($argument, '--tag=')) {
                 $tag = substr($argument, 6);
 
@@ -352,6 +378,7 @@ Usage:
   php bin/update.php --check [--tag=vMAJOR.MINOR.PATCH]
   php bin/update.php --dry-run [--tag=vMAJOR.MINOR.PATCH]
   php bin/update.php --install [--tag=vMAJOR.MINOR.PATCH] [--keep-backups=5]
+      [--backup-dir=/opt/librenms/plugin-backups/IdfDashboard]
   php bin/update.php --self-test
 
 Safety overrides (an explicit --tag is required):
@@ -360,7 +387,8 @@ Safety overrides (an explicit --tag is required):
 
 The command only consumes stable GitHub release assets. --dry-run downloads,
 checks SHA-256, extracts, validates structure and lints PHP without activation.
-Run it directly as the LibreNMS operating-system user.
+Install mode must run directly as the LibreNMS operating-system user. Backups,
+staging, rollback evidence, the lock and audit log stay outside app/Plugins.
 HELP);
         fwrite(STDOUT, PHP_EOL);
     }
@@ -443,12 +471,19 @@ HELP);
         int $keepBackups
     ): int
     {
+        $this->assertExecutionUser($dryRun);
+        $this->initializeStorage();
         $lock = $this->acquireLock();
         $tempDirectory = null;
 
         try {
+            if (! $dryRun) {
+                $this->migrateLegacyPluginDirectories();
+                $this->assertPluginTreeClean();
+            }
+
             $tempDirectory = $this->createTempDirectory();
-            $this->assertInstallPermissions();
+            $this->assertInstallPermissions($dryRun);
             $operation = $dryRun ? 'dry_run' : 'update';
             $this->audit($operation . '_started', Version::VERSION, $version, 'Stable CLI operation started.');
 
@@ -489,7 +524,7 @@ HELP);
             fwrite(STDOUT, 'Backup retained at: ' . $backup . PHP_EOL);
 
             try {
-                $this->pruneBackups($keepBackups);
+                $this->pruneBackups($keepBackups, $backup);
             } catch (Throwable $exception) {
                 $this->audit('backup_retention_failed', Version::VERSION, $version, $exception->getMessage());
                 fwrite(STDERR, 'Warning: backup retention failed: ' . $exception->getMessage() . PHP_EOL);
@@ -809,42 +844,67 @@ HELP);
 
     private function activateAtomically(string $extracted, string $version): string
     {
-        $pending = $this->parentDirectory . DIRECTORY_SEPARATOR
-            . '.IdfDashboard.pending-' . bin2hex(random_bytes(6));
-        $backup = $this->parentDirectory . DIRECTORY_SEPARATOR
+        $staging = $this->storageRoot . DIRECTORY_SEPARATOR
+            . '.IdfDashboard.staging-' . bin2hex(random_bytes(6));
+        $backup = $this->storageRoot . DIRECTORY_SEPARATOR
             . 'IdfDashboard.backup-' . gmdate('Ymd-His') . '-v' . Version::VERSION;
 
-        if (file_exists($pending) || file_exists($backup)) {
-            throw new RuntimeException('Prepared or backup update path already exists.');
+        if (file_exists($staging) || file_exists($backup)) {
+            throw new RuntimeException('External staging or backup path already exists.');
         }
 
-        $this->copyTree($extracted, $pending);
-        $this->applyMetadata($pending);
-        $this->validatePackage($pending, $version);
-        $this->lintPhp($pending);
+        try {
+            $this->validatePackage($this->pluginRoot, Version::VERSION);
+            $this->lintPhp($this->pluginRoot);
+            $this->copyTree($extracted, $staging);
+            $this->applyMetadata($staging);
+            $this->validatePackage($staging, $version);
+            $this->lintPhp($staging);
+            $this->assertSameFilesystem($staging);
+            $this->assertPluginTreeClean();
+        } catch (Throwable $exception) {
+            $this->removeTree($staging, $this->storageRoot);
+            throw $exception;
+        }
 
         if (! rename($this->pluginRoot, $backup)) {
-            $this->removeTree($pending, $this->parentDirectory);
-            throw new RuntimeException('Unable to create the atomic plugin backup.');
+            $this->removeTree($staging, $this->storageRoot);
+            throw new RuntimeException('Unable to move the active plugin to the validated external backup directory.');
         }
 
-        if (! rename($pending, $this->pluginRoot)) {
+        try {
+            $this->validatePackage($backup, Version::VERSION);
+        } catch (Throwable $exception) {
             $restored = @rename($backup, $this->pluginRoot);
-            $this->removeTree($pending, $this->parentDirectory);
+            $this->removeTree($staging, $this->storageRoot);
+
+            if (! $restored) {
+                throw new RuntimeException('External backup verification failed and the original plugin could not be restored: ' . $backup);
+            }
+
+            throw new RuntimeException('External backup verification failed; original plugin restored: ' . $exception->getMessage());
+        }
+
+        if (! rename($staging, $this->pluginRoot)) {
+            $restored = @rename($backup, $this->pluginRoot);
 
             if (! $restored) {
                 throw new RuntimeException('Unable to activate or restore the plugin. Manual recovery required: ' . $backup);
             }
 
-            throw new RuntimeException('Unable to activate the prepared plugin; original restored.');
+            throw new RuntimeException('Unable to activate external staging; original plugin restored.');
         }
 
         try {
-            $this->clearLibreNmsViewCache();
+            $this->validateActiveInstallation($version);
         } catch (Throwable $exception) {
-            $failed = $this->parentDirectory . DIRECTORY_SEPARATOR
-                . 'IdfDashboard.failed-' . gmdate('Ymd-His');
-            @rename($this->pluginRoot, $failed);
+            $failed = $this->storageRoot . DIRECTORY_SEPARATOR
+                . 'IdfDashboard.failed-' . gmdate('Ymd-His') . '-v' . $version;
+
+            if (file_exists($failed) || ! rename($this->pluginRoot, $failed)) {
+                $this->audit('rollback_failed', Version::VERSION, $version, $exception->getMessage());
+                throw new RuntimeException('Activation failed and the failed package could not be moved outside app/Plugins. Manual recovery required: ' . $backup);
+            }
 
             if (! rename($backup, $this->pluginRoot)) {
                 $this->audit('rollback_failed', Version::VERSION, $version, $exception->getMessage());
@@ -852,13 +912,20 @@ HELP);
             }
 
             try {
-                $this->clearLibreNmsViewCache();
-            } catch (Throwable) {
-                // The original plugin is restored; retain the initial error.
+                $this->validateActiveInstallation(Version::VERSION);
+            } catch (Throwable $rollbackException) {
+                $this->audit('rollback_failed', $version, Version::VERSION, $rollbackException->getMessage());
+                throw new RuntimeException(
+                    'Original plugin was restored but rollback validation failed: ' . $rollbackException->getMessage()
+                    . '. Failed package retained at: ' . $failed
+                );
             }
 
-            $this->audit('rollback_succeeded', $version, Version::VERSION, $exception->getMessage());
-            throw new RuntimeException('Activation validation failed; automatic rollback succeeded: ' . $exception->getMessage());
+            $this->audit('rollback_succeeded', $version, Version::VERSION, 'Failed package: ' . $failed . '; ' . $exception->getMessage());
+            throw new RuntimeException(
+                'Activation validation failed; automatic rollback succeeded. Failed package retained at: '
+                . $failed . '. Cause: ' . $exception->getMessage()
+            );
         }
 
         return $backup;
@@ -894,32 +961,68 @@ HELP);
     {
         $owner = fileowner($this->pluginRoot);
         $group = filegroup($this->pluginRoot);
+        $directoryMode = fileperms($this->pluginRoot) & 0777;
         $iterator = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
         );
 
-        @chmod($root, fileperms($this->pluginRoot) & 0777);
-
-        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
-            @chown($root, $owner);
-            @chgrp($root, $group);
-        }
+        $this->applyPathMetadata($root, $directoryMode, $owner, $group);
 
         foreach ($iterator as $entry) {
-            @chmod($entry->getPathname(), $entry->isDir() ? 0750 : 0640);
-
-            if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
-                @chown($entry->getPathname(), $owner);
-                @chgrp($entry->getPathname(), $group);
-            }
+            $relative = substr($entry->getPathname(), strlen($root) + 1);
+            $installedPath = $this->pluginRoot . DIRECTORY_SEPARATOR . $relative;
+            $mode = file_exists($installedPath)
+                ? fileperms($installedPath) & 0777
+                : ($entry->isDir() ? $directoryMode : 0640);
+            $this->applyPathMetadata($entry->getPathname(), $mode, $owner, $group);
         }
+    }
+
+    private function applyPathMetadata(string $path, int $mode, int|false $owner, int|false $group): void
+    {
+        if (! chmod($path, $mode)) {
+            throw new RuntimeException('Unable to preserve plugin permissions on external staging.');
+        }
+
+        if (! function_exists('posix_geteuid')) {
+            return;
+        }
+
+        if ($owner !== false && fileowner($path) !== $owner && ! @chown($path, $owner)) {
+            throw new RuntimeException('Unable to preserve plugin owner on external staging.');
+        }
+
+        if ($group !== false && filegroup($path) !== $group && ! @chgrp($path, $group)) {
+            throw new RuntimeException('Unable to preserve plugin group on external staging.');
+        }
+    }
+
+    private function validateActiveInstallation(string $version): void
+    {
+        $this->assertPluginTreeClean();
+        $this->validatePackage($this->pluginRoot, $version);
+        $this->lintPhp($this->pluginRoot);
+
+        [$status, $output] = $this->runCommand(
+            [PHP_BINARY, $this->pluginRoot . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php', '--self-test'],
+            $this->libreNmsRoot,
+            60
+        );
+
+        if ($status !== 0) {
+            throw new RuntimeException('Installed updater self-test failed: ' . trim($output));
+        }
+
+        $this->assertPluginTreeClean();
+        $this->clearLibreNmsViewCache();
+        $this->assertPluginTreeClean();
     }
 
     private function clearLibreNmsViewCache(): void
     {
-        $libreNmsRoot = dirname($this->pluginRoot, 3);
-        $artisan = $libreNmsRoot . DIRECTORY_SEPARATOR . 'artisan';
+        $this->assertPluginTreeClean();
+        $artisan = $this->libreNmsRoot . DIRECTORY_SEPARATOR . 'artisan';
 
         if (! is_file($artisan)) {
             throw new RuntimeException('LibreNMS artisan executable was not found; cannot safely clear compiled views.');
@@ -927,7 +1030,7 @@ HELP);
 
         [$status, $output] = $this->runCommand(
             [PHP_BINARY, $artisan, 'view:clear', '--no-interaction'],
-            $libreNmsRoot,
+            $this->libreNmsRoot,
             60
         );
 
@@ -991,33 +1094,290 @@ HELP);
         }
     }
 
+    private function setStorageRoot(string $path): void
+    {
+        if (str_contains($path, "\0") || ! self::isAbsoluteFilesystemPath($path)) {
+            throw new RuntimeException('Backup directory must be an unambiguous absolute path.');
+        }
+
+        $normalized = rtrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), DIRECTORY_SEPARATOR);
+        $segments = preg_split('#[\\\\/]#', $normalized) ?: [];
+
+        if ($normalized === ''
+            || preg_match('/^[A-Za-z]:$/', $normalized) === 1
+            || in_array('.', $segments, true)
+            || in_array('..', $segments, true)
+        ) {
+            throw new RuntimeException('Backup directory must not contain dot path segments.');
+        }
+
+        $normalized = $this->canonicalizeCandidatePath($normalized);
+
+        if ($this->pathIsWithin($normalized, $this->parentDirectory)
+            || $this->pathIsWithin($normalized, $this->libreNmsRoot . DIRECTORY_SEPARATOR . 'html')
+        ) {
+            throw new RuntimeException('Backup directory must be outside app/Plugins and the LibreNMS web root.');
+        }
+
+        $this->storageRoot = $normalized;
+        $this->auditLog = $normalized . DIRECTORY_SEPARATOR . 'IdfDashboard-update.log';
+    }
+
+    private function canonicalizeCandidatePath(string $path): string
+    {
+        $current = $path;
+        $suffix = [];
+
+        while (! file_exists($current) && ! is_link($current) && dirname($current) !== $current) {
+            array_unshift($suffix, basename($current));
+            $current = dirname($current);
+        }
+
+        $resolved = realpath($current);
+
+        if ($resolved === false) {
+            return $path;
+        }
+
+        return $suffix === []
+            ? $resolved
+            : $resolved . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $suffix);
+    }
+
+    private static function isAbsoluteFilesystemPath(string $path): bool
+    {
+        return str_starts_with($path, '/')
+            || str_starts_with($path, '\\\\')
+            || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1;
+    }
+
+    private function pathIsWithin(string $path, string $parent): bool
+    {
+        $path = rtrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), DIRECTORY_SEPARATOR);
+        $parent = rtrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $parent), DIRECTORY_SEPARATOR);
+
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $path = strtolower($path);
+            $parent = strtolower($parent);
+        }
+
+        return $path === $parent || str_starts_with($path, $parent . DIRECTORY_SEPARATOR);
+    }
+
+    private function initializeStorage(): void
+    {
+        $this->assertNoSymlinkPathComponents($this->storageRoot);
+
+        if (is_link($this->storageRoot)) {
+            throw new RuntimeException('External backup directory must not be a symbolic link.');
+        }
+
+        if (! is_dir($this->storageRoot)
+            && ! mkdir($this->storageRoot, 0750, true)
+            && ! is_dir($this->storageRoot)
+        ) {
+            throw new RuntimeException('Unable to create external backup directory: ' . $this->storageRoot);
+        }
+
+        $resolved = realpath($this->storageRoot);
+
+        if ($resolved === false || is_link($resolved)) {
+            throw new RuntimeException('Unable to resolve a safe external backup directory.');
+        }
+
+        $this->setStorageRoot($resolved);
+        $this->assertNoSymlinkPathComponents($this->storageRoot);
+
+        if (! is_writable($this->storageRoot)) {
+            throw new RuntimeException('External backup directory is not writable by the LibreNMS OS user: ' . $this->storageRoot);
+        }
+
+        $this->assertSameFilesystem($this->storageRoot);
+    }
+
+    private function assertNoSymlinkPathComponents(string $path): void
+    {
+        $current = $path;
+
+        while ($current !== '' && dirname($current) !== $current) {
+            if (is_link($current)) {
+                throw new RuntimeException('External backup path must not contain symbolic links: ' . $current);
+            }
+
+            $current = dirname($current);
+        }
+    }
+
+    private function assertSameFilesystem(string $path): void
+    {
+        $pluginStat = @stat($this->pluginRoot);
+        $pathStat = @stat($path);
+
+        if (! is_array($pluginStat) || ! is_array($pathStat) || $pluginStat['dev'] !== $pathStat['dev']) {
+            throw new RuntimeException('External backup and staging directory must be on the same filesystem as app/Plugins for atomic rename.');
+        }
+    }
+
+    private function migrateLegacyPluginDirectories(): void
+    {
+        $moves = [];
+
+        foreach (new FilesystemIterator($this->parentDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
+            $name = $entry->getFilename();
+
+            if ($name === 'IdfDashboard' || ! self::isLegacyPluginDirectoryName($name)) {
+                continue;
+            }
+
+            if (! $entry->isDir() || $entry->isLink()) {
+                throw new RuntimeException('Legacy plugin path is not a safe directory and was not moved: ' . $entry->getPathname());
+            }
+
+            $destination = $this->storageRoot . DIRECTORY_SEPARATOR . $name;
+
+            if (file_exists($destination) || is_link($destination)) {
+                throw new RuntimeException('Legacy plugin directory destination already exists; nothing was moved: ' . $destination);
+            }
+
+            $moves[] = [$entry->getPathname(), $destination];
+        }
+
+        foreach ($moves as [$source, $destination]) {
+            if (! rename($source, $destination)) {
+                throw new RuntimeException('Unable to move legacy plugin directory outside app/Plugins: ' . $source);
+            }
+
+            $message = 'Moved legacy plugin directory: ' . $source . ' -> ' . $destination;
+            $this->audit('legacy_directory_moved', Version::VERSION, Version::VERSION, $message);
+            fwrite(STDOUT, $message . PHP_EOL);
+        }
+    }
+
+    public static function isLegacyPluginDirectoryName(string $name): bool
+    {
+        return preg_match('/^\\.?IdfDashboard\\.(?:backup-|old|new|failed|rollback|pending|staging)/', $name) === 1;
+    }
+
+    public static function executionUserIsAllowed(int $effectiveUser, int|false $owner, bool $diagnostic): bool
+    {
+        return $diagnostic || ($owner !== false && $effectiveUser !== 0 && $effectiveUser === $owner);
+    }
+
+    public static function lockOpenFailureMessage(?string $warning): string
+    {
+        $detail = $warning !== null && trim($warning) !== '' ? ': ' . trim($warning) : '';
+
+        return 'Unable to create or open the external update lock' . $detail;
+    }
+
+    private function assertPluginTreeClean(): void
+    {
+        foreach (new FilesystemIterator($this->parentDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
+            if (! $entry->isDir() && ! $entry->isLink()) {
+                continue;
+            }
+
+            $name = $entry->getFilename();
+
+            if ($name !== 'IdfDashboard'
+                && preg_match('/^\\.?IdfDashboard(?:[.\\-_].*)?$/', $name) === 1
+            ) {
+                throw new RuntimeException('Unsafe alternate IdfDashboard directory remains inside app/Plugins: ' . $entry->getPathname());
+            }
+        }
+
+        if (! is_dir($this->pluginRoot) || is_link($this->pluginRoot)) {
+            throw new RuntimeException('The active IdfDashboard directory is missing or unsafe.');
+        }
+    }
+
     private function acquireLock()
     {
-        $path = $this->parentDirectory . DIRECTORY_SEPARATOR . '.IdfDashboard-update.lock';
-        $handle = fopen($path, 'c');
+        $path = $this->storageRoot . DIRECTORY_SEPARATOR . '.IdfDashboard-update.lock';
 
-        if ($handle === false || ! flock($handle, LOCK_EX | LOCK_NB)) {
+        if (is_link($path) || (file_exists($path) && ! is_file($path))) {
+            throw new RuntimeException('IdfDashboard update lock is corrupt or unsafe: ' . $path);
+        }
+
+        $warning = null;
+        set_error_handler(static function (int $severity, string $message) use (&$warning): bool {
+            $warning = $message;
+
+            return true;
+        });
+
+        try {
+            $handle = fopen($path, 'c+');
+        } finally {
+            restore_error_handler();
+        }
+
+        if ($handle === false) {
+            throw new RuntimeException(self::lockOpenFailureMessage($warning));
+        }
+
+        if (! flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
             throw new RuntimeException('Another IdfDashboard update is already running.');
         }
 
-        @chmod($path, 0640);
+        rewind($handle);
+        $existing = stream_get_contents($handle);
+
+        if (is_string($existing) && trim($existing) !== '') {
+            $metadata = json_decode($existing, true);
+
+            if (! is_array($metadata) || ! isset($metadata['pid'], $metadata['started_at'])) {
+                flock($handle, LOCK_UN);
+                fclose($handle);
+                throw new RuntimeException('IdfDashboard update lock is corrupt; remove it only after confirming no update is active: ' . $path);
+            }
+        }
+
+        $metadata = json_encode([
+            'pid' => getmypid(),
+            'started_at' => gmdate(DATE_ATOM),
+        ], JSON_UNESCAPED_SLASHES);
+        ftruncate($handle, 0);
+        rewind($handle);
+
+        if (! is_string($metadata) || fwrite($handle, $metadata . PHP_EOL) === false || ! fflush($handle)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            throw new RuntimeException('Unable to write metadata to the external update lock.');
+        }
+
+        if (! chmod($path, 0640)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            throw new RuntimeException('Unable to secure permissions on the external update lock.');
+        }
 
         return $handle;
     }
 
-    private function assertInstallPermissions(): void
+    private function assertExecutionUser(bool $diagnostic): void
     {
-        if (! is_writable($this->pluginRoot) || ! is_writable($this->parentDirectory)) {
-            throw new RuntimeException('Plugin and parent directory must be writable by the LibreNMS OS user.');
+        if ($diagnostic || ! function_exists('posix_geteuid')) {
+            return;
         }
 
-        if (function_exists('posix_geteuid')) {
-            $effectiveUser = posix_geteuid();
-            $owner = fileowner($this->pluginRoot);
+        $effectiveUser = posix_geteuid();
+        $owner = fileowner($this->pluginRoot);
 
-            if ($effectiveUser !== 0 && $effectiveUser !== $owner) {
-                throw new RuntimeException('Run the updater as the plugin owner (normally librenms), not the web user.');
-            }
+        if (! self::executionUserIsAllowed($effectiveUser, $owner, false)) {
+            throw new RuntimeException('Install mode must run as the plugin owner (normally librenms), never as root or a web user.');
+        }
+    }
+
+    private function assertInstallPermissions(bool $diagnostic): void
+    {
+        if (! is_readable($this->pluginRoot)) {
+            throw new RuntimeException('Plugin directory must be readable by the LibreNMS OS user.');
+        }
+
+        if (! $diagnostic && (! is_writable($this->pluginRoot) || ! is_writable($this->parentDirectory))) {
+            throw new RuntimeException('Plugin and app/Plugins must be writable by the LibreNMS OS user.');
         }
     }
 
@@ -1033,26 +1393,52 @@ HELP);
         return $path;
     }
 
-    private function pruneBackups(int $keep): void
+    private function pruneBackups(int $keep, string $protectedBackup): void
     {
         $backups = [];
 
-        foreach (new FilesystemIterator($this->parentDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
-            if ($entry->isDir()
-                && ! $entry->isLink()
-                && preg_match(
+        $this->assertNoSymlinkPathComponents($this->storageRoot);
+
+        if (is_link($this->storageRoot)) {
+            throw new RuntimeException('Refusing retention in a symbolic-link backup directory.');
+        }
+
+        foreach (new FilesystemIterator($this->storageRoot, FilesystemIterator::SKIP_DOTS) as $entry) {
+            if (preg_match(
                     '/^IdfDashboard\.backup-\d{8}-\d{6}-v\d+\.\d+\.\d+$/',
                     $entry->getFilename()
-                )
+                ) === 1
             ) {
+                if (! $entry->isDir() || $entry->isLink()) {
+                    throw new RuntimeException('Refusing retention because a backup entry is unsafe: ' . $entry->getPathname());
+                }
+
                 $backups[$entry->getFilename()] = $entry->getPathname();
             }
         }
 
-        foreach (self::backupsToPrune(array_keys($backups), $keep) as $name) {
+        $protectedName = basename($protectedBackup);
+
+        foreach (self::backupsToPrune(array_keys($backups), $keep, $protectedName) as $name) {
             $backup = $backups[$name];
-            $this->removeTree($backup, $this->parentDirectory);
+            $this->assertTreeContainsNoSymlinks($backup);
+            $this->removeTree($backup, $this->storageRoot);
             $this->audit('backup_pruned', Version::VERSION, Version::VERSION, 'Removed: ' . basename($backup));
+            fwrite(STDOUT, 'Removed expired external backup: ' . $backup . PHP_EOL);
+        }
+    }
+
+    private function assertTreeContainsNoSymlinks(string $root): void
+    {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($iterator as $entry) {
+            if ($entry->isLink()) {
+                throw new RuntimeException('Refusing retention because backup contains a symbolic link: ' . $entry->getPathname());
+            }
         }
     }
 
@@ -1116,6 +1502,12 @@ HELP);
             'reject_git_metadata' => ! self::isSafeArchivePath('.gitattributes'),
             'trusted_download' => self::isTrustedDownloadUrl('https://api.github.com/repos/devilrob/IdfDashboard/releases'),
             'reject_untrusted_download' => ! self::isTrustedDownloadUrl('https://example.com/payload.zip'),
+            'legacy_backup_detected' => self::isLegacyPluginDirectoryName('IdfDashboard.backup-20260804-203726-v1.0.1'),
+            'legacy_pending_detected' => self::isLegacyPluginDirectoryName('.IdfDashboard.pending-deadbeef'),
+            'active_directory_preserved' => ! self::isLegacyPluginDirectoryName('IdfDashboard'),
+            'permission_message' => str_contains(self::lockOpenFailureMessage('Permission denied'), 'Permission denied'),
+            'wrong_user_rejected' => ! self::executionUserIsAllowed(1001, 1000, false),
+            'diagnostic_user_allowed' => self::executionUserIsAllowed(1001, 1000, true),
             'backup_retention' => self::backupsToPrune([
                 'IdfDashboard.backup-20260804-120000-v1.0.0',
                 'IdfDashboard.backup-20260803-120000-v0.9.0',

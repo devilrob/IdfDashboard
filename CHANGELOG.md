@@ -2,6 +2,23 @@
 
 All notable changes follow semantic versioning.
 
+## [1.0.2] - 2026-08-04
+
+### Security
+
+- Corrected the critical backup location: backups, staging, rollback evidence,
+  locks and audit logs now stay in external storage, defaulting to
+  `/opt/librenms/plugin-backups/IdfDashboard`, never inside `app/Plugins`.
+- Prevented LibreNMS outages caused by `PluginProvider` scanning backup or
+  temporary IdfDashboard directories as PHP plugins.
+- Added defensive migration of recognized legacy backup, old, new, failed,
+  rollback and pending directories out of `app/Plugins`; ambiguous or unsafe
+  paths abort without deletion.
+- Improved lock diagnostics so contention, permission denial and corrupt locks
+  have distinct messages.
+- Added same-filesystem atomic activation and automatic rollback from a
+  validated external backup while retaining failed-package evidence externally.
+
 ## [1.0.1] - 2026-08-04
 
 ### Fixed
