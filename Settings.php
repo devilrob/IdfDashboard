@@ -40,9 +40,12 @@ class Settings extends SettingsHook
                 $forceUpdateCheck
             ),
             'updateCheckUrl' => request()->fullUrlWithQuery(['idf_check_updates' => 1]),
-            'updateCommand' => 'sudo -u librenms -- php '
+            'updateDryRunCommand' => 'php '
                 . base_path('app/Plugins/IdfDashboard/bin/update.php')
-                . ' --install',
+                . ' --dry-run',
+            'updateCommand' => 'php '
+                . base_path('app/Plugins/IdfDashboard/bin/update.php')
+                . ' --install --keep-backups=5',
             'pluginVersion' => Version::VERSION,
         ];
     }

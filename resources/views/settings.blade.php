@@ -35,6 +35,9 @@
                 LibreNMS operating-system user; the CLI validates the release, checksum,
                 package structure and PHP syntax, then performs an atomic update with rollback.
             </div>
+            <div class="idf-update-command-label">Validate without activation:</div>
+            <code class="idf-update-command">{{ $updateDryRunCommand }}</code>
+            <div class="idf-update-command-label">Install after validation:</div>
             <code class="idf-update-command">{{ $updateCommand }}</code>
         </div>
 
@@ -185,6 +188,12 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         max-width: 680px;
         overflow-wrap: anywhere;
         padding: 6px 8px;
+    }
+
+    .idf-update-command-label {
+        color: #5f6b76;
+        font-size: 12px;
+        margin-top: 8px;
     }
 
     .idf-update-available {

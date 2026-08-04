@@ -11,12 +11,17 @@ All notable changes follow semantic versioning.
 - CLI-only release updater with HTTPS/repository/tag/asset/SHA-256 validation,
   package validation, PHP lint, locking, atomic activation, audit logging,
   backup retention and automatic rollback.
+- Updater dry-run/help modes, configurable backup retention and explicit-only
+  downgrade/reinstall safety overrides.
 - GitHub Actions validation and tag-only release packaging.
 
 ### Fixed
 
-- Enforced `device.viewAny` for dashboard and menu access and `plugin.admin`
-  for plugin Settings.
+- Enforced LibreNMS's `viewAny` Device policy for dashboard and menu access and
+  `plugin.admin` for plugin Settings.
+- Restricted the initial device query with LibreNMS's official
+  `Device::hasAccess($user)` scope, so every downstream query, location,
+  summary and refresh is derived only from authorized device IDs.
 - Applied Settings changes, refresh interval and animation policy to already
   open dashboards during soft refresh.
 - Unified `default_problem_stale` across severity, cards, counters, filters,

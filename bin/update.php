@@ -21,6 +21,7 @@ final class IdfDashboardUpdater
         'Page.php',
         'Settings.php',
         'Support/Config.php',
+        'Support/DeviceAccess.php',
         'Support/ProblemPolicy.php',
         'Support/UpdateStatus.php',
         'Support/Version.php',
@@ -30,10 +31,17 @@ final class IdfDashboardUpdater
         'bin/update.php',
     ];
 
-    private const PRESERVED_LOCAL_PATHS = [
-        '.env',
-        'config.local.php',
-        'storage',
+    private const OPTIONAL_PATHS = [
+        'CHANGELOG.md',
+        'README.md',
+        'LICENSE',
+    ];
+
+    private const ALLOWED_DIRECTORIES = [
+        'Support',
+        'resources',
+        'resources/views',
+        'bin',
     ];
 
     private string $pluginRoot;
@@ -63,6 +71,12 @@ final class IdfDashboardUpdater
 
         $options = $this->parseOptions($arguments);
 
+        if ($options['help']) {
+            $this->printHelp();
+
+            return 0;
+        }
+
         if ($options['self_test']) {
             return $this->selfTest();
         }
@@ -75,19 +89,42 @@ final class IdfDashboardUpdater
         fwrite(STDOUT, 'Latest stable: v' . $version . PHP_EOL);
         fwrite(STDOUT, 'Channel: ' . Version::CHANNEL . PHP_EOL);
 
-        if (! $options['install']) {
+        if (! $options['install'] && ! $options['dry_run']) {
             fwrite(STDOUT, $available ? 'Update available.' . PHP_EOL : 'Already current.' . PHP_EOL);
 
             return 0;
         }
 
-        if (! $available && $options['tag'] === null) {
+        $comparison = version_compare($version, Version::VERSION);
+
+        if ($comparison < 0 && ! $options['allow_downgrade']) {
+            throw new RuntimeException('Downgrade refused. Use --allow-downgrade with an explicit --tag.');
+        }
+
+        if ($comparison === 0 && $options['install'] && $options['tag'] === null) {
             fwrite(STDOUT, 'No newer stable release to install.' . PHP_EOL);
 
             return 0;
         }
 
-        return $this->install($release, $version);
+        if ($comparison === 0 && $options['install'] && ! $options['reinstall']) {
+            throw new RuntimeException('Reinstall refused. Use --reinstall with an explicit --tag.');
+        }
+
+        if ($comparison > 0 && $options['reinstall']) {
+            throw new RuntimeException('--reinstall is only valid for the currently installed version.');
+        }
+
+        if ($comparison >= 0 && $options['allow_downgrade']) {
+            throw new RuntimeException('--allow-downgrade is only valid for an older version.');
+        }
+
+        return $this->install(
+            $release,
+            $version,
+            $options['dry_run'],
+            $options['keep_backups']
+        );
     }
 
     public static function isStableTag(string $tag): bool
@@ -115,15 +152,19 @@ final class IdfDashboardUpdater
 
     public static function checksumFor(string $contents, string $archiveName): string
     {
-        foreach (preg_split('/\R/', $contents) ?: [] as $line) {
-            if (preg_match('/^([a-f0-9]{64})\s+\*?(.+)$/i', trim($line), $matches)
-                && hash_equals($archiveName, trim($matches[2]))
-            ) {
-                return strtolower($matches[1]);
-            }
+        $lines = array_values(array_filter(
+            preg_split('/\R/', $contents) ?: [],
+            fn (string $line): bool => trim($line) !== ''
+        ));
+
+        if (count($lines) === 1
+            && preg_match('/^([a-f0-9]{64})\s+\*?(.+)$/i', trim($lines[0]), $matches)
+            && hash_equals($archiveName, trim($matches[2]))
+        ) {
+            return strtolower($matches[1]);
         }
 
-        throw new RuntimeException('SHA256SUMS does not contain the expected archive.');
+        throw new RuntimeException('SHA256SUMS must contain exactly the expected archive.');
     }
 
     public static function isSafeArchivePath(string $path): bool
@@ -150,7 +191,43 @@ final class IdfDashboardUpdater
 
         $top = explode('/', $trimmed)[0];
 
-        return ! in_array($top, ['.git', '.claude', 'backups'], true);
+        return ! in_array($top, [
+            '.git',
+            '.github',
+            '.claude',
+            '.env',
+            'backups',
+            'config.local.php',
+            'storage',
+            'tests',
+        ], true);
+    }
+
+    public static function isTrustedDownloadUrl(string $url): bool
+    {
+        $parts = parse_url($url);
+
+        return is_array($parts)
+            && ($parts['scheme'] ?? '') === 'https'
+            && ! isset($parts['user'])
+            && ! isset($parts['pass'])
+            && self::isTrustedGithubHost((string) ($parts['host'] ?? ''));
+    }
+
+    public static function backupsToPrune(array $names, int $keep): array
+    {
+        if ($keep < 1 || $keep > 50) {
+            throw new RuntimeException('Backup retention must be between 1 and 50.');
+        }
+
+        $backups = array_values(array_filter(
+            $names,
+            fn (mixed $name): bool => is_string($name)
+                && preg_match('/^IdfDashboard\.backup-\d{8}-\d{6}-v\d+\.\d+\.\d+$/', $name) === 1
+        ));
+        rsort($backups, SORT_STRING);
+
+        return array_slice($backups, $keep);
     }
 
     public function validateReleasePackage(string $root, string $expectedVersion): void
@@ -169,12 +246,20 @@ final class IdfDashboardUpdater
     {
         $options = [
             'install' => false,
+            'dry_run' => false,
             'tag' => null,
             'self_test' => false,
+            'help' => false,
+            'allow_downgrade' => false,
+            'reinstall' => false,
+            'keep_backups' => 5,
         ];
+
+        $explicitCheck = false;
 
         foreach (array_slice($arguments, 1) as $argument) {
             if ($argument === '--check') {
+                $explicitCheck = true;
                 continue;
             }
 
@@ -183,8 +268,39 @@ final class IdfDashboardUpdater
                 continue;
             }
 
+            if ($argument === '--dry-run') {
+                $options['dry_run'] = true;
+                continue;
+            }
+
             if ($argument === '--self-test') {
                 $options['self_test'] = true;
+                continue;
+            }
+
+            if ($argument === '--help' || $argument === '-h') {
+                $options['help'] = true;
+                continue;
+            }
+
+            if ($argument === '--allow-downgrade') {
+                $options['allow_downgrade'] = true;
+                continue;
+            }
+
+            if ($argument === '--reinstall') {
+                $options['reinstall'] = true;
+                continue;
+            }
+
+            if (str_starts_with($argument, '--keep-backups=')) {
+                $value = substr($argument, 15);
+
+                if (! ctype_digit($value) || (int) $value < 1 || (int) $value > 50) {
+                    throw new RuntimeException('--keep-backups must be between 1 and 50.');
+                }
+
+                $options['keep_backups'] = (int) $value;
                 continue;
             }
 
@@ -202,7 +318,48 @@ final class IdfDashboardUpdater
             throw new RuntimeException('Unknown argument: ' . $argument);
         }
 
+        if ($options['install'] && $options['dry_run']) {
+            throw new RuntimeException('Choose either --install or --dry-run.');
+        }
+
+        if ($explicitCheck && ($options['install'] || $options['dry_run'])) {
+            throw new RuntimeException('--check cannot be combined with --install or --dry-run.');
+        }
+
+        if (($options['allow_downgrade'] || $options['reinstall']) && $options['tag'] === null) {
+            throw new RuntimeException('--allow-downgrade and --reinstall require an explicit --tag.');
+        }
+
+        if (($options['allow_downgrade'] || $options['reinstall'])
+            && ! $options['install']
+            && ! $options['dry_run']
+        ) {
+            throw new RuntimeException('Version override flags require --install or --dry-run.');
+        }
+
         return $options;
+    }
+
+    private function printHelp(): void
+    {
+        fwrite(STDOUT, <<<'HELP'
+IdfDashboard stable release updater
+
+Usage:
+  php bin/update.php --check [--tag=vMAJOR.MINOR.PATCH]
+  php bin/update.php --dry-run [--tag=vMAJOR.MINOR.PATCH]
+  php bin/update.php --install [--tag=vMAJOR.MINOR.PATCH] [--keep-backups=5]
+  php bin/update.php --self-test
+
+Safety overrides (an explicit --tag is required):
+  --allow-downgrade   Permit installing or validating an older version.
+  --reinstall         Permit reinstalling or validating the installed version.
+
+The command only consumes stable GitHub release assets. --dry-run downloads,
+checks SHA-256, extracts, validates structure and lints PHP without activation.
+Run it directly as the LibreNMS operating-system user.
+HELP);
+        fwrite(STDOUT, PHP_EOL);
     }
 
     private function fetchRelease(?string $tag): array
@@ -276,14 +433,21 @@ final class IdfDashboardUpdater
         }
     }
 
-    private function install(array $release, string $version): int
+    private function install(
+        array $release,
+        string $version,
+        bool $dryRun,
+        int $keepBackups
+    ): int
     {
         $lock = $this->acquireLock();
-        $tempDirectory = $this->createTempDirectory();
+        $tempDirectory = null;
 
         try {
+            $tempDirectory = $this->createTempDirectory();
             $this->assertInstallPermissions();
-            $this->audit('update_started', Version::VERSION, $version, 'Stable CLI update started.');
+            $operation = $dryRun ? 'dry_run' : 'update';
+            $this->audit($operation . '_started', Version::VERSION, $version, 'Stable CLI operation started.');
 
             $archiveName = self::archiveName($version);
             $archiveAsset = $this->releaseAsset($release, $archiveName);
@@ -309,40 +473,64 @@ final class IdfDashboardUpdater
             $this->validatePackage($extracted, $version);
             $this->lintPhp($extracted);
 
+            if ($dryRun) {
+                $this->audit('dry_run_succeeded', Version::VERSION, $version, 'Package validation completed without activation.');
+                fwrite(STDOUT, 'Dry run successful for v' . $version . '; no files were activated.' . PHP_EOL);
+
+                return 0;
+            }
+
             $backup = $this->activateAtomically($extracted, $version);
             $this->audit('update_succeeded', Version::VERSION, $version, 'Backup: ' . $backup);
             fwrite(STDOUT, 'Updated successfully to v' . $version . PHP_EOL);
             fwrite(STDOUT, 'Backup retained at: ' . $backup . PHP_EOL);
 
+            try {
+                $this->pruneBackups($keepBackups);
+            } catch (Throwable $exception) {
+                $this->audit('backup_retention_failed', Version::VERSION, $version, $exception->getMessage());
+                fwrite(STDERR, 'Warning: backup retention failed: ' . $exception->getMessage() . PHP_EOL);
+            }
+
             return 0;
         } catch (Throwable $exception) {
-            $this->audit('update_failed', Version::VERSION, $version, $exception->getMessage());
+            $this->audit(($dryRun ? 'dry_run' : 'update') . '_failed', Version::VERSION, $version, $exception->getMessage());
             throw $exception;
         } finally {
-            $this->removeTree($tempDirectory, dirname($tempDirectory));
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            try {
+                if ($tempDirectory !== null) {
+                    $this->removeTree($tempDirectory, dirname($tempDirectory));
+                }
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
         }
     }
 
     private function releaseAsset(array $release, string $name): array
     {
-        foreach ($release['assets'] as $asset) {
-            if (is_array($asset) && hash_equals($name, (string) ($asset['name'] ?? ''))) {
-                $url = (string) ($asset['browser_download_url'] ?? '');
-                $tag = (string) $release['tag_name'];
-                $expected = 'https://github.com/' . Version::REPOSITORY
-                    . '/releases/download/' . $tag . '/' . rawurlencode($name);
+        $matches = array_values(array_filter(
+            $release['assets'],
+            fn (mixed $asset): bool => is_array($asset)
+                && hash_equals($name, (string) ($asset['name'] ?? ''))
+        ));
 
-                if (! hash_equals($expected, $url)) {
-                    throw new RuntimeException('Unexpected release asset URL for ' . $name);
-                }
-
-                return $asset;
-            }
+        if (count($matches) !== 1) {
+            throw new RuntimeException('Required release asset must exist exactly once: ' . $name);
         }
 
-        throw new RuntimeException('Required release asset is missing: ' . $name);
+        $asset = $matches[0];
+        $url = (string) ($asset['browser_download_url'] ?? '');
+        $tag = (string) $release['tag_name'];
+        $expected = 'https://github.com/' . Version::REPOSITORY
+            . '/releases/download/' . $tag . '/' . rawurlencode($name);
+
+        if (! hash_equals($expected, $url)) {
+            throw new RuntimeException('Unexpected release asset URL for ' . $name);
+        }
+
+        return $asset;
     }
 
     private function requestJson(string $url): array
@@ -376,6 +564,11 @@ final class IdfDashboardUpdater
         }
 
         $this->download((string) $asset['browser_download_url'], $destination, $maxBytes);
+
+        if (filesize($destination) !== $declaredSize) {
+            @unlink($destination);
+            throw new RuntimeException('Downloaded asset size does not match GitHub release metadata.');
+        }
     }
 
     private function download(string $url, string $destination, int $maxBytes): void
@@ -384,69 +577,80 @@ final class IdfDashboardUpdater
             throw new RuntimeException('The PHP curl extension is required.');
         }
 
-        $parts = parse_url($url);
+        $currentUrl = $url;
 
-        if (! is_array($parts)
-            || ($parts['scheme'] ?? '') !== 'https'
-            || ! self::isTrustedGithubHost((string) ($parts['host'] ?? ''))
-        ) {
-            throw new RuntimeException('Only trusted GitHub HTTPS downloads are permitted.');
-        }
+        for ($hop = 0; $hop <= 5; $hop++) {
+            self::assertTrustedDownloadUrl($currentUrl);
+            $redirect = null;
+            $handle = fopen($destination, 'wb');
 
-        $handle = fopen($destination, 'wb');
+            if ($handle === false) {
+                throw new RuntimeException('Unable to create download destination.');
+            }
 
-        if ($handle === false) {
-            throw new RuntimeException('Unable to create download destination.');
-        }
+            $curl = curl_init($currentUrl);
 
-        $curl = curl_init($url);
+            if ($curl === false) {
+                fclose($handle);
+                throw new RuntimeException('Unable to initialize curl.');
+            }
 
-        if ($curl === false) {
+            curl_setopt_array($curl, [
+                CURLOPT_FILE => $handle,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_FAILONERROR => false,
+                CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+                CURLOPT_USERAGENT => 'IdfDashboard/' . Version::VERSION,
+                CURLOPT_HTTPHEADER => ['Accept: application/vnd.github+json'],
+                CURLOPT_NOPROGRESS => false,
+                CURLOPT_XFERINFOFUNCTION => static function ($curl, $total, $downloaded) use ($maxBytes): int {
+                    return ($total > $maxBytes || $downloaded > $maxBytes) ? 1 : 0;
+                },
+                CURLOPT_HEADERFUNCTION => static function ($curl, string $header) use (&$redirect): int {
+                    if (preg_match('/^Location:\s*(\S.*?)\s*$/i', trim($header), $matches)) {
+                        $redirect = $matches[1];
+                    }
+
+                    return strlen($header);
+                },
+            ]);
+
+            $success = curl_exec($curl);
+            $error = curl_error($curl);
+            $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+            curl_close($curl);
             fclose($handle);
-            throw new RuntimeException('Unable to initialize curl.');
+
+            if ($status >= 300 && $status < 400) {
+                @unlink($destination);
+
+                if (! is_string($redirect) || $redirect === '') {
+                    throw new RuntimeException('GitHub redirect did not provide a destination.');
+                }
+
+                $currentUrl = self::resolveRedirectUrl($currentUrl, $redirect);
+                continue;
+            }
+
+            $size = is_file($destination) ? filesize($destination) : false;
+
+            if ($success !== true || $status < 200 || $status >= 300) {
+                @unlink($destination);
+                throw new RuntimeException('HTTPS download failed: ' . ($error !== '' ? $error : 'HTTP ' . $status));
+            }
+
+            if (! is_int($size) || $size < 1 || $size > $maxBytes) {
+                @unlink($destination);
+                throw new RuntimeException('Downloaded file size is invalid or exceeds the safety limit.');
+            }
+
+            return;
         }
 
-        curl_setopt_array($curl, [
-            CURLOPT_FILE => $handle,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS => 5,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_FAILONERROR => true,
-            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
-            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS,
-            CURLOPT_USERAGENT => 'IdfDashboard/' . Version::VERSION,
-            CURLOPT_HTTPHEADER => ['Accept: application/vnd.github+json'],
-        ]);
-
-        $success = curl_exec($curl);
-        $error = curl_error($curl);
-        $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
-        $effectiveUrl = (string) curl_getinfo($curl, CURLINFO_EFFECTIVE_URL);
-        curl_close($curl);
-        fclose($handle);
-
-        $size = is_file($destination) ? filesize($destination) : false;
-
-        if ($success !== true || $status < 200 || $status >= 300) {
-            @unlink($destination);
-            throw new RuntimeException('HTTPS download failed: ' . ($error !== '' ? $error : 'HTTP ' . $status));
-        }
-
-        $effectiveParts = parse_url($effectiveUrl);
-
-        if (! is_array($effectiveParts)
-            || ($effectiveParts['scheme'] ?? '') !== 'https'
-            || ! self::isTrustedGithubHost((string) ($effectiveParts['host'] ?? ''))
-        ) {
-            @unlink($destination);
-            throw new RuntimeException('Download redirected outside trusted GitHub HTTPS hosts.');
-        }
-
-        if (! is_int($size) || $size < 1 || $size > $maxBytes) {
-            @unlink($destination);
-            throw new RuntimeException('Downloaded file size is invalid or exceeds the safety limit.');
-        }
+        @unlink($destination);
+        throw new RuntimeException('GitHub download exceeded the redirect limit.');
     }
 
     private function extractArchive(string $archive, string $destination): void
@@ -503,6 +707,37 @@ final class IdfDashboardUpdater
             || str_ends_with($host, '.githubusercontent.com');
     }
 
+    private static function assertTrustedDownloadUrl(string $url): void
+    {
+        if (! self::isTrustedDownloadUrl($url)) {
+            throw new RuntimeException('Only trusted GitHub HTTPS downloads are permitted.');
+        }
+    }
+
+    private static function resolveRedirectUrl(string $currentUrl, string $location): string
+    {
+        if (str_starts_with($location, 'https://')) {
+            self::assertTrustedDownloadUrl($location);
+
+            return $location;
+        }
+
+        if (! str_starts_with($location, '/')) {
+            throw new RuntimeException('Relative GitHub redirect format is not permitted.');
+        }
+
+        $current = parse_url($currentUrl);
+
+        if (! is_array($current) || ! isset($current['host'])) {
+            throw new RuntimeException('Unable to resolve GitHub redirect.');
+        }
+
+        $resolved = 'https://' . $current['host'] . $location;
+        self::assertTrustedDownloadUrl($resolved);
+
+        return $resolved;
+    }
+
     private function validatePackage(string $root, string $expectedVersion): void
     {
         foreach (self::REQUIRED_PATHS as $path) {
@@ -511,19 +746,29 @@ final class IdfDashboardUpdater
             }
         }
 
-        foreach (new FilesystemIterator($root, FilesystemIterator::SKIP_DOTS) as $entry) {
-            if (! in_array($entry->getFilename(), [
-                'Menu.php',
-                'Page.php',
-                'Settings.php',
-                'Support',
-                'resources',
-                'bin',
-                'CHANGELOG.md',
-                'README.md',
-                'LICENSE',
-            ], true)) {
-                throw new RuntimeException('Unexpected top-level release path: ' . $entry->getFilename());
+        $allowedFiles = array_merge(self::REQUIRED_PATHS, self::OPTIONAL_PATHS);
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($iterator as $entry) {
+            $relative = str_replace(
+                DIRECTORY_SEPARATOR,
+                '/',
+                substr($entry->getPathname(), strlen($root) + 1)
+            );
+
+            if ($entry->isLink()) {
+                throw new RuntimeException('Symbolic links are not allowed in release packages.');
+            }
+
+            if ($entry->isFile() && ! in_array($relative, $allowedFiles, true)) {
+                throw new RuntimeException('Unexpected release file: ' . $relative);
+            }
+
+            if ($entry->isDir() && ! in_array($relative, self::ALLOWED_DIRECTORIES, true)) {
+                throw new RuntimeException('Unexpected release directory: ' . $relative);
             }
         }
 
@@ -571,7 +816,6 @@ final class IdfDashboardUpdater
         }
 
         $this->copyTree($extracted, $pending);
-        $this->preserveLocalPaths($pending);
         $this->applyMetadata($pending);
         $this->validatePackage($pending, $version);
         $this->lintPhp($pending);
@@ -582,8 +826,13 @@ final class IdfDashboardUpdater
         }
 
         if (! rename($pending, $this->pluginRoot)) {
-            @rename($backup, $this->pluginRoot);
+            $restored = @rename($backup, $this->pluginRoot);
             $this->removeTree($pending, $this->parentDirectory);
+
+            if (! $restored) {
+                throw new RuntimeException('Unable to activate or restore the plugin. Manual recovery required: ' . $backup);
+            }
+
             throw new RuntimeException('Unable to activate the prepared plugin; original restored.');
         }
 
@@ -610,28 +859,6 @@ final class IdfDashboardUpdater
         }
 
         return $backup;
-    }
-
-    private function preserveLocalPaths(string $pending): void
-    {
-        foreach (self::PRESERVED_LOCAL_PATHS as $relative) {
-            $source = $this->pluginRoot . DIRECTORY_SEPARATOR . $relative;
-            $destination = $pending . DIRECTORY_SEPARATOR . $relative;
-
-            if (! file_exists($source) || file_exists($destination)) {
-                continue;
-            }
-
-            if (is_link($source)) {
-                throw new RuntimeException('Refusing to preserve a symbolic link: ' . $relative);
-            }
-
-            if (is_dir($source)) {
-                $this->copyTree($source, $destination);
-            } elseif (! copy($source, $destination)) {
-                throw new RuntimeException('Unable to preserve local file: ' . $relative);
-            }
-        }
     }
 
     private function copyTree(string $source, string $destination): void
@@ -803,6 +1030,29 @@ final class IdfDashboardUpdater
         return $path;
     }
 
+    private function pruneBackups(int $keep): void
+    {
+        $backups = [];
+
+        foreach (new FilesystemIterator($this->parentDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
+            if ($entry->isDir()
+                && ! $entry->isLink()
+                && preg_match(
+                    '/^IdfDashboard\.backup-\d{8}-\d{6}-v\d+\.\d+\.\d+$/',
+                    $entry->getFilename()
+                )
+            ) {
+                $backups[$entry->getFilename()] = $entry->getPathname();
+            }
+        }
+
+        foreach (self::backupsToPrune(array_keys($backups), $keep) as $name) {
+            $backup = $backups[$name];
+            $this->removeTree($backup, $this->parentDirectory);
+            $this->audit('backup_pruned', Version::VERSION, Version::VERSION, 'Removed: ' . basename($backup));
+        }
+    }
+
     private function removeTree(string $path, string $expectedParent): void
     {
         if (! file_exists($path)) {
@@ -859,6 +1109,13 @@ final class IdfDashboardUpdater
             'safe_archive_path' => self::isSafeArchivePath('Support/Version.php'),
             'reject_traversal' => ! self::isSafeArchivePath('../Settings.php'),
             'reject_ambiguous_path' => ! self::isSafeArchivePath('./Settings.php'),
+            'reject_ci_directory' => ! self::isSafeArchivePath('.github/workflows/release.yml'),
+            'trusted_download' => self::isTrustedDownloadUrl('https://api.github.com/repos/devilrob/IdfDashboard/releases'),
+            'reject_untrusted_download' => ! self::isTrustedDownloadUrl('https://example.com/payload.zip'),
+            'backup_retention' => self::backupsToPrune([
+                'IdfDashboard.backup-20260804-120000-v1.0.0',
+                'IdfDashboard.backup-20260803-120000-v0.9.0',
+            ], 1) === ['IdfDashboard.backup-20260803-120000-v0.9.0'],
         ];
 
         foreach ($tests as $name => $passed) {

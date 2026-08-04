@@ -87,8 +87,47 @@ $assert(
 $assert(IdfDashboardUpdater::isSafeArchivePath('Support/Version.php'), 'updater accepts safe archive path');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('../Page.php'), 'updater rejects ZIP traversal');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('Support//Version.php'), 'updater rejects ambiguous ZIP path');
+$assert(! IdfDashboardUpdater::isSafeArchivePath('.github/workflows/release.yml'), 'updater rejects CI files');
+$assert(! IdfDashboardUpdater::isSafeArchivePath('tests/run.php'), 'updater rejects test files');
+$assert(
+    IdfDashboardUpdater::isTrustedDownloadUrl('https://release-assets.githubusercontent.com/file'),
+    'updater accepts trusted GitHub asset host'
+);
+$assert(
+    ! IdfDashboardUpdater::isTrustedDownloadUrl('https://example.com/payload.zip'),
+    'updater rejects untrusted redirect host'
+);
+
+$extraChecksumRejected = false;
+
+try {
+    IdfDashboardUpdater::checksumFor(
+        str_repeat('a', 64) . "  IdfDashboard-v1.2.3.zip\n"
+            . str_repeat('b', 64) . '  extra.zip',
+        'IdfDashboard-v1.2.3.zip'
+    );
+} catch (RuntimeException) {
+    $extraChecksumRejected = true;
+}
+
+$assert($extraChecksumRejected, 'updater rejects extra checksum entries');
+$assert(
+    IdfDashboardUpdater::backupsToPrune([
+        'IdfDashboard.backup-20260803-120000-v0.9.0',
+        'not-a-plugin-backup',
+        'IdfDashboard.backup-20260804-120000-v1.0.0',
+    ], 1) === ['IdfDashboard.backup-20260803-120000-v0.9.0'],
+    'backup retention keeps newest matching backup'
+);
 
 $pageSource = (string) file_get_contents($root . '/Page.php');
+$deviceAccessSource = (string) file_get_contents($root . '/Support/DeviceAccess.php');
+$menuSource = (string) file_get_contents($root . '/Menu.php');
+$assert(str_contains($deviceAccessSource, 'Device::query()->hasAccess($user)'), 'LibreNMS device access scope is the SQL boundary');
+$assert(str_contains($pageSource, 'DeviceAccess::query($user)'), 'dashboard starts from authorized devices');
+$assert(str_contains($pageSource, "can('viewAny', Device::class)"), 'page uses LibreNMS Device policy');
+$assert(str_contains($menuSource, "can('viewAny', Device::class)"), 'menu uses LibreNMS Device policy');
+$assert(! str_contains($pageSource, "DB::table('devices"), 'dashboard has no unscoped devices query');
 $assert(str_contains($pageSource, 'ROW_NUMBER() OVER'), 'event query ranks rows in SQL');
 $assert(str_contains($pageSource, 'RECENT_EVENTS_GLOBAL_LIMIT'), 'event query has global ceiling');
 
@@ -102,5 +141,20 @@ $assert(
     preg_match('/^\d+\.\d+\.\d+$/', Version::VERSION) === 1,
     'installed version is semantic'
 );
+
+$versionDeclarations = 0;
+
+foreach (array_merge(
+    glob($root . '/*.php') ?: [],
+    glob($root . '/Support/*.php') ?: [],
+    glob($root . '/bin/*.php') ?: []
+) as $sourceFile) {
+    $versionDeclarations += preg_match_all(
+        "/public const VERSION\s*=\s*'\d+\.\d+\.\d+';/",
+        (string) file_get_contents($sourceFile)
+    );
+}
+
+$assert($versionDeclarations === 1, 'plugin version has one source declaration');
 
 exit($failures === 0 ? 0 : 1);

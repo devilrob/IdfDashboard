@@ -7,7 +7,11 @@ LibreNMS infrastructure-health dashboard for NOC and wall-display use.
 - Current LibreNMS plugin architecture.
 - PHP 8.2 or newer.
 - MySQL 8 or MariaDB 10.2+ for the per-device event-log window query.
-- The viewing user must have `device.viewAny`; plugin Settings require `plugin.admin`.
+- The viewing user must pass LibreNMS's `viewAny` Device policy; plugin Settings
+  require `plugin.admin`.
+  Device visibility is always constrained in SQL through LibreNMS's official
+  `Device::hasAccess($user)` scope. Admin and global-read roles see all devices;
+  itemized users see only their authorized devices and locations.
 
 Install the directory as `/opt/librenms/app/Plugins/IdfDashboard`, enable it in
 LibreNMS, and configure it from the plugin Settings page. Plugin settings remain
@@ -21,6 +25,7 @@ CLI-only and disabled by default:
 
 ```bash
 sudo -u librenms -- php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --check
+sudo -u librenms -- php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --dry-run
 sudo -u librenms -- php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --install
 ```
 
@@ -31,6 +36,13 @@ PHP syntax, then swaps the plugin atomically on the same filesystem. It locks
 concurrent updates, retains a timestamped sibling backup, clears LibreNMS's
 compiled views, records JSON-lines audit events in `IdfDashboard-update.log`,
 and rolls back automatically if activation fails.
+
+`--dry-run` performs every download and validation step without activation.
+Backups default to the five newest matching directories and can be configured
+with `--keep-backups=1..50`. Downgrades require both an explicit tag and
+`--allow-downgrade`; reinstalling the current version requires an explicit tag
+and `--reinstall`. Persistent plugin settings remain in LibreNMS's database;
+the release directory contains no local configuration or writable state.
 
 No code is downloaded from `main`, and downloaded PHP is linted but never
 executed before activation. Run the command as the plugin owner (`librenms`),
@@ -52,3 +64,17 @@ Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
 tag such as `v1.0.1`. GitHub Actions validates the tag/version match, runs PHP
 and JavaScript checks, builds the minimal plugin ZIP, generates `SHA256SUMS`,
 and publishes both assets to the stable GitHub release.
+
+## LibreNMS authorization integration test
+
+From a disposable LibreNMS checkout with its test database configured, install
+this plugin under `app/Plugins/IdfDashboard` and run:
+
+```bash
+DB_CONNECTION=testing_memory php vendor/bin/phpunit app/Plugins/IdfDashboard/tests/librenms/DeviceAccessTest.php
+```
+
+The test covers administrator, global-read, itemized user, empty device access,
+and a completely unprivileged user. It is intentionally not included in the
+standalone plugin CI because it requires LibreNMS's application, roles, schema,
+factories and database.
