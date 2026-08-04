@@ -24,7 +24,7 @@ jobs:
           - '8.4'
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up PHP
         uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
@@ -34,7 +34,7 @@ jobs:
           coverage: none
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
 
@@ -48,7 +48,12 @@ jobs:
         run: php bin/update.php --self-test
 
       - name: Test isolated updater activation and rollback
-        run: php tests/updater-integration.php
+        run: |
+          if [[ "${{ matrix.php }}" == "8.4" ]]; then
+            php tests/updater-integration.php --linux-upgrades
+          else
+            php tests/updater-integration.php
+          fi
 
       - name: Validate embedded JavaScript
         run: node tests/validate-js.mjs
@@ -56,16 +61,102 @@ jobs:
       - name: Check whitespace
         run: git diff --check
 
+  librenms-integration:
+    name: LibreNMS 26.8 integration
+    runs-on: ubuntu-24.04
+    services:
+      database:
+        image: mariadb:11.7
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_DATABASE: librenms_phpunit_78hunjuybybh
+          MYSQL_USER: librenms
+          MYSQL_PASSWORD: librenms
+        ports:
+          - 3306
+    steps:
+      - name: Check out plugin source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: plugin-source
+
+      - name: Check out supported LibreNMS 26.8
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: librenms/librenms
+          ref: 51344f722110350bb7301dde8b13bcf23ff65156
+          path: librenms
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      - name: Configure LibreNMS test database
+        working-directory: librenms
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+        run: |
+          cat > .env <<EOF
+          APP_KEY=base64:vHI+YHgkyCDad31iPEErGSNEOWO21wNzV+zyENKQv04=
+          APP_URL=http://127.0.0.1:8000
+          APP_ENV=testing
+          APP_DEBUG=true
+          DB_DRIVER=mysql
+          DB_HOST=127.0.0.1
+          DB_PORT=$DB_PORT
+          DB_DATABASE=librenms_phpunit_78hunjuybybh
+          DB_USERNAME=librenms
+          DB_PASSWORD=librenms
+          DB_TEST_DRIVER=mysql
+          DB_TEST_HOST=127.0.0.1
+          DB_TEST_PORT=$DB_PORT
+          DB_TEST_DATABASE=librenms_phpunit_78hunjuybybh
+          DB_TEST_USERNAME=librenms
+          DB_TEST_PASSWORD=librenms
+          EOF
+
+      - name: Install LibreNMS dependencies
+        working-directory: librenms
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Install plugin and its integration test
+        run: |
+          mkdir -p librenms/app/Plugins/IdfDashboard/Support librenms/app/Plugins/IdfDashboard/resources/views
+          cp plugin-source/Menu.php plugin-source/Page.php plugin-source/Settings.php librenms/app/Plugins/IdfDashboard/
+          cp plugin-source/Support/*.php librenms/app/Plugins/IdfDashboard/Support/
+          cp plugin-source/resources/views/*.blade.php librenms/app/Plugins/IdfDashboard/resources/views/
+          mkdir -p librenms/tests/Feature/Plugins/IdfDashboard
+          cp plugin-source/tests/librenms/DeviceAccessTest.php librenms/tests/Feature/Plugins/IdfDashboard/
+
+      - name: Prepare and migrate LibreNMS test database
+        working-directory: librenms
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+        run: |
+          mysqladmin -h127.0.0.1 -P"$DB_PORT" --user=librenms --password=librenms ping --wait=10
+          mysql -h127.0.0.1 -P"$DB_PORT" --user=librenms --password=librenms -e 'ALTER DATABASE librenms_phpunit_78hunjuybybh CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'
+          sqlite3 database/testing.sqlite ""
+          php artisan migrate --force
+
+      - name: Run plugin integration tests against LibreNMS 26.8
+        working-directory: librenms
+        run: vendor/bin/phpunit tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php
+
   release:
     name: Publish verified package
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: validate
+    needs:
+      - validate
+      - librenms-integration
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up PHP
         uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5

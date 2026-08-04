@@ -5,8 +5,14 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/bin/update.php';
 
 $sourceRoot = dirname(__DIR__);
-$networkInstall = in_array('--network-install-v1.0.1', $argv, true);
+$candidateVersion = \App\Plugins\IdfDashboard\Support\Version::VERSION;
+$linuxUpgrades = in_array('--linux-upgrades', $argv, true);
 $assertions = 0;
+
+if ($linuxUpgrades && DIRECTORY_SEPARATOR !== '/') {
+    fwrite(STDOUT, 'Bootstrapped candidate upgrades: SKIP (activation renames an executing directory and requires Linux).' . PHP_EOL);
+    $linuxUpgrades = false;
+}
 
 $assert = static function (bool $condition, string $message) use (&$assertions): void {
     $assertions++;
@@ -133,6 +139,75 @@ try {
     $updater = new IdfDashboardUpdater($active, $storage);
     $invoke($updater, 'initializeStorage');
 
+    $recoverConflictRejected = false;
+
+    try {
+        $invoke($updater, 'parseOptions', [['update.php', '--recover', '--install']]);
+    } catch (RuntimeException $exception) {
+        $recoverConflictRejected = str_contains($exception->getMessage(), 'cannot be combined');
+    }
+
+    $assert($recoverConflictRejected, 'recovery mode rejects update option combinations');
+
+    $recoverRetentionRejected = false;
+
+    try {
+        $invoke($updater, 'parseOptions', [['update.php', '--recover', '--keep-backups=5']]);
+    } catch (RuntimeException $exception) {
+        $recoverRetentionRejected = str_contains($exception->getMessage(), 'cannot be combined');
+    }
+
+    $assert($recoverRetentionRejected, 'recovery mode rejects ignored retention options');
+
+    $recoverRootRequired = false;
+
+    try {
+        $invoke($updater, 'parseOptions', [['update.php', '--recover']]);
+    } catch (RuntimeException $exception) {
+        $recoverRootRequired = str_contains($exception->getMessage(), '--librenms-root');
+    }
+
+    $assert($recoverRootRequired, 'recovery mode requires an explicit LibreNMS root');
+    $recoveryOptions = $invoke($updater, 'parseOptions', [[
+        'update.php',
+        '--recover',
+        '--librenms-root=' . $libreNms,
+    ]]);
+    $assert(
+        $recoveryOptions['librenms_root'] === $libreNms,
+        'recovery mode accepts the exact LibreNMS root'
+    );
+
+    $oversizedManifestZip = $testRoot . DIRECTORY_SEPARATOR . 'too-many-entries.zip';
+    $oversizedManifestExtract = $testRoot . DIRECTORY_SEPARATOR . 'too-many-entries';
+    $zip = new ZipArchive();
+
+    if ($zip->open($oversizedManifestZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        throw new RuntimeException('Unable to create updater ZIP limit fixture.');
+    }
+
+    for ($index = 0; $index < 65; $index++) {
+        $zip->addFromString('overflow/file-' . $index . '.txt', 'x');
+    }
+
+    $zip->close();
+    $entryLimitRejected = false;
+
+    try {
+        $invoke($updater, 'extractArchive', [$oversizedManifestZip, $oversizedManifestExtract]);
+    } catch (RuntimeException $exception) {
+        $entryLimitRejected = str_contains($exception->getMessage(), 'entry count');
+    }
+
+    $assert($entryLimitRejected, 'ZIP entry limit is enforced before extraction');
+    $assert(
+        is_dir($oversizedManifestExtract)
+            && iterator_count(new FilesystemIterator($oversizedManifestExtract, FilesystemIterator::SKIP_DOTS)) === 0,
+        'rejected ZIP writes no archive entries'
+    );
+    $removeTree($oversizedManifestExtract);
+    unlink($oversizedManifestZip);
+
     $legacyName = 'IdfDashboard.backup-20260804-203726-v1.0.1';
     mkdir($plugins . DIRECTORY_SEPARATOR . $legacyName, 0750);
     file_put_contents($plugins . DIRECTORY_SEPARATOR . $legacyName . DIRECTORY_SEPARATOR . 'Menu.php', '<?php');
@@ -241,7 +316,7 @@ try {
     $originalGroup = filegroup($successActive);
     $successUpdater = new IdfDashboardUpdater($successActive, $successStorage);
     $invoke($successUpdater, 'initializeStorage');
-    $backup = $invoke($successUpdater, 'activateAtomically', [$extracted, '1.0.2']);
+    $backup = $invoke($successUpdater, 'activateAtomically', [$extracted, $candidateVersion]);
 
     $assert(realpath(dirname($backup)) === realpath($successStorage), 'backup is outside app/Plugins');
     $assert(str_contains((string) file_get_contents($successActive . DIRECTORY_SEPARATOR . 'README.md'), 'UPDATED'), 'activation installs prepared package');
@@ -295,7 +370,7 @@ try {
     $rolledBack = false;
 
     try {
-        $invoke($rollbackUpdater, 'activateAtomically', [$rollbackPackage, '1.0.2']);
+        $invoke($rollbackUpdater, 'activateAtomically', [$rollbackPackage, $candidateVersion]);
     } catch (RuntimeException $exception) {
         $rolledBack = str_contains($exception->getMessage(), 'automatic rollback succeeded');
     }
@@ -311,30 +386,130 @@ try {
     $rollbackScans = file($rollbackRoot . DIRECTORY_SEPARATOR . 'view-clear.log', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     $assert($rollbackScans === ['["IdfDashboard"]', '["IdfDashboard"]'], 'rollback cache clears only with a clean plugin tree');
 
-    if ($networkInstall) {
-        [$networkRoot, $networkPlugins, $networkActive, $networkStorage] = $createEnvironment(
-            $testRoot . DIRECTORY_SEPARATOR . 'network-install',
-            'CURRENT-CANDIDATE'
-        );
-        $networkUpdater = new IdfDashboardUpdater($networkActive, $networkStorage);
-        $status = $networkUpdater->run([
-            'update.php',
-            '--install',
-            '--tag=v1.0.1',
-            '--allow-downgrade',
-            '--backup-dir=' . $networkStorage,
-        ]);
-        $installedVersion = (string) file_get_contents(
-            $networkActive . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php'
-        );
-        $networkRelated = array_values(array_filter(
-            scandir($networkPlugins) ?: [],
-            static fn (string $name): bool => preg_match('/^\.?IdfDashboard/', $name) === 1
-        ));
+    [$recoveryRoot, $recoveryPlugins, $recoveryActive, $recoveryStorage] = $createEnvironment(
+        $testRoot . DIRECTORY_SEPARATOR . 'interrupted-recovery',
+        'INTERRUPTED-ORIGINAL'
+    );
+    $recoveryStorage = $testRoot . DIRECTORY_SEPARATOR . 'custom-recovery-storage';
+    $recoveryUpdater = new IdfDashboardUpdater($recoveryActive, $recoveryStorage);
+    $invoke($recoveryUpdater, 'initializeStorage');
+    $interruptedBackup = $recoveryStorage . DIRECTORY_SEPARATOR
+        . 'IdfDashboard.backup-20260804-230000-v' . $candidateVersion;
 
-        $assert($status === 0 && str_contains($installedVersion, "VERSION = '1.0.1'"), 'network --install activates verified release');
-        $assert($networkRelated === ['IdfDashboard'], 'network --install leaves clean plugin scan');
-        $assert(count(glob($networkStorage . DIRECTORY_SEPARATOR . 'IdfDashboard.backup-*') ?: []) === 1, 'network --install retains backup externally');
+    if (! rename($recoveryActive, $interruptedBackup)) {
+        throw new RuntimeException('Unable to simulate interruption after active-to-backup rename.');
+    }
+
+    $assert(! file_exists($recoveryActive) && is_dir($interruptedBackup), 'interruption fixture leaves active plugin absent and backup external');
+    $backupUpdater = new IdfDashboardUpdater($interruptedBackup);
+    $recoveryStatus = $backupUpdater->run([
+        'update.php',
+        '--recover',
+        '--librenms-root=' . $recoveryRoot,
+    ]);
+    $recoveryRelated = array_values(array_filter(
+        scandir($recoveryPlugins) ?: [],
+        static fn (string $name): bool => preg_match('/^\.?IdfDashboard/', $name) === 1
+    ));
+
+    $assert(
+        $recoveryStatus === 0 && is_dir($recoveryActive),
+        'interrupted activation recovers from a custom external backup directory'
+    );
+    $assert(! file_exists($interruptedBackup), 'successful interruption recovery consumes restored backup path');
+    $assert($recoveryRelated === ['IdfDashboard'], 'interruption recovery leaves a clean LibreNMS plugin scan');
+    $recoveryAudit = (string) file_get_contents($recoveryStorage . DIRECTORY_SEPARATOR . 'IdfDashboard-update.log');
+    $assert(str_contains($recoveryAudit, 'recovery_succeeded'), 'interruption recovery is recorded in external audit log');
+
+    [$refusalRoot, $refusalPlugins, $refusalActive, $refusalStorage] = $createEnvironment(
+        $testRoot . DIRECTORY_SEPARATOR . 'recovery-refusal',
+        'ACTIVE-MUST-WIN'
+    );
+    $refusalBackup = $refusalStorage . DIRECTORY_SEPARATOR
+        . 'IdfDashboard.backup-20260804-230100-v' . $candidateVersion;
+    $copyPackage($refusalBackup, 'BACKUP-MUST-STAY');
+    $refusalUpdater = new IdfDashboardUpdater($refusalBackup, $refusalStorage);
+    $activeRecoveryRefused = false;
+
+    try {
+        $invoke($refusalUpdater, 'recoverActiveInstallation');
+    } catch (RuntimeException $exception) {
+        $activeRecoveryRefused = str_contains($exception->getMessage(), 'already exists');
+    }
+
+    $assert($activeRecoveryRefused, 'recovery never overwrites an existing active plugin');
+    $assert(
+        is_dir($refusalActive) && is_dir($refusalBackup),
+        'refused recovery preserves both active plugin and external backup'
+    );
+
+    if ($linuxUpgrades) {
+        foreach (['1.0.0', '1.0.1'] as $fromVersion) {
+            [$upgradeRoot, $upgradePlugins, $upgradeActive, $upgradeStorage] = $createEnvironment(
+                $testRoot . DIRECTORY_SEPARATOR . 'candidate-upgrade-' . str_replace('.', '-', $fromVersion),
+                'BOOTSTRAPPED-' . $fromVersion
+            );
+            $candidatePackage = $testRoot . DIRECTORY_SEPARATOR
+                . 'candidate-package-' . str_replace('.', '-', $fromVersion);
+            $copyPackage($candidatePackage, 'CANDIDATE-' . $candidateVersion);
+
+            $versionPath = $upgradeActive . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php';
+            $versionSource = (string) file_get_contents($versionPath);
+            file_put_contents(
+                $versionPath,
+                str_replace("VERSION = '$candidateVersion'", "VERSION = '$fromVersion'", $versionSource)
+            );
+
+            putenv('IDF_BOOTSTRAP_UPDATER=' . $upgradeActive . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php');
+            putenv('IDF_BOOTSTRAP_ACTIVE=' . $upgradeActive);
+            putenv('IDF_BOOTSTRAP_STORAGE=' . $upgradeStorage);
+            putenv('IDF_BOOTSTRAP_CANDIDATE=' . $candidatePackage);
+            putenv('IDF_BOOTSTRAP_VERSION=' . $candidateVersion);
+            $bootstrapCode = <<<'PHP'
+require getenv('IDF_BOOTSTRAP_UPDATER');
+$updater = new IdfDashboardUpdater(
+    getenv('IDF_BOOTSTRAP_ACTIVE'),
+    getenv('IDF_BOOTSTRAP_STORAGE')
+);
+$initialize = new ReflectionMethod($updater, 'initializeStorage');
+$initialize->invoke($updater);
+$activate = new ReflectionMethod($updater, 'activateAtomically');
+$activate->invoke(
+    $updater,
+    getenv('IDF_BOOTSTRAP_CANDIDATE'),
+    getenv('IDF_BOOTSTRAP_VERSION')
+);
+PHP;
+            $command = implode(' ', array_map('escapeshellarg', [
+                PHP_BINARY,
+                '-r',
+                $bootstrapCode,
+            ]));
+            $output = [];
+            $status = 1;
+            exec($command . ' 2>&1', $output, $status);
+
+            $installedVersion = (string) file_get_contents($versionPath);
+            $upgradeRelated = array_values(array_filter(
+                scandir($upgradePlugins) ?: [],
+                static fn (string $name): bool => preg_match('/^\.?IdfDashboard/', $name) === 1
+            ));
+            $backups = glob($upgradeStorage . DIRECTORY_SEPARATOR . 'IdfDashboard.backup-*') ?: [];
+            $backupVersion = count($backups) === 1
+                ? (string) file_get_contents($backups[0] . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php')
+                : '';
+
+            $assert(
+                $status === 0 && str_contains($installedVersion, "VERSION = '$candidateVersion'"),
+                'bootstrapped updater upgrades v' . $fromVersion . ' to candidate v' . $candidateVersion
+                    . ($status === 0 ? '' : ' (exit ' . $status . ': ' . implode(' | ', $output) . ')')
+            );
+            $assert($upgradeRelated === ['IdfDashboard'], 'candidate upgrade leaves clean plugin scan');
+            $assert(
+                str_contains($backupVersion, "VERSION = '$fromVersion'"),
+                'candidate upgrade retains the v' . $fromVersion . ' backup externally'
+            );
+        }
     }
 
     fwrite(STDOUT, 'Updater integration: PASS (' . $assertions . ' assertions)' . PHP_EOL);

@@ -2358,6 +2358,7 @@ let tvRotationTimer = null;
 let tvClockTimer = null;
 let dashboardKeydownHandler = null;
 let dashboardRefreshFailures = 0;
+let dashboardRefreshController = null;
 let refreshSeconds = 30;
 
 // Both live outside initDashboard() for the same reason as the timers
@@ -3697,7 +3698,22 @@ function initDashboard() {
 // the refresh because they're read back from `localStorage`/the DOM
 // by initDashboard() itself, not reset here.
 function refreshDashboardData() {
-    fetch(window.location.href, { cache: 'no-store', credentials: 'same-origin' })
+    if (dashboardRefreshController) {
+        dashboardRefreshController.abort();
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(function () {
+        controller.abort();
+    }, 30000);
+
+    dashboardRefreshController = controller;
+
+    fetch(window.location.href, {
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal: controller.signal
+    })
         .then(function (response) {
             if (!response.ok) {
                 throw new Error('Dashboard refresh failed: ' + response.status);
@@ -3731,6 +3747,13 @@ function refreshDashboardData() {
             }
 
             scheduleRefresh();
+        })
+        .finally(function () {
+            window.clearTimeout(timeout);
+
+            if (dashboardRefreshController === controller) {
+                dashboardRefreshController = null;
+            }
         });
 }
 

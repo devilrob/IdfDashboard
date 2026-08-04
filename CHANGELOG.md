@@ -2,6 +2,29 @@
 
 All notable changes follow semantic versioning.
 
+## [1.0.3] - 2026-08-04
+
+### Security
+
+- Reject release archives with more than 64 entries or more than 25 MiB of
+  uncompressed data before extraction, preventing compressed ZIP exhaustion.
+- Added a validated `--recover` path for an activation interrupted after the
+  active plugin was moved to its exact external backup. Recovery never
+  overwrites an existing active plugin, requires the exact LibreNMS root so
+  custom backup locations remain recoverable, and is recorded in the external
+  audit log.
+- Added an external-staging free-space preflight and made cleanup failures
+  explicit instead of silently reporting successful retention.
+
+### Fixed
+
+- Abort background dashboard refreshes after 30 seconds so an abandoned HTTP
+  request cannot leave a long-running wall display permanently stale.
+- Run the authorization and isolation integration tests against the pinned
+  LibreNMS 26.8 source and MariaDB before any release job can start.
+- Exercise bootstrapped v1.0.0/v1.0.1-to-candidate upgrade paths on Linux and
+  validate the release workflow with Node.js 24-based checkout/setup actions.
+
 ## [1.0.2] - 2026-08-04
 
 ### Security

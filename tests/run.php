@@ -87,6 +87,40 @@ $assert(
 $assert(IdfDashboardUpdater::isSafeArchivePath('Support/Version.php'), 'updater accepts safe archive path');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('../Page.php'), 'updater rejects ZIP traversal');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('Support//Version.php'), 'updater rejects ambiguous ZIP path');
+
+$archiveEntryLimitRejected = false;
+
+try {
+    IdfDashboardUpdater::validateArchiveEntryMetadata(array_fill(
+        0,
+        65,
+        ['name' => 'Support/Version.php', 'size' => 1]
+    ));
+} catch (RuntimeException $exception) {
+    $archiveEntryLimitRejected = str_contains($exception->getMessage(), 'entry count');
+}
+
+$assert($archiveEntryLimitRejected, 'updater rejects excessive ZIP entry count');
+
+$archiveExpandedSizeRejected = false;
+
+try {
+    IdfDashboardUpdater::validateArchiveEntryMetadata([
+        ['name' => 'Page.php', 'size' => 26214401],
+    ]);
+} catch (RuntimeException $exception) {
+    $archiveExpandedSizeRejected = str_contains($exception->getMessage(), 'uncompressed size');
+}
+
+$assert($archiveExpandedSizeRejected, 'updater rejects excessive ZIP expanded size');
+$assert(
+    IdfDashboardUpdater::hasSufficientStagingSpace(5242880, 0),
+    'updater accepts staging space with required 5 MiB headroom'
+);
+$assert(
+    ! IdfDashboardUpdater::hasSufficientStagingSpace(5242879, 0),
+    'updater rejects staging space below required headroom'
+);
 $assert(! IdfDashboardUpdater::isSafeArchivePath('.github/workflows/release.yml'), 'updater rejects CI files');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('tests/run.php'), 'updater rejects test files');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('.gitattributes'), 'updater rejects Git metadata');
@@ -224,5 +258,31 @@ foreach (array_merge(
 }
 
 $assert($versionDeclarations === 1, 'plugin version has one source declaration');
+
+$readmeSource = (string) file_get_contents($root . '/README.md');
+$changelogSource = (string) file_get_contents($root . '/CHANGELOG.md');
+$assert(
+    str_contains($readmeSource, 'TAG=v' . Version::VERSION)
+        && str_contains($changelogSource, '## [' . Version::VERSION . ']'),
+    'README bootstrap tag and changelog match installed version'
+);
+$assert(
+    str_contains($updaterSource, '--recover')
+        && str_contains($readmeSource, '--recover'),
+    'interruption recovery is implemented and documented'
+);
+
+$workflowSource = (string) file_get_contents($root . '/.github/workflows/release.yml');
+$assert(
+    str_contains($workflowSource, 'librenms-integration:')
+        && str_contains($workflowSource, '51344f722110350bb7301dde8b13bcf23ff65156')
+        && str_contains($workflowSource, 'DeviceAccessTest.php'),
+    'CI runs plugin integration tests against pinned LibreNMS 26.8'
+);
+$assert(
+    str_contains($workflowSource, 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6')
+        && str_contains($workflowSource, 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6'),
+    'CI JavaScript actions use Node.js 24 runtimes'
+);
 
 exit($failures === 0 ? 0 : 1);

@@ -16,6 +16,12 @@ final class IdfDashboardUpdater
 
     private const MAX_ARCHIVE_BYTES = 52428800;
 
+    private const MAX_ARCHIVE_ENTRIES = 64;
+
+    private const MAX_EXTRACTED_BYTES = 26214400;
+
+    private const MIN_STAGING_HEADROOM_BYTES = 5242880;
+
     private const REQUIRED_PATHS = [
         'Menu.php',
         'Page.php',
@@ -90,6 +96,12 @@ final class IdfDashboardUpdater
 
         if ($options['self_test']) {
             return $this->selfTest();
+        }
+
+        if ($options['recover']) {
+            $this->configureRecoveryRoot($options['librenms_root']);
+
+            return $this->recoverActiveInstallation();
         }
 
         $release = $this->fetchRelease($options['tag']);
@@ -217,6 +229,44 @@ final class IdfDashboardUpdater
         ], true);
     }
 
+    /**
+     * Rejects ZIP bombs before extraction. The release package has a
+     * deliberately small allowlist, so neither a large entry count nor
+     * tens of megabytes of uncompressed data is legitimate.
+     *
+     * @param  array<int, array{name: string, size: int}>  $entries
+     */
+    public static function validateArchiveEntryMetadata(array $entries): void
+    {
+        if (count($entries) < 1 || count($entries) > self::MAX_ARCHIVE_ENTRIES) {
+            throw new RuntimeException('Release archive entry count exceeds the safety limit.');
+        }
+
+        $totalBytes = 0;
+
+        foreach ($entries as $entry) {
+            $name = $entry['name'] ?? null;
+            $size = $entry['size'] ?? null;
+
+            if (! is_string($name) || ! is_int($size) || $size < 0 || ! self::isSafeArchivePath($name)) {
+                throw new RuntimeException('Release archive contains invalid entry metadata.');
+            }
+
+            if ($size > self::MAX_EXTRACTED_BYTES - $totalBytes) {
+                throw new RuntimeException('Release archive uncompressed size exceeds the safety limit.');
+            }
+
+            $totalBytes += $size;
+        }
+    }
+
+    public static function hasSufficientStagingSpace(int|float $freeBytes, int $packageBytes): bool
+    {
+        return $freeBytes >= 0
+            && $packageBytes >= 0
+            && $freeBytes >= $packageBytes + self::MIN_STAGING_HEADROOM_BYTES;
+    }
+
     public static function isTrustedDownloadUrl(string $url): bool
     {
         $parts = parse_url($url);
@@ -267,13 +317,16 @@ final class IdfDashboardUpdater
             'tag' => null,
             'self_test' => false,
             'help' => false,
+            'recover' => false,
             'allow_downgrade' => false,
             'reinstall' => false,
             'keep_backups' => 5,
             'backup_dir' => null,
+            'librenms_root' => null,
         ];
 
         $explicitCheck = false;
+        $explicitKeepBackups = false;
 
         foreach (array_slice($arguments, 1) as $argument) {
             if ($argument === '--check') {
@@ -296,6 +349,11 @@ final class IdfDashboardUpdater
                 continue;
             }
 
+            if ($argument === '--recover') {
+                $options['recover'] = true;
+                continue;
+            }
+
             if ($argument === '--help' || $argument === '-h') {
                 $options['help'] = true;
                 continue;
@@ -312,6 +370,7 @@ final class IdfDashboardUpdater
             }
 
             if (str_starts_with($argument, '--keep-backups=')) {
+                $explicitKeepBackups = true;
                 $value = substr($argument, 15);
 
                 if (! ctype_digit($value) || (int) $value < 1 || (int) $value > 50) {
@@ -330,6 +389,17 @@ final class IdfDashboardUpdater
                 }
 
                 $options['backup_dir'] = $path;
+                continue;
+            }
+
+            if (str_starts_with($argument, '--librenms-root=')) {
+                $path = substr($argument, 16);
+
+                if ($path === '') {
+                    throw new RuntimeException('--librenms-root requires an absolute path.');
+                }
+
+                $options['librenms_root'] = $path;
                 continue;
             }
 
@@ -366,6 +436,28 @@ final class IdfDashboardUpdater
             throw new RuntimeException('Version override flags require --install or --dry-run.');
         }
 
+        if ($options['recover'] && (
+            $options['install']
+            || $options['dry_run']
+            || $options['tag'] !== null
+            || $options['allow_downgrade']
+            || $options['reinstall']
+            || $options['backup_dir'] !== null
+            || $explicitKeepBackups
+            || $explicitCheck
+            || $options['self_test']
+        )) {
+            throw new RuntimeException('--recover cannot be combined with update, version, backup or test options.');
+        }
+
+        if ($options['recover'] && $options['librenms_root'] === null) {
+            throw new RuntimeException('--recover requires the exact --librenms-root printed before activation.');
+        }
+
+        if (! $options['recover'] && $options['librenms_root'] !== null) {
+            throw new RuntimeException('--librenms-root is only valid with --recover.');
+        }
+
         return $options;
     }
 
@@ -379,6 +471,8 @@ Usage:
   php bin/update.php --dry-run [--tag=vMAJOR.MINOR.PATCH]
   php bin/update.php --install [--tag=vMAJOR.MINOR.PATCH] [--keep-backups=5]
       [--backup-dir=/opt/librenms/plugin-backups/IdfDashboard]
+  php /opt/librenms/plugin-backups/IdfDashboard/IdfDashboard.backup-*/bin/update.php \
+      --recover --librenms-root=/opt/librenms
   php bin/update.php --self-test
 
 Safety overrides (an explicit --tag is required):
@@ -389,6 +483,9 @@ The command only consumes stable GitHub release assets. --dry-run downloads,
 checks SHA-256, extracts, validates structure and lints PHP without activation.
 Install mode must run directly as the LibreNMS operating-system user. Backups,
 staging, rollback evidence, the lock and audit log stay outside app/Plugins.
+If an interrupted activation leaves app/Plugins/IdfDashboard absent, run
+--recover from the exact external backup directory and with the LibreNMS root
+printed before activation.
 HELP);
         fwrite(STDOUT, PHP_EOL);
     }
@@ -708,12 +805,17 @@ HELP);
         }
 
         try {
+            $entries = [];
+
             for ($index = 0; $index < $zip->numFiles; $index++) {
                 $name = $zip->getNameIndex($index);
+                $stat = $zip->statIndex($index);
 
-                if (! is_string($name) || ! self::isSafeArchivePath($name)) {
-                    throw new RuntimeException('Unsafe path found in release archive.');
+                if (! is_string($name) || ! is_array($stat) || ! isset($stat['size']) || ! is_int($stat['size'])) {
+                    throw new RuntimeException('Unable to read release archive entry metadata.');
                 }
+
+                $entries[] = ['name' => $name, 'size' => $stat['size']];
 
                 if (method_exists($zip, 'getExternalAttributesIndex')) {
                     $operations = 0;
@@ -728,6 +830,8 @@ HELP);
                     }
                 }
             }
+
+            self::validateArchiveEntryMetadata($entries);
 
             if (! $zip->extractTo($destination)) {
                 throw new RuntimeException('Unable to extract the release archive.');
@@ -856,6 +960,7 @@ HELP);
         try {
             $this->validatePackage($this->pluginRoot, Version::VERSION);
             $this->lintPhp($this->pluginRoot);
+            $this->assertStagingCapacity($extracted);
             $this->copyTree($extracted, $staging);
             $this->applyMetadata($staging);
             $this->validatePackage($staging, $version);
@@ -866,6 +971,12 @@ HELP);
             $this->removeTree($staging, $this->storageRoot);
             throw $exception;
         }
+
+        $recoveryCommand = escapeshellarg(PHP_BINARY) . ' '
+            . escapeshellarg($backup . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php')
+            . ' --recover --librenms-root=' . escapeshellarg($this->libreNmsRoot);
+        $this->audit('activation_prepared', Version::VERSION, $version, 'Interruption recovery: ' . $recoveryCommand);
+        fwrite(STDOUT, 'Interruption recovery command: ' . $recoveryCommand . PHP_EOL);
 
         if (! rename($this->pluginRoot, $backup)) {
             $this->removeTree($staging, $this->storageRoot);
@@ -929,6 +1040,132 @@ HELP);
         }
 
         return $backup;
+    }
+
+    private function recoverActiveInstallation(): int
+    {
+        if (preg_match('/^IdfDashboard\.backup-\d{8}-\d{6}-v\d+\.\d+\.\d+$/', basename($this->pluginRoot)) !== 1) {
+            throw new RuntimeException('--recover must be executed from an exact external IdfDashboard backup directory.');
+        }
+
+        $this->assertExecutionUser(false);
+        $this->initializeStorage();
+        $lock = $this->acquireLock();
+
+        try {
+            $backupParent = realpath(dirname($this->pluginRoot));
+            $storage = realpath($this->storageRoot);
+            $plugins = realpath($this->libreNmsRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Plugins');
+
+            if ($backupParent === false || $storage === false || $backupParent !== $storage) {
+                throw new RuntimeException('Recovery source is not inside the configured external backup directory.');
+            }
+
+            if ($plugins === false || is_link($plugins) || ! is_writable($plugins)) {
+                throw new RuntimeException('LibreNMS app/Plugins is missing, unsafe or not writable.');
+            }
+
+            $active = $plugins . DIRECTORY_SEPARATOR . 'IdfDashboard';
+
+            if (file_exists($active) || is_link($active)) {
+                throw new RuntimeException('Recovery refused because app/Plugins/IdfDashboard already exists.');
+            }
+
+            $this->assertNoAlternatePluginDirectories($plugins);
+            $backupStat = @stat($this->pluginRoot);
+            $pluginsStat = @stat($plugins);
+
+            if (! is_array($backupStat) || ! is_array($pluginsStat) || $backupStat['dev'] !== $pluginsStat['dev']) {
+                throw new RuntimeException('Recovery backup must be on the same filesystem as app/Plugins.');
+            }
+
+            $this->validatePackage($this->pluginRoot, Version::VERSION);
+            $this->lintPhp($this->pluginRoot);
+            [$status, $output] = $this->runCommand(
+                [PHP_BINARY, $this->pluginRoot . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php', '--self-test'],
+                $this->libreNmsRoot,
+                60
+            );
+
+            if ($status !== 0) {
+                throw new RuntimeException('Recovery backup updater self-test failed: ' . trim($output));
+            }
+
+            $source = $this->pluginRoot;
+
+            if (! rename($source, $active)) {
+                throw new RuntimeException('Unable to restore the external backup into app/Plugins/IdfDashboard.');
+            }
+
+            $this->pluginRoot = $active;
+            $this->parentDirectory = $plugins;
+            $this->assertPluginTreeClean();
+
+            try {
+                $this->clearLibreNmsViewCache();
+            } catch (Throwable $exception) {
+                $this->audit('recovery_cache_clear_failed', Version::VERSION, Version::VERSION, $exception->getMessage());
+                throw new RuntimeException(
+                    'Backup restored and active, but LibreNMS view cache clear failed: ' . $exception->getMessage()
+                );
+            }
+
+            $this->audit('recovery_succeeded', Version::VERSION, Version::VERSION, 'Restored from: ' . $source);
+            fwrite(STDOUT, 'Recovered IdfDashboard v' . Version::VERSION . ' from external backup.' . PHP_EOL);
+
+            return 0;
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    private function configureRecoveryRoot(string $path): void
+    {
+        if (str_contains($path, "\0") || ! self::isAbsoluteFilesystemPath($path)) {
+            throw new RuntimeException('--librenms-root must be an unambiguous absolute path.');
+        }
+
+        $resolved = realpath($path);
+
+        if ($resolved === false || ! is_dir($resolved) || is_link($resolved)) {
+            throw new RuntimeException('--librenms-root must resolve to a safe LibreNMS directory.');
+        }
+
+        $plugins = $resolved . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Plugins';
+
+        if (! is_dir($plugins) || is_link($plugins)) {
+            throw new RuntimeException('--librenms-root does not contain a safe app/Plugins directory.');
+        }
+
+        $this->libreNmsRoot = $resolved;
+        $this->setStorageRoot(dirname($this->pluginRoot));
+    }
+
+    private function assertStagingCapacity(string $source): void
+    {
+        $packageBytes = 0;
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($source, FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($iterator as $entry) {
+            if ($entry->isLink()) {
+                throw new RuntimeException('Symbolic links are not allowed while sizing update staging.');
+            }
+
+            if ($entry->isFile()) {
+                $packageBytes += $entry->getSize();
+            }
+        }
+
+        $freeBytes = disk_free_space($this->storageRoot);
+
+        if ($freeBytes === false || ! self::hasSufficientStagingSpace($freeBytes, $packageBytes)) {
+            throw new RuntimeException(
+                'Insufficient free space for external staging; at least the package size plus 5 MiB is required.'
+            );
+        }
     }
 
     private function copyTree(string $source, string $destination): void
@@ -1113,7 +1350,9 @@ HELP);
 
         $normalized = $this->canonicalizeCandidatePath($normalized);
 
-        if ($this->pathIsWithin($normalized, $this->parentDirectory)
+        $pluginsRoot = $this->libreNmsRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Plugins';
+
+        if ($this->pathIsWithin($normalized, $pluginsRoot)
             || $this->pathIsWithin($normalized, $this->libreNmsRoot . DIRECTORY_SEPARATOR . 'html')
         ) {
             throw new RuntimeException('Backup directory must be outside app/Plugins and the LibreNMS web root.');
@@ -1272,7 +1511,16 @@ HELP);
 
     private function assertPluginTreeClean(): void
     {
-        foreach (new FilesystemIterator($this->parentDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
+        $this->assertNoAlternatePluginDirectories($this->parentDirectory);
+
+        if (! is_dir($this->pluginRoot) || is_link($this->pluginRoot)) {
+            throw new RuntimeException('The active IdfDashboard directory is missing or unsafe.');
+        }
+    }
+
+    private function assertNoAlternatePluginDirectories(string $pluginsDirectory): void
+    {
+        foreach (new FilesystemIterator($pluginsDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
             if (! $entry->isDir() && ! $entry->isLink()) {
                 continue;
             }
@@ -1284,10 +1532,6 @@ HELP);
             ) {
                 throw new RuntimeException('Unsafe alternate IdfDashboard directory remains inside app/Plugins: ' . $entry->getPathname());
             }
-        }
-
-        if (! is_dir($this->pluginRoot) || is_link($this->pluginRoot)) {
-            throw new RuntimeException('The active IdfDashboard directory is missing or unsafe.');
         }
     }
 
@@ -1462,13 +1706,19 @@ HELP);
 
         foreach ($iterator as $entry) {
             if ($entry->isLink() || $entry->isFile()) {
-                @unlink($entry->getPathname());
+                if (! unlink($entry->getPathname())) {
+                    throw new RuntimeException('Unable to remove cleanup file: ' . $entry->getPathname());
+                }
             } else {
-                @rmdir($entry->getPathname());
+                if (! rmdir($entry->getPathname())) {
+                    throw new RuntimeException('Unable to remove cleanup directory: ' . $entry->getPathname());
+                }
             }
         }
 
-        @rmdir($path);
+        if (! rmdir($path)) {
+            throw new RuntimeException('Unable to remove cleanup root: ' . $path);
+        }
     }
 
     private function audit(string $event, string $from, string $to, string $message): void

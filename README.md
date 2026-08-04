@@ -35,7 +35,7 @@ php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --install
 The updater accepts only stable `vMAJOR.MINOR.PATCH` releases from
 `devilrob/IdfDashboard`. It requires the release ZIP and `SHA256SUMS`, validates
 HTTPS URLs, owner/repository, checksum, package structure, packaged version and
-PHP syntax, then swaps the plugin atomically on the same filesystem. It locks
+PHP syntax, then swaps the plugin using validated same-filesystem renames. It locks
 concurrent updates and stores backups, staging, rollback evidence, the lock and
 JSON-lines audit log outside `app/Plugins`. The default persistent location is
 `/opt/librenms/plugin-backups/IdfDashboard`; override it only with an absolute,
@@ -49,6 +49,36 @@ storage. Unsafe, unknown, colliding or unmovable paths stop the update without
 deletion. Activation uses same-filesystem renames; a failed post-install lint,
 self-test or `php artisan view:clear` restores the validated external backup and
 keeps the failed package externally for investigation.
+
+Before moving the active directory, the updater verifies that external staging
+has at least the package size plus 5 MiB free and prints an interruption-recovery
+command, including its explicit `--librenms-root`. If a terminated process
+leaves `app/Plugins/IdfDashboard` absent, run that exact backup command as the
+`librenms` user; `--recover` refuses to overwrite an existing active plugin,
+validates and self-tests the backup, restores it with a same-filesystem rename,
+clears compiled views and writes the result to the external audit log. The
+explicit root keeps recovery safe when `--backup-dir` was customized.
+
+When upgrading from a release whose installed updater does not yet support
+`--recover`, bootstrap only the updater from the target, checksum-verified ZIP
+before activation. For v1.0.3:
+
+```bash
+TAG=v1.0.3
+UPDATE_TMP="$(mktemp -d)"
+cd "$UPDATE_TMP"
+curl -fLO "https://github.com/devilrob/IdfDashboard/releases/download/${TAG}/IdfDashboard-${TAG}.zip"
+curl -fLO "https://github.com/devilrob/IdfDashboard/releases/download/${TAG}/SHA256SUMS"
+sha256sum -c SHA256SUMS
+unzip -p "IdfDashboard-${TAG}.zip" bin/update.php > /opt/librenms/app/Plugins/IdfDashboard/bin/.update.php.new
+php /opt/librenms/app/Plugins/IdfDashboard/bin/.update.php.new --self-test
+mv /opt/librenms/app/Plugins/IdfDashboard/bin/.update.php.new /opt/librenms/app/Plugins/IdfDashboard/bin/update.php
+php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --dry-run --tag="$TAG"
+php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --install --tag="$TAG"
+```
+
+Remove the temporary download directory after reviewing the result. Do not run
+these commands as root.
 
 `--dry-run` performs every download and validation step without activation.
 Backups default to the five newest matching directories and can be configured
@@ -76,21 +106,21 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.0.2`. GitHub Actions validates the tag/version match, runs PHP
+tag such as `v1.0.3`. GitHub Actions validates the tag/version match, runs PHP
 and JavaScript checks, builds the minimal plugin ZIP, generates `SHA256SUMS`,
 and publishes both assets to the stable GitHub release.
 
 ## LibreNMS authorization integration test
 
-From a disposable LibreNMS checkout with its test database configured, install
-this plugin under `app/Plugins/IdfDashboard` and run:
+CI checks out the supported LibreNMS 26.8 commit into a disposable workspace,
+starts MariaDB, installs this plugin under `app/Plugins/IdfDashboard`, migrates
+the real LibreNMS schema and runs:
 
 ```bash
-DB_CONNECTION=testing_memory php vendor/bin/phpunit app/Plugins/IdfDashboard/tests/librenms/DeviceAccessTest.php
+vendor/bin/phpunit tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php
 ```
 
 The test covers administrator, global-read, itemized user, empty device access,
 a completely unprivileged user, hook registration and the administrative
-protection in `PluginSettingsController`. It is intentionally not included in
-the standalone plugin CI because it requires LibreNMS's application, roles,
-schema, factories and database.
+protection in `PluginSettingsController`. The release job cannot run until this
+integration job and the PHP 8.2/8.3/8.4 standalone matrix both pass.
