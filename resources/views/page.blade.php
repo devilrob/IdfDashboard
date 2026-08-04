@@ -1912,12 +1912,20 @@
         <div class="coverage-card coverage-neutral">
             <div class="coverage-label">Event Log Activity (24h)</div>
             <div class="coverage-value">
-                {{ $coverage['events_available'] ? $coverage['event_percent'] . '%' : 'N/A' }}
+                @if($coverage['events_available'] && $coverage['events_complete'])
+                    {{ $coverage['event_percent'] }}%
+                @elseif($coverage['events_available'])
+                    Limited
+                @else
+                    N/A
+                @endif
             </div>
             <div class="coverage-subtitle">
-                @if($coverage['events_available'])
+                @if($coverage['events_available'] && $coverage['events_complete'])
                     {{ $coverage['devices_with_recent_events'] }} of {{ $coverage['active_devices'] }}
                     devices logged an event in the last {{ $eventWindowHours }} hours.
+                @elseif($coverage['events_available'])
+                    Global safety limit reached; coverage percentage is intentionally suppressed.
                 @else
                     LibreNMS eventlog table was not found in this schema.
                 @endif

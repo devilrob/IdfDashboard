@@ -1,0 +1,109 @@
+name: Validate and release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php:
+          - '8.2'
+          - '8.4'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, zip
+          coverage: none
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Lint PHP
+        run: find . -type f -name '*.php' ! -name '*.blade.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Run regression tests
+        run: php tests/run.php
+
+      - name: Run updater self-test
+        run: php bin/update.php --self-test
+
+      - name: Validate embedded JavaScript
+        run: node tests/validate-js.mjs
+
+      - name: Check whitespace
+        run: git diff --check
+
+  release:
+    name: Publish signed-by-hash package
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: '8.2'
+          extensions: curl, zip
+          coverage: none
+
+      - name: Validate tag and source version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          VERSION="${TAG#v}"
+          SOURCE_VERSION="$(php -r 'require "Support/Version.php"; echo App\Plugins\IdfDashboard\Support\Version::VERSION;')"
+          test "$VERSION" = "$SOURCE_VERSION"
+
+      - name: Build and validate release package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          export VERSION
+          ARCHIVE="IdfDashboard-${TAG}.zip"
+          mkdir -p dist/package/Support dist/package/resources/views dist/package/bin
+          cp Menu.php Page.php Settings.php README.md CHANGELOG.md dist/package/
+          cp Support/Config.php Support/ProblemPolicy.php Support/UpdateStatus.php Support/Version.php dist/package/Support/
+          cp resources/views/menu.blade.php resources/views/page.blade.php resources/views/settings.blade.php dist/package/resources/views/
+          cp bin/update.php dist/package/bin/
+          php -r 'require "bin/update.php"; (new IdfDashboardUpdater())->validateReleasePackage("dist/package", getenv("VERSION"));'
+          (cd dist/package && zip -qr "../${ARCHIVE}" .)
+          (cd dist && sha256sum "$ARCHIVE" > SHA256SUMS)
+          unzip -t "dist/${ARCHIVE}"
+
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ARCHIVE="IdfDashboard-${TAG}.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          gh release create "$TAG" "dist/${ARCHIVE}" dist/SHA256SUMS --verify-tag --title "IdfDashboard ${TAG}" --generate-notes

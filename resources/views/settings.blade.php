@@ -9,6 +9,49 @@
         </p>
     </header>
 
+    <section class="idf-update-panel" aria-labelledby="idf-update-title">
+        <div>
+            <h3 id="idf-update-title">Plugin Updates</h3>
+            <div class="idf-update-versions">
+                Installed: <strong>v{{ $pluginVersion }}</strong>
+                · Stable channel:
+                <strong>
+                    {{ $updateStatus['latest'] ? 'v' . $updateStatus['latest'] : 'No published release' }}
+                </strong>
+            </div>
+
+            @if($updateStatus['error'])
+                <div class="idf-update-error">{{ $updateStatus['error'] }}</div>
+            @elseif($updateStatus['update_available'])
+                <div class="idf-update-available">A verified stable release is available.</div>
+            @elseif($updateStatus['checked_at'])
+                <div class="idf-update-current">The installed version is current.</div>
+            @elseif(! $updateStatus['enabled'])
+                <div class="idf-update-current">Periodic checks are disabled.</div>
+            @endif
+
+            <div class="idf-update-note">
+                Installation from the web process is intentionally disabled. Run as the
+                LibreNMS operating-system user; the CLI validates the release, checksum,
+                package structure and PHP syntax, then performs an atomic update with rollback.
+            </div>
+            <code class="idf-update-command">{{ $updateCommand }}</code>
+        </div>
+
+        <div class="idf-update-actions">
+            <a class="idf-update-button" href="{{ $updateCheckUrl }}">Check for updates</a>
+            @if($updateStatus['release_url'])
+                <a
+                    class="idf-update-link"
+                    href="{{ $updateStatus['release_url'] }}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >View release</a>
+            @endif
+            <span class="idf-update-disabled" title="Use the displayed CLI command">Update now (CLI)</span>
+        </div>
+    </section>
+
     <form method="post">
         @csrf
 
@@ -17,6 +60,7 @@
                 'timing' => 'Refresh & Timing',
                 'thresholds' => 'Battery Charge Thresholds',
                 'visual' => 'Visual Effects',
+                'updates' => 'Updates',
                 'severity' => 'Default Severity Shown on Load',
                 'problem' => 'Default Problem Types Shown on Load',
                 'section' => 'Default Sections Visible on Load',
@@ -108,6 +152,98 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         color: #666;
         margin: 0 0 18px;
         max-width: 720px;
+    }
+
+    .idf-update-panel {
+        align-items: flex-start;
+        background: #f7f9fb;
+        border: 1px solid #d8e1ea;
+        border-radius: 4px;
+        display: flex;
+        gap: 20px;
+        justify-content: space-between;
+        margin-bottom: 18px;
+        padding: 14px 16px;
+    }
+
+    .idf-update-panel h3 {
+        font-size: 15px;
+        margin: 0 0 6px;
+    }
+
+    .idf-update-note,
+    .idf-update-versions {
+        color: #5f6b76;
+        margin-top: 4px;
+    }
+
+    .idf-update-command {
+        background: #eef2f5;
+        border: 1px solid #d4dce3;
+        display: block;
+        margin-top: 8px;
+        max-width: 680px;
+        overflow-wrap: anywhere;
+        padding: 6px 8px;
+    }
+
+    .idf-update-available {
+        color: #2f7d32;
+        font-weight: 700;
+        margin-top: 4px;
+    }
+
+    .idf-update-current {
+        color: #5f6b76;
+        margin-top: 4px;
+    }
+
+    .idf-update-error {
+        color: #a94442;
+        margin-top: 4px;
+    }
+
+    .idf-update-actions {
+        align-items: stretch;
+        display: flex;
+        flex: 0 0 170px;
+        flex-direction: column;
+        gap: 7px;
+    }
+
+    .idf-update-button,
+    .idf-update-disabled,
+    .idf-update-link {
+        border-radius: 3px;
+        display: block;
+        padding: 7px 10px;
+        text-align: center;
+    }
+
+    .idf-update-button {
+        background: #337ab7;
+        color: #fff;
+    }
+
+    .idf-update-link {
+        border: 1px solid #337ab7;
+    }
+
+    .idf-update-disabled {
+        background: #e8ebee;
+        color: #78828c;
+        cursor: not-allowed;
+    }
+
+    @media (max-width: 720px) {
+        .idf-update-panel {
+            flex-direction: column;
+        }
+
+        .idf-update-actions {
+            flex-basis: auto;
+            width: 100%;
+        }
     }
 
     .idf-settings-group {

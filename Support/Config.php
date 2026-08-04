@@ -82,6 +82,14 @@ class Config
             'help' => 'Turn off for a fully static display — colors and text still reflect severity, only the motion is disabled.',
         ],
 
+        // --- Updates --------------------------------------------------
+        'update_check_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Periodically check the stable release channel',
+            'group' => 'updates',
+            'help' => 'Checks GitHub at most every six hours when an administrator opens this Settings page. Installation always requires the CLI command below.',
+        ],
+
         // --- Default Severity shown on load ----------------------------
         'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
         'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],
@@ -101,7 +109,12 @@ class Config
         'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table. A "crashinfo" partition full at 100% is common and often benign on some vendors\' switches, so it is capped at Warning here, never auto-Critical.'],
         'default_problem_memory' => ['type' => 'bool', 'default' => true, 'label' => 'Memory', 'group' => 'problem', 'help' => 'Memory pool usage from LibreNMS\'s mempools table.'],
         'default_problem_processor' => ['type' => 'bool', 'default' => true, 'label' => 'Processor', 'group' => 'problem', 'help' => 'CPU usage from LibreNMS\'s processors table.'],
-        'default_problem_stale' => ['type' => 'bool', 'default' => true, 'label' => 'Stale data', 'group' => 'problem', 'help' => ''],
+        'default_problem_stale' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Stale data',
+            'group' => 'problem',
+            'help' => 'When disabled, stale readings are excluded from telemetry, severity, counters, cards, filters, and Priority Attention.',
+        ],
         'default_problem_other' => ['type' => 'bool', 'default' => true, 'label' => 'Other', 'group' => 'problem', 'help' => ''],
 
         // --- Default Sections visible on load ---------------------------

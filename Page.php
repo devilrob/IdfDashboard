@@ -5,6 +5,7 @@ namespace App\Plugins\IdfDashboard;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\Config;
+use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -83,6 +84,16 @@ class Page extends PageHook
         'sensor under limit',
     ];
 
+    private const RECENT_EVENTS_PER_DEVICE = 3;
+
+    /**
+     * Defensive ceiling for one dashboard request. Three events per
+     * device remain complete for fleets up to 1,000 authorized devices;
+     * larger fleets are marked as limited instead of silently claiming
+     * complete event coverage.
+     */
+    private const RECENT_EVENTS_GLOBAL_LIMIT = 3000;
+
     public function authorize(User $user): bool
     {
         return $user->can('device.viewAny');
@@ -142,6 +153,7 @@ class Page extends PageHook
             'storage' => (bool) $config['default_problem_storage'],
             'memory' => (bool) $config['default_problem_memory'],
             'processor' => (bool) $config['default_problem_processor'],
+            'stale' => (bool) $config['default_problem_stale'],
             'other' => (bool) $config['default_problem_other'],
         ];
 
@@ -455,7 +467,9 @@ class Page extends PageHook
             ? round(($devicesWithServices / $activeCount) * 100, 1)
             : 100.0;
 
-        $eventPercent = ($deviceEvents['available'] && $activeCount > 0)
+        $eventPercent = ($deviceEvents['available']
+            && $deviceEvents['complete']
+            && $activeCount > 0)
             ? round(($devicesWithRecentEvents / $activeCount) * 100, 1)
             : null;
 
@@ -563,6 +577,7 @@ class Page extends PageHook
                     || $devicesWithActiveAlerts === 0,
 
                 'events_available' => $deviceEvents['available'],
+                'events_complete' => $deviceEvents['complete'],
                 'devices_with_recent_events' => $devicesWithRecentEvents,
                 'event_percent' => $eventPercent,
             ],
@@ -688,7 +703,13 @@ class Page extends PageHook
         // places that could drift out of sync.
         $telemetry = collect($this->buildTelemetry($role, $sensors))
             ->concat($this->buildResourceTelemetry($storage, $mempools, $processors))
-            ->filter(fn (array $metric): bool => $this->enabledProblemTypes[$this->metricProblemType($metric)] ?? true)
+            ->filter(function (array $metric): bool {
+                return ProblemPolicy::metricEnabled(
+                    $this->enabledProblemTypes,
+                    $this->metricProblemType($metric),
+                    (bool) ($metric['stale'] ?? false)
+                );
+            })
             ->values();
 
         $serviceRows = $services
@@ -762,8 +783,11 @@ class Page extends PageHook
                 && ($metric['curated'] ?? false))
             ->values();
 
-        $staleIsUrgent = in_array($role, self::STALE_IS_URGENT_ROLES, true)
-            && $staleHealthyTelemetry->isNotEmpty();
+        $staleIsUrgent = ProblemPolicy::staleEscalates(
+            $this->enabledProblemTypes,
+            $role,
+            $staleHealthyTelemetry->isNotEmpty()
+        );
 
         $activeAlerts = $alerts->values();
 
@@ -841,7 +865,7 @@ class Page extends PageHook
         // from a fresh reading can still usefully be found via the
         // "Stale data" filter if some other sensor of its stopped
         // updating too.
-        if ($staleTelemetry->isNotEmpty()) {
+        if (ProblemPolicy::staleEnabled($this->enabledProblemTypes) && $staleTelemetry->isNotEmpty()) {
             $problemTypes->push('stale');
         }
 
@@ -2307,7 +2331,11 @@ class Page extends PageHook
      */
     private function loadRecentEvents(Collection $deviceIds): array
     {
-        $unavailable = ['available' => false, 'byDevice' => collect()];
+        $unavailable = [
+            'available' => false,
+            'complete' => false,
+            'byDevice' => collect(),
+        ];
 
         if ($deviceIds->isEmpty() || ! $this->tableExists('eventlog')) {
             return $unavailable;
@@ -2341,11 +2369,26 @@ class Page extends PageHook
                 $select[] = "$messageCol as message";
             }
 
-            $rows = DB::table('eventlog')
+            $grammar = DB::connection()->getQueryGrammar();
+            $wrappedDevice = $grammar->wrap($deviceCol);
+            $wrappedTime = $grammar->wrap($timeCol);
+
+            $ranked = DB::table('eventlog')
                 ->whereIn($deviceCol, $deviceIds)
                 ->where($timeCol, '>=', $since)
-                ->orderByDesc($timeCol)
                 ->select($select)
+                ->selectRaw(
+                    "ROW_NUMBER() OVER (PARTITION BY $wrappedDevice ORDER BY $wrappedTime DESC) as event_rank"
+                );
+
+            $requestedLimit = $deviceIds->count() * self::RECENT_EVENTS_PER_DEVICE;
+            $globalLimit = min(self::RECENT_EVENTS_GLOBAL_LIMIT, $requestedLimit);
+
+            $rows = DB::query()
+                ->fromSub($ranked, 'ranked_events')
+                ->where('event_rank', '<=', self::RECENT_EVENTS_PER_DEVICE)
+                ->orderByDesc('event_time')
+                ->limit($globalLimit)
                 ->get();
         } catch (\Throwable) {
             return $unavailable;
@@ -2362,7 +2405,11 @@ class Page extends PageHook
             ])
             ->groupBy('device_id');
 
-        return ['available' => true, 'byDevice' => $byDevice];
+        return [
+            'available' => true,
+            'complete' => $requestedLimit <= self::RECENT_EVENTS_GLOBAL_LIMIT,
+            'byDevice' => $byDevice,
+        ];
     }
 
     /**
