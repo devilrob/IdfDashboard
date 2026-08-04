@@ -128,10 +128,11 @@ class DeviceAccessTest extends TestCase
 
     public function testLibreNmsControllerStillProtectsPluginSettings(): void
     {
-        $plugin = Plugin::query()->create([
+        $plugin = Plugin::query()->firstOrCreate([
             'plugin_name' => 'IdfDashboard',
-            'plugin_active' => 1,
             'version' => 2,
+        ], [
+            'plugin_active' => 1,
             'settings' => [],
         ]);
         $user = User::factory()->create(['enabled' => 1]);
