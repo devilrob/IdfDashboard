@@ -2,11 +2,15 @@
 
 namespace App\Plugins\IdfDashboard;
 
+use App\Models\Device;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\Config;
+use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use Carbon\Carbon;
+use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -96,7 +100,7 @@ class Page extends PageHook
 
     public function authorize(User $user): bool
     {
-        return $user->can('device.viewAny');
+        return $user->can('viewAny', Device::class);
     }
 
     /**
@@ -107,8 +111,14 @@ class Page extends PageHook
      * an admin edits these, and Support/Config.php for the typed,
      * range-clamped defaults applied to anything unset.
      */
-    public function data(array $settings = []): array
+    public function data(array $settings = [], ?Request $request = null): array
     {
+        $user = $request?->user() ?? request()->user();
+
+        if (! $user instanceof User) {
+            throw new AuthorizationException('An authenticated LibreNMS user is required.');
+        }
+
         $config = Config::resolve($settings);
 
         $this->sensorFreshMinutes = $config['sensor_fresh_minutes'];
@@ -158,8 +168,10 @@ class Page extends PageHook
         ];
 
         /*
-         * Load every active LibreNMS device.
-         * No location or device type is silently excluded.
+         * Load every active LibreNMS device authorized by the core
+         * Device::hasAccess() scope. No authorized location or device
+         * type is silently excluded; every downstream table is then
+         * constrained to the IDs returned by this SQL query.
          *
          * `ignore = 1` is LibreNMS's own "don't alert on this device"
          * flag — distinct from `disabled` (which already excludes a
@@ -176,29 +188,31 @@ class Page extends PageHook
          * separately (`coverage.ignored_count`) so they're visible,
          * never silently dropped from the audit trail.
          */
-        $ignoredCount = (int) DB::table('devices')
+        $authorizedDevices = DeviceAccess::query($user);
+
+        $ignoredCount = (int) (clone $authorizedDevices)
             ->where('disabled', 0)
             ->where('ignore', 1)
             ->count();
 
-        $rawDevices = DB::table('devices as d')
-            ->leftJoin('locations as l', 'l.id', '=', 'd.location_id')
-            ->where('d.disabled', 0)
-            ->where('d.ignore', 0)
+        $rawDevices = (clone $authorizedDevices)
+            ->leftJoin('locations as l', 'l.id', '=', 'devices.location_id')
+            ->where('devices.disabled', 0)
+            ->where('devices.ignore', 0)
             ->select([
                 'l.id as location_id',
                 'l.location',
-                'd.device_id',
-                'd.hostname',
-                'd.display',
-                'd.sysName',
-                'd.type',
-                'd.os',
-                'd.status',
-                'd.last_polled',
+                'devices.device_id',
+                'devices.hostname',
+                'devices.display',
+                'devices.sysName',
+                'devices.type',
+                'devices.os',
+                'devices.status',
+                'devices.last_polled',
             ])
             ->orderBy('l.location')
-            ->orderBy('d.display')
+            ->orderBy('devices.display')
             ->get();
 
         $allDeviceIds = $rawDevices
@@ -2195,8 +2209,7 @@ class Page extends PageHook
      * sensors_to_state_indexes + state_translations (see
      * App\Models\StateTranslation / App\Models\Sensor::
      * currentTranslation() in LibreNMS core — this mirrors that same
-     * lookup with a plain query instead of Eloquent relations, since
-     * this plugin deliberately stays on DB::table() throughout).
+     * lookup with a plain query instead of loading Eloquent relations).
      * Defensive like loadActiveAlerts()/loadRecentEvents(): degrades
      * to an empty result (state sensors fall back to their prior
      * "always healthy, raw number" behavior) rather than breaking the
