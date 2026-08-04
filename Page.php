@@ -2,7 +2,6 @@
 
 namespace App\Plugins\IdfDashboard;
 
-use App\Models\Device;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\Config;
@@ -100,7 +99,7 @@ class Page extends PageHook
 
     public function authorize(User $user): bool
     {
-        return $user->can('viewAny', Device::class);
+        return true;
     }
 
     /**

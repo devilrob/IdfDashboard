@@ -196,6 +196,9 @@ final class IdfDashboardUpdater
             '.github',
             '.claude',
             '.env',
+            '.gitattributes',
+            '.gitignore',
+            'AUDIT_NOTES.md',
             'backups',
             'config.local.php',
             'storage',
@@ -1110,6 +1113,7 @@ HELP);
             'reject_traversal' => ! self::isSafeArchivePath('../Settings.php'),
             'reject_ambiguous_path' => ! self::isSafeArchivePath('./Settings.php'),
             'reject_ci_directory' => ! self::isSafeArchivePath('.github/workflows/release.yml'),
+            'reject_git_metadata' => ! self::isSafeArchivePath('.gitattributes'),
             'trusted_download' => self::isTrustedDownloadUrl('https://api.github.com/repos/devilrob/IdfDashboard/releases'),
             'reject_untrusted_download' => ! self::isTrustedDownloadUrl('https://example.com/payload.zip'),
             'backup_retention' => self::backupsToPrune([

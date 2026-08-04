@@ -2,6 +2,21 @@
 
 All notable changes follow semantic versioning.
 
+## [1.0.1] - 2026-08-04
+
+### Fixed
+
+- Kept the Settings hook registered by returning `true` from its hook-level
+  authorization; LibreNMS 26.8 continues to enforce `plugin.admin` in
+  `PluginSettingsController` for both reading and saving settings.
+- Kept Menu and Page hooks registered instead of discarding them through a
+  `viewAny` policy call that is not usable at this hook boundary in 26.8.
+- Removed hook-level calls to unsupported or unsuitable User authorization
+  methods while preserving granular SQL filtering through
+  `Device::query()->hasAccess($user)`.
+- Added PHP 8.3 to CI and expanded LibreNMS integration coverage for hook
+  registration, controller-protected Settings and empty/limited dashboards.
+
 ## [1.0.0] - 2026-08-04
 
 ### Added

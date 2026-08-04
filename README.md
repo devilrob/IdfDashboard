@@ -7,11 +7,13 @@ LibreNMS infrastructure-health dashboard for NOC and wall-display use.
 - Current LibreNMS plugin architecture.
 - PHP 8.2 or newer.
 - MySQL 8 or MariaDB 10.2+ for the per-device event-log window query.
-- The viewing user must pass LibreNMS's `viewAny` Device policy; plugin Settings
-  require `plugin.admin`.
-  Device visibility is always constrained in SQL through LibreNMS's official
+- Menu and Page hooks remain registered for authenticated LibreNMS users. The
+  Settings route remains protected by LibreNMS's administrative
+  `PluginSettingsController`, which requires `plugin.admin` on GET and POST.
+  Device visibility is constrained in SQL through LibreNMS's official
   `Device::hasAccess($user)` scope. Admin and global-read roles see all devices;
-  itemized users see only their authorized devices and locations.
+  itemized users see only their authorized devices and locations, and users
+  without device permissions receive an empty dashboard.
 
 Install the directory as `/opt/librenms/app/Plugins/IdfDashboard`, enable it in
 LibreNMS, and configure it from the plugin Settings page. Plugin settings remain
@@ -75,6 +77,7 @@ DB_CONNECTION=testing_memory php vendor/bin/phpunit app/Plugins/IdfDashboard/tes
 ```
 
 The test covers administrator, global-read, itemized user, empty device access,
-and a completely unprivileged user. It is intentionally not included in the
-standalone plugin CI because it requires LibreNMS's application, roles, schema,
-factories and database.
+a completely unprivileged user, hook registration and the administrative
+protection in `PluginSettingsController`. It is intentionally not included in
+the standalone plugin CI because it requires LibreNMS's application, roles,
+schema, factories and database.

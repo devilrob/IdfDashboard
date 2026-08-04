@@ -2,7 +2,6 @@
 
 namespace App\Plugins\IdfDashboard;
 
-use App\Models\Device;
 use App\Models\User;
 use App\Plugins\Hooks\MenuEntryHook;
 
@@ -12,7 +11,7 @@ class Menu extends MenuEntryHook
         User $user,
         array $settings = []
     ): bool {
-        return $user->can('viewAny', Device::class);
+        return true;
     }
 
     public function data(array $settings = []): array

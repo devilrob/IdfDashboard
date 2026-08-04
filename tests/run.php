@@ -89,6 +89,8 @@ $assert(! IdfDashboardUpdater::isSafeArchivePath('../Page.php'), 'updater reject
 $assert(! IdfDashboardUpdater::isSafeArchivePath('Support//Version.php'), 'updater rejects ambiguous ZIP path');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('.github/workflows/release.yml'), 'updater rejects CI files');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('tests/run.php'), 'updater rejects test files');
+$assert(! IdfDashboardUpdater::isSafeArchivePath('.gitattributes'), 'updater rejects Git metadata');
+$assert(! IdfDashboardUpdater::isSafeArchivePath('AUDIT_NOTES.md'), 'updater rejects local audit notes');
 $assert(
     IdfDashboardUpdater::isTrustedDownloadUrl('https://release-assets.githubusercontent.com/file'),
     'updater accepts trusted GitHub asset host'
@@ -123,10 +125,35 @@ $assert(
 $pageSource = (string) file_get_contents($root . '/Page.php');
 $deviceAccessSource = (string) file_get_contents($root . '/Support/DeviceAccess.php');
 $menuSource = (string) file_get_contents($root . '/Menu.php');
+$settingsSource = (string) file_get_contents($root . '/Settings.php');
 $assert(str_contains($deviceAccessSource, 'Device::query()->hasAccess($user)'), 'LibreNMS device access scope is the SQL boundary');
 $assert(str_contains($pageSource, 'DeviceAccess::query($user)'), 'dashboard starts from authorized devices');
-$assert(str_contains($pageSource, "can('viewAny', Device::class)"), 'page uses LibreNMS Device policy');
-$assert(str_contains($menuSource, "can('viewAny', Device::class)"), 'menu uses LibreNMS Device policy');
+$assert(
+    preg_match('/function authorize\(User \$user\): bool\s*\{\s*return true;\s*\}/s', $pageSource) === 1,
+    'page hook remains registered'
+);
+$assert(
+    preg_match('/function authorize\(\s*User \$user,\s*array \$settings = \[\]\s*\): bool \{\s*return true;\s*\}/s', $menuSource) === 1,
+    'menu hook remains registered'
+);
+$assert(
+    preg_match('/function authorize\(User \$user\): bool\s*\{.*?return true;\s*\}/s', $settingsSource) === 1,
+    'settings hook delegates authorization to LibreNMS controller'
+);
+$hookSources = $pageSource . $menuSource . $settingsSource;
+$forbiddenUserMethods = [
+    'hasGlobalAdmin(',
+    'isAdmin(',
+    'hasGlobalRead(',
+    "can('admin')",
+    "can('plugin.admin')",
+    "can('viewAny'",
+];
+$unsupportedCalls = array_filter(
+    $forbiddenUserMethods,
+    fn (string $method): bool => str_contains($hookSources, $method)
+);
+$assert($unsupportedCalls === [], 'hooks avoid unsupported or discarding User authorization calls');
 $assert(! str_contains($pageSource, "DB::table('devices"), 'dashboard has no unscoped devices query');
 $assert(str_contains($pageSource, 'ROW_NUMBER() OVER'), 'event query ranks rows in SQL');
 $assert(str_contains($pageSource, 'RECENT_EVENTS_GLOBAL_LIMIT'), 'event query has global ceiling');

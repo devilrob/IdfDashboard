@@ -23,7 +23,8 @@ class Settings extends SettingsHook
 {
     public function authorize(User $user): bool
     {
-        return $user->can('plugin.admin');
+        // LibreNMS PluginSettingsController enforces plugin.admin on GET and POST.
+        return true;
     }
 
     public function data(array $settings = []): array
