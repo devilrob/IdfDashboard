@@ -181,6 +181,122 @@ class DeviceAccessTest extends TestCase
         $this->assertStringNotContainsString((string) $hiddenLocation->location, $html);
     }
 
+    public function testPhaseTwoDeepLinksFiltersAndPaginationNeverCrossDeviceAccess(): void
+    {
+        $allowedLocation = Location::factory()->create(['location' => 'Authorized Phase 2 Location']);
+        $hiddenLocation = Location::factory()->create(['location' => 'SECRET PHASE 2 LOCATION']);
+        $allowed = Device::factory()->create([
+            'display' => 'Authorized Phase 2 Device',
+            'hostname' => 'phase2-allowed.example.com',
+            'ip' => '10.10.20.1',
+            'location_id' => $allowedLocation->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $additional = Device::factory()->count(27)->create([
+            'location_id' => $allowedLocation->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $hidden = Device::factory()->create([
+            'display' => 'SECRET PHASE 2 DEVICE',
+            'hostname' => 'secret-phase2.example.com',
+            'ip' => '10.250.20.99',
+            'location_id' => $hiddenLocation->id,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('user');
+        $user->devicesOwned()->attach([$allowed->device_id, ...$additional->pluck('device_id')->all()]);
+        Permissions::invalidateCache();
+
+        $payloadFor = static function (array $query) use ($user): array {
+            $request = Request::create('/plugin/IdfDashboard', 'GET', $query);
+            $request->setUserResolver(fn (): User => $user);
+
+            return (new Page())->data([], $request);
+        };
+
+        $allowedDevice = $payloadFor(['view' => 'device', 'id' => $allowed->device_id]);
+        $this->assertTrue($allowedDevice['viewData']['found']);
+        $this->assertSame($allowed->device_id, $allowedDevice['viewData']['device']['device_id']);
+        $this->assertSame('10.10.20.1', $allowedDevice['viewData']['device']['ip']);
+
+        $hiddenDevice = $payloadFor(['view' => 'device', 'id' => $hidden->device_id]);
+        $this->assertFalse($hiddenDevice['viewData']['found']);
+        $this->assertStringNotContainsString('SECRET PHASE 2', json_encode($hiddenDevice, JSON_THROW_ON_ERROR));
+        $this->assertStringNotContainsString('10.250.20.99', json_encode($hiddenDevice, JSON_THROW_ON_ERROR));
+
+        $allowedLocationPayload = $payloadFor(['view' => 'location', 'id' => $allowedLocation->id]);
+        $this->assertTrue($allowedLocationPayload['viewData']['found']);
+        $this->assertSame(28, $allowedLocationPayload['viewData']['devices']['total']);
+        $hiddenLocationPayload = $payloadFor(['view' => 'location', 'id' => $hiddenLocation->id]);
+        $this->assertFalse($hiddenLocationPayload['viewData']['found']);
+        $this->assertStringNotContainsString('SECRET PHASE 2', json_encode($hiddenLocationPayload, JSON_THROW_ON_ERROR));
+
+        $searchPayload = $payloadFor(['view' => 'devices', 'search' => 'SECRET PHASE 2']);
+        $this->assertSame(0, $searchPayload['viewData']['devices']['total']);
+        $this->assertSame(0, $searchPayload['visibleSummary']['devices']);
+        $this->assertStringNotContainsString('secret-phase2.example.com', json_encode($searchPayload, JSON_THROW_ON_ERROR));
+
+        $pageTwo = $payloadFor(['view' => 'devices', 'page' => 2, 'per_page' => 25]);
+        $this->assertSame(28, $pageTwo['viewData']['devices']['total']);
+        $this->assertSame(28, $pageTwo['visibleSummary']['devices']);
+        $this->assertSame(2, $pageTwo['viewData']['devices']['page']);
+        $this->assertCount(3, $pageTwo['viewData']['devices']['items']);
+        $this->assertStringNotContainsString('secret-phase2.example.com', json_encode($pageTwo, JSON_THROW_ON_ERROR));
+
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $pageTwo
+        )->render();
+        $this->assertStringContainsString('26–28 of 28', $html);
+        $this->assertStringNotContainsString('secret-phase2.example.com', $html);
+        $this->assertStringNotContainsString('<div class="phase2-tv-source">', $html, 'Desktop requests do not render the hidden TV fleet.');
+    }
+
+    public function testPhaseTwoLocationsUseDeterministicDefensivePagination(): void
+    {
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        foreach (range(1, 30) as $index) {
+            $location = Location::factory()->create([
+                'location' => sprintf('Phase 2 Location %02d', $index),
+            ]);
+            Device::factory()->create([
+                'display' => sprintf('Phase 2 Device %02d', $index),
+                'hostname' => sprintf('phase2-device-%02d.example.com', $index),
+                'location_id' => $location->id,
+                'status' => 1,
+                'disabled' => 0,
+                'ignore' => 0,
+            ]);
+        }
+
+        $request = Request::create('/plugin/IdfDashboard', 'GET', [
+            'view' => 'locations',
+            'page' => 2,
+            'per_page' => 25,
+        ]);
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data([], $request);
+
+        $this->assertSame(30, $payload['viewData']['locations']['total']);
+        $this->assertSame(2, $payload['viewData']['locations']['page']);
+        $this->assertSame(25, $payload['viewData']['locations']['per_page']);
+        $this->assertCount(5, $payload['viewData']['locations']['items']);
+        $this->assertSame(
+            ['Phase 2 Location 26', 'Phase 2 Location 27', 'Phase 2 Location 28', 'Phase 2 Location 29', 'Phase 2 Location 30'],
+            collect($payload['viewData']['locations']['items'])->pluck('name')->all()
+        );
+    }
+
     public function testPhaseOneOperationalStatesUseAuthorizedLibreNmsData(): void
     {
         $location = Location::factory()->create(['location' => 'Phase 1 Lab']);
@@ -733,6 +849,68 @@ class DeviceAccessTest extends TestCase
             memory_get_peak_usage(true),
             strlen($html)
         ));
+
+        $viewQueries = [
+            'overview' => ['view' => 'overview'],
+            'locations' => ['view' => 'locations'],
+            'devices' => ['view' => 'devices', 'per_page' => 25],
+            'location' => ['view' => 'location', 'id' => (int) ($devices->first()->location_id ?? 0), 'per_page' => 25],
+            'device' => ['view' => 'device', 'id' => (int) $devices->first()->device_id],
+            'tv' => ['view' => 'overview', 'tv' => 1],
+        ];
+
+        foreach ($viewQueries as $viewName => $query) {
+            $queryCount = 0;
+            $viewRequest = Request::create('/plugin/IdfDashboard', 'GET', $query);
+            $viewRequest->setUserResolver(fn (): User => $user);
+            $viewMemoryBefore = memory_get_usage(true);
+            $viewStart = hrtime(true);
+            $viewPayload = (new Page())->data([], $viewRequest);
+            $viewMs = (hrtime(true) - $viewStart) / 1_000_000;
+            $viewMemoryGrowth = max(0, memory_get_usage(true) - $viewMemoryBefore);
+            $viewHtml = view()->file(
+                app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+                $viewPayload
+            )->render();
+            $dom = new \DOMDocument();
+            @$dom->loadHTML($viewHtml);
+            $domNodes = $dom->getElementsByTagName('*')->length;
+            $renderedDevices = match ($viewPayload['viewData']['kind']) {
+                'devices', 'location' => count($viewPayload['viewData']['devices']['items'] ?? []),
+                'device' => ($viewPayload['viewData']['found'] ?? false) ? 1 : 0,
+                default => 0,
+            };
+            $renderedIssues = $viewPayload['viewData']['kind'] === 'overview'
+                ? count($viewPayload['viewData']['priority']['items'])
+                : ($viewPayload['viewData']['kind'] === 'device' && ($viewPayload['viewData']['found'] ?? false)
+                    ? $viewPayload['viewData']['device']['issues']->take(10)->count()
+                    : 0);
+
+            $this->assertLessThan(65, $queryCount, "$viewName query count must remain fixed.");
+            $this->assertLessThan(1024 * 1024, strlen($viewHtml), "$viewName HTML must remain below 1 MiB.");
+
+            if ($viewName === 'overview') {
+                $this->assertLessThan(750 * 1024, strlen($viewHtml), 'Large overview target is below 750 KiB.');
+            }
+
+            if (in_array($viewName, ['devices', 'location'], true)) {
+                $this->assertLessThanOrEqual(25, $renderedDevices, "$viewName renders only one defensive page.");
+            }
+
+            fwrite(STDOUT, sprintf(
+                "Phase 2 performance: scale=%s view=%s queries=%d data_ms=%.2f memory_growth=%d peak_memory=%d html_bytes=%d dom_nodes=%d devices_rendered=%d issues_rendered=%d\n",
+                $scale,
+                $viewName,
+                $queryCount,
+                $viewMs,
+                $viewMemoryGrowth,
+                memory_get_peak_usage(true),
+                strlen($viewHtml),
+                $domNodes,
+                $renderedDevices,
+                $renderedIssues
+            ));
+        }
     }
 
     public function testRealDeviceRowsReceiveExactlyOneSupportedClassification(): void

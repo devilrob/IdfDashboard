@@ -176,6 +176,31 @@ $assert($defaults['update_check_enabled'] === true, 'periodic update check defau
 $assert(Config::resolve(['refresh_seconds' => 1])['refresh_seconds'] === 5, 'config lower clamp');
 $assert(Config::resolve(['refresh_seconds' => 99999])['refresh_seconds'] === 3600, 'config upper clamp');
 $assert(Config::resolve(['animations_enabled' => '0'])['animations_enabled'] === false, 'config boolean');
+$assert($defaults['default_view'] === 'overview' && $defaults['devices_per_page'] === 25, 'Phase 2 navigation defaults');
+$assert(Config::resolve(['default_view' => 'invalid'])['default_view'] === 'overview', 'config rejects invalid default view');
+$assert(Config::resolve(['devices_per_page' => '100'])['devices_per_page'] === 100, 'config accepts defensive page size');
+$assert(Config::resolve(['devices_per_page' => '5000'])['devices_per_page'] === 25, 'config rejects unlimited page size');
+$normalizedRequest = Config::normalizeDashboardRequest([
+    'view' => 'devices',
+    'search' => str_repeat('x', 150),
+    'severity' => 'critical',
+    'category' => 'Server',
+    'sort' => 'arbitrary_sql',
+    'direction' => 'sideways',
+    'page' => '-2',
+    'per_page' => '5000',
+    'problems_only' => '1',
+    'unknown_parameter' => 'ignored',
+], $defaults);
+$assert($normalizedRequest['view'] === 'devices' && strlen($normalizedRequest['search']) === 100, 'request view and search are normalized');
+$assert($normalizedRequest['sort'] === 'severity' && $normalizedRequest['direction'] === 'asc', 'request sort whitelist is strict');
+$assert($normalizedRequest['page'] === 1 && $normalizedRequest['per_page'] === 25, 'request pagination is defensive');
+$assert($normalizedRequest['problems_only'] === true && ! array_key_exists('unknown_parameter', $normalizedRequest), 'request booleans and unknown keys are normalized');
+$pageSource = file_get_contents(__DIR__ . '/../Page.php');
+$assert(
+    str_contains($pageSource, "DB::table('availability')") && str_contains($pageSource, "->whereIn('device_id', \$deviceIds)"),
+    'availability is restricted to the authorized device ID set'
+);
 
 $assert(
     ! ProblemPolicy::metricEnabled(['temperature' => true, 'stale' => false], 'temperature', true),
