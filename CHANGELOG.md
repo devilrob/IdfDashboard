@@ -2,6 +2,24 @@
 
 All notable changes follow semantic versioning.
 
+## [1.0.4] - 2026-08-05
+
+### Security
+
+- Added an updater bridge with closed, version-selected package profiles: the
+  legacy `1.0.x` profile accepts exactly 14 files and the functional `1.1.x`
+  profile accepts exactly 18 files.
+- Reject packages with missing or additional files, unknown profiles, invalid
+  target versions, mismatched archive checksums, symbolic links, traversal or
+  excessive ZIP expansion before activation.
+
+### Changed
+
+- Require v1.0.4 as the updater bridge before an automatic upgrade from an
+  earlier release to v1.1.0 or newer.
+- Preserve the exact v1.0.3 dashboard behavior, hooks and views; this release
+  contains no functional or visual dashboard changes.
+
 ## [1.0.3] - 2026-08-04
 
 ### Security

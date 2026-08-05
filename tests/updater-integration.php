@@ -5,7 +5,9 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/bin/update.php';
 
 $sourceRoot = dirname(__DIR__);
-$candidateVersion = \App\Plugins\IdfDashboard\Support\Version::VERSION;
+$installedVersion = '1.0.3';
+$bridgeVersion = \App\Plugins\IdfDashboard\Support\Version::VERSION;
+$candidateVersion = '1.1.0';
 $linuxUpgrades = in_array('--linux-upgrades', $argv, true);
 $assertions = 0;
 
@@ -49,25 +51,14 @@ $removeTree = static function (string $path) use (&$removeTree): void {
     rmdir($path);
 };
 
-$packageFiles = [
-    'bin/update.php',
-    'CHANGELOG.md',
-    'Menu.php',
-    'Page.php',
-    'README.md',
-    'resources/views/menu.blade.php',
-    'resources/views/page.blade.php',
-    'resources/views/settings.blade.php',
-    'Settings.php',
-    'Support/Config.php',
-    'Support/DeviceAccess.php',
-    'Support/ProblemPolicy.php',
-    'Support/UpdateStatus.php',
-    'Support/Version.php',
-];
+$copyPackage = static function (
+    string $destination,
+    string $marker,
+    string $version
+) use ($sourceRoot): void {
+    $profile = IdfDashboardUpdater::packageProfileForVersion($version);
 
-$copyPackage = static function (string $destination, string $marker) use ($sourceRoot, $packageFiles): void {
-    foreach ($packageFiles as $relative) {
+    foreach ($profile['required'] as $relative) {
         $target = $destination . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
         $parent = dirname($target);
 
@@ -75,21 +66,86 @@ $copyPackage = static function (string $destination, string $marker) use ($sourc
             throw new RuntimeException('Unable to create test package directory.');
         }
 
-        if (! copy($sourceRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative), $target)) {
-            throw new RuntimeException('Unable to copy test package file: ' . $relative);
+        $source = $sourceRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+
+        if (is_file($source)) {
+            if (! copy($source, $target)) {
+                throw new RuntimeException('Unable to copy test package file: ' . $relative);
+            }
+        } elseif (str_starts_with($relative, 'Support/')) {
+            $class = pathinfo($relative, PATHINFO_FILENAME);
+            file_put_contents(
+                $target,
+                "<?php\n\nnamespace App\\Plugins\\IdfDashboard\\Support;\n\nfinal class {$class}\n{\n}\n"
+            );
+        } else {
+            throw new RuntimeException('Unable to source test package file: ' . $relative);
         }
     }
 
+    $versionPath = $destination . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php';
+    $versionSource = (string) file_get_contents($versionPath);
+    $versionSource = preg_replace(
+        "/public const VERSION\s*=\s*'[^']+';/",
+        "public const VERSION = '$version';",
+        $versionSource,
+        1
+    );
+    file_put_contents($versionPath, $versionSource);
     file_put_contents($destination . DIRECTORY_SEPARATOR . 'README.md', PHP_EOL . $marker . PHP_EOL, FILE_APPEND);
 };
 
-$createEnvironment = static function (string $base, string $marker) use ($copyPackage): array {
+$gitFile = static function (string $tag, string $relative) use ($sourceRoot): string {
+    $output = [];
+    $status = 1;
+    exec(
+        'git -c ' . escapeshellarg('safe.directory=' . $sourceRoot)
+            . ' -C ' . escapeshellarg($sourceRoot)
+            . ' show ' . escapeshellarg($tag . ':' . $relative) . ' 2>&1',
+        $output,
+        $status
+    );
+
+    if ($status !== 0) {
+        throw new RuntimeException('Unable to read published file ' . $tag . ':' . $relative);
+    }
+
+    return implode(PHP_EOL, $output) . PHP_EOL;
+};
+
+$hydrateLegacyApplication = static function (string $destination, string $tag) use ($gitFile): void {
+    $applicationFiles = array_values(array_diff(
+        IdfDashboardUpdater::packageProfileForVersion('1.0.3')['required'],
+        ['bin/update.php', 'Support/Version.php', 'README.md', 'CHANGELOG.md']
+    ));
+
+    foreach ($applicationFiles as $relative) {
+        $target = $destination . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+        file_put_contents($target, $gitFile($tag, $relative));
+    }
+};
+
+$copyBridgePackage = static function (string $destination, string $marker) use (
+    $copyPackage,
+    $hydrateLegacyApplication,
+    $bridgeVersion
+): void {
+    $copyPackage($destination, $marker, $bridgeVersion);
+    $hydrateLegacyApplication($destination, 'v1.0.3');
+};
+
+$createEnvironment = static function (
+    string $base,
+    string $marker,
+    ?string $version = null
+) use ($copyPackage): array {
+    $version ??= \App\Plugins\IdfDashboard\Support\Version::VERSION;
     $libreNms = $base . DIRECTORY_SEPARATOR . 'librenms';
     $plugins = $libreNms . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Plugins';
     $active = $plugins . DIRECTORY_SEPARATOR . 'IdfDashboard';
     $storage = $libreNms . DIRECTORY_SEPARATOR . 'plugin-backups' . DIRECTORY_SEPARATOR . 'IdfDashboard';
     mkdir($plugins, 0750, true);
-    $copyPackage($active, $marker);
+    $copyPackage($active, $marker, $version);
 
     $artisan = <<<'PHP'
 <?php
@@ -138,6 +194,195 @@ try {
     $assert($insidePluginsRejected, 'backup storage inside app/Plugins is rejected');
     $updater = new IdfDashboardUpdater($active, $storage);
     $invoke($updater, 'initializeStorage');
+
+    $legacyProfile = IdfDashboardUpdater::packageProfileForVersion($bridgeVersion);
+    $phase1Profile = IdfDashboardUpdater::packageProfileForVersion($candidateVersion);
+    $assert($legacyProfile['name'] === 'legacy-v1', 'bridge selects the exact legacy-v1 profile');
+    $assert(count($legacyProfile['required']) === 14, 'legacy-v1 profile contains exactly 14 files');
+    $assert($phase1Profile['name'] === 'phase1-v1', 'functional release selects the exact phase1-v1 profile');
+    $assert(count($phase1Profile['required']) === 18, 'phase1-v1 profile contains exactly 18 files');
+    $assert(
+        preg_match('/^[a-f0-9]{64}$/', $legacyProfile['checksum']) === 1
+            && preg_match('/^[a-f0-9]{64}$/', $phase1Profile['checksum']) === 1,
+        'each package profile exposes a stable file-list checksum'
+    );
+
+    $bridgePackage = $testRoot . DIRECTORY_SEPARATOR . 'bridge-package';
+    $phase1Package = $testRoot . DIRECTORY_SEPARATOR . 'phase1-package';
+    $copyBridgePackage($bridgePackage, 'BRIDGE');
+    $copyPackage($phase1Package, 'PHASE1', $candidateVersion);
+    $updater->validateReleasePackage($bridgePackage, $bridgeVersion);
+    $assert(true, 'bridge updater accepts an exact 14-file package');
+    $assert(
+        ! str_contains((string) file_get_contents($bridgePackage . DIRECTORY_SEPARATOR . 'Page.php'), 'Support\\Severity'),
+        'bridge package retains the published v1.0.3 application without Phase 1 dependencies'
+    );
+    $updater->validateReleasePackage($phase1Package, $candidateVersion);
+    $assert(true, 'bridge updater accepts an exact 18-file package');
+
+    foreach ([
+        'bridge' => [$bridgePackage, $bridgeVersion, $legacyProfile],
+        'phase1' => [$phase1Package, $candidateVersion, $phase1Profile],
+    ] as $archiveName => [$packagePath, $packageVersion, $profile]) {
+        $archivePath = $testRoot . DIRECTORY_SEPARATOR . $archiveName . '.zip';
+        $extractPath = $testRoot . DIRECTORY_SEPARATOR . $archiveName . '-extract';
+        $zip = new ZipArchive();
+
+        if ($zip->open($archivePath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException('Unable to create valid ' . $archiveName . ' ZIP fixture.');
+        }
+
+        foreach ($profile['required'] as $relative) {
+            $zip->addFile(
+                $packagePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative),
+                'IdfDashboard/' . $relative
+            );
+        }
+
+        $zip->close();
+        $invoke($updater, 'extractArchive', [$archivePath, $extractPath]);
+        $extractedPackage = $extractPath . DIRECTORY_SEPARATOR . 'IdfDashboard';
+        $updater->validateReleasePackage($extractedPackage, $packageVersion);
+        $extractedFiles = [];
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($extractedPackage, FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($iterator as $file) {
+            if ($file->isFile()) {
+                $extractedFiles[] = str_replace('\\', '/', substr(
+                    $file->getPathname(),
+                    strlen($extractedPackage) + 1
+                ));
+            }
+        }
+
+        sort($extractedFiles);
+        $expectedFiles = $profile['required'];
+        sort($expectedFiles);
+        $assert($extractedFiles === $expectedFiles, $archiveName . ' ZIP extracts to its exact closed profile');
+    }
+
+    $missingPackage = $testRoot . DIRECTORY_SEPARATOR . 'phase1-missing-support';
+    $copyPackage($missingPackage, 'MISSING', $candidateVersion);
+    unlink($missingPackage . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Severity.php');
+    $missingRejected = false;
+
+    try {
+        $updater->validateReleasePackage($missingPackage, $candidateVersion);
+    } catch (RuntimeException $exception) {
+        $missingRejected = str_contains($exception->getMessage(), 'missing required file');
+    }
+
+    $assert($missingRejected, 'bridge updater rejects a 17-file Phase 1 package');
+
+    $extraPackage = $testRoot . DIRECTORY_SEPARATOR . 'phase1-extra-file';
+    $copyPackage($extraPackage, 'EXTRA', $candidateVersion);
+    file_put_contents($extraPackage . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Unexpected.php', '<?php');
+    $extraRejected = false;
+
+    try {
+        $updater->validateReleasePackage($extraPackage, $candidateVersion);
+    } catch (RuntimeException $exception) {
+        $extraRejected = str_contains($exception->getMessage(), 'Unexpected release file');
+    }
+
+    $assert($extraRejected, 'bridge updater rejects a 19-file Phase 1 package');
+
+    if (function_exists('symlink')) {
+        $symlinkPackage = $testRoot . DIRECTORY_SEPARATOR . 'phase1-symlink';
+        $copyPackage($symlinkPackage, 'SYMLINK', $candidateVersion);
+        $readme = $symlinkPackage . DIRECTORY_SEPARATOR . 'README.md';
+        unlink($readme);
+
+        if (@symlink($sourceRoot . DIRECTORY_SEPARATOR . 'README.md', $readme)) {
+            $symlinkRejected = false;
+
+            try {
+                $updater->validateReleasePackage($symlinkPackage, $candidateVersion);
+            } catch (RuntimeException $exception) {
+                $symlinkRejected = str_contains($exception->getMessage(), 'Symbolic links');
+            }
+
+            $assert($symlinkRejected, 'bridge updater rejects a package symlink');
+        }
+    }
+
+    $falseVersionRejected = false;
+
+    try {
+        $updater->validateReleasePackage($phase1Package, '1.1.1');
+    } catch (RuntimeException $exception) {
+        $falseVersionRejected = str_contains($exception->getMessage(), 'does not match');
+    }
+
+    $assert($falseVersionRejected, 'bridge updater rejects a false target version');
+    $unknownProfileRejected = false;
+
+    try {
+        IdfDashboardUpdater::packageProfileForVersion('2.0.0');
+    } catch (RuntimeException $exception) {
+        $unknownProfileRejected = str_contains($exception->getMessage(), 'known package profile');
+    }
+
+    $assert($unknownProfileRejected, 'bridge updater rejects an unknown package profile');
+    $downgradeRejected = false;
+
+    try {
+        IdfDashboardUpdater::assertVersionTransition($bridgeVersion, $installedVersion, false, false);
+    } catch (RuntimeException $exception) {
+        $downgradeRejected = str_contains($exception->getMessage(), 'Downgrade refused');
+    }
+
+    $assert($downgradeRejected, 'bridge updater rejects an implicit downgrade');
+    IdfDashboardUpdater::assertVersionTransition($bridgeVersion, $installedVersion, true, false);
+    $assert(true, 'bridge updater permits only an explicit downgrade transition');
+    $invalidDowngradeFlagRejected = false;
+
+    try {
+        IdfDashboardUpdater::assertVersionTransition($installedVersion, $bridgeVersion, true, false);
+    } catch (RuntimeException $exception) {
+        $invalidDowngradeFlagRejected = str_contains($exception->getMessage(), 'only valid for an older version');
+    }
+
+    $assert($invalidDowngradeFlagRejected, 'downgrade flag is rejected for an upgrade');
+
+    $legacyUpdaterLines = [];
+    $legacyUpdaterStatus = 1;
+    exec(
+        'git -c ' . escapeshellarg('safe.directory=' . $sourceRoot)
+            . ' -C ' . escapeshellarg($sourceRoot) . ' show v1.0.3:bin/update.php 2>&1',
+        $legacyUpdaterLines,
+        $legacyUpdaterStatus
+    );
+    $assert($legacyUpdaterStatus === 0, 'published v1.0.3 updater source is available for compatibility proof');
+    $legacyUpdaterRoot = $testRoot . DIRECTORY_SEPARATOR . 'published-v1.0.3';
+    $copyPackage($legacyUpdaterRoot, 'PUBLISHED-V1.0.3', $installedVersion);
+    $legacyUpdaterSource = implode(PHP_EOL, $legacyUpdaterLines) . PHP_EOL;
+    file_put_contents($legacyUpdaterRoot . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php', $legacyUpdaterSource);
+    putenv('IDF_LEGACY_UPDATER=' . $legacyUpdaterRoot . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php');
+    putenv('IDF_LEGACY_ROOT=' . $legacyUpdaterRoot);
+    putenv('IDF_PHASE1_PACKAGE=' . $phase1Package);
+    putenv('IDF_PHASE1_VERSION=' . $candidateVersion);
+    $legacyCheckCode = <<<'PHP'
+<?php
+require getenv('IDF_LEGACY_UPDATER');
+(new IdfDashboardUpdater(getenv('IDF_LEGACY_ROOT')))
+    ->validateReleasePackage(getenv('IDF_PHASE1_PACKAGE'), getenv('IDF_PHASE1_VERSION'));
+PHP;
+    $legacyCheckRunner = $testRoot . DIRECTORY_SEPARATOR . 'legacy-updater-check.php';
+    file_put_contents($legacyCheckRunner, $legacyCheckCode);
+    $legacyOutput = [];
+    $legacyExit = 0;
+    exec(
+        implode(' ', array_map('escapeshellarg', [PHP_BINARY, $legacyCheckRunner])) . ' 2>&1',
+        $legacyOutput,
+        $legacyExit
+    );
+    $assert(
+        $legacyExit !== 0 && str_contains(implode(' ', $legacyOutput), 'Unexpected release file'),
+        'published v1.0.3 updater rejects the 18-file Phase 1 package'
+    );
 
     $recoverConflictRejected = false;
 
@@ -207,6 +452,24 @@ try {
     );
     $removeTree($oversizedManifestExtract);
     unlink($oversizedManifestZip);
+
+    $traversalZip = $testRoot . DIRECTORY_SEPARATOR . 'traversal.zip';
+    $traversalExtract = $testRoot . DIRECTORY_SEPARATOR . 'traversal-extract';
+    $traversalEscape = $testRoot . DIRECTORY_SEPARATOR . 'escaped.php';
+    $zip = new ZipArchive();
+    $zip->open($traversalZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $zip->addFromString('../escaped.php', '<?php');
+    $zip->close();
+    $traversalRejected = false;
+
+    try {
+        $invoke($updater, 'extractArchive', [$traversalZip, $traversalExtract]);
+    } catch (RuntimeException $exception) {
+        $traversalRejected = str_contains($exception->getMessage(), 'invalid entry metadata');
+    }
+
+    $assert($traversalRejected, 'ZIP traversal is rejected during isolated extraction');
+    $assert(! file_exists($traversalEscape), 'ZIP traversal writes nothing outside extraction');
 
     $legacyName = 'IdfDashboard.backup-20260804-203726-v1.0.1';
     mkdir($plugins . DIRECTORY_SEPARATOR . $legacyName, 0750);
@@ -307,7 +570,7 @@ try {
         'ORIGINAL'
     );
     $extracted = $testRoot . DIRECTORY_SEPARATOR . 'success-package';
-    $copyPackage($extracted, 'UPDATED');
+    $copyPackage($extracted, 'UPDATED', $candidateVersion);
     chmod($successActive, 0750);
     chmod($successActive . DIRECTORY_SEPARATOR . 'Menu.php', 0644);
     $originalRootMode = fileperms($successActive) & 0777;
@@ -363,7 +626,7 @@ try {
         'ORIGINAL'
     );
     $rollbackPackage = $testRoot . DIRECTORY_SEPARATOR . 'rollback-package';
-    $copyPackage($rollbackPackage, 'BROKEN-CANDIDATE');
+    $copyPackage($rollbackPackage, 'BROKEN-CANDIDATE', $candidateVersion);
     file_put_contents($rollbackRoot . DIRECTORY_SEPARATOR . 'fail-next-view-clear', '1');
     $rollbackUpdater = new IdfDashboardUpdater($rollbackActive, $rollbackStorage);
     $invoke($rollbackUpdater, 'initializeStorage');
@@ -427,7 +690,7 @@ try {
     );
     $refusalBackup = $refusalStorage . DIRECTORY_SEPARATOR
         . 'IdfDashboard.backup-20260804-230100-v' . $candidateVersion;
-    $copyPackage($refusalBackup, 'BACKUP-MUST-STAY');
+    $copyPackage($refusalBackup, 'BACKUP-MUST-STAY', $installedVersion);
     $refusalUpdater = new IdfDashboardUpdater($refusalBackup, $refusalStorage);
     $activeRecoveryRefused = false;
 
@@ -444,28 +707,9 @@ try {
     );
 
     if ($linuxUpgrades) {
-        foreach (['1.0.0', '1.0.1'] as $fromVersion) {
-            [$upgradeRoot, $upgradePlugins, $upgradeActive, $upgradeStorage] = $createEnvironment(
-                $testRoot . DIRECTORY_SEPARATOR . 'candidate-upgrade-' . str_replace('.', '-', $fromVersion),
-                'BOOTSTRAPPED-' . $fromVersion
-            );
-            $candidatePackage = $testRoot . DIRECTORY_SEPARATOR
-                . 'candidate-package-' . str_replace('.', '-', $fromVersion);
-            $copyPackage($candidatePackage, 'CANDIDATE-' . $candidateVersion);
-
-            $versionPath = $upgradeActive . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php';
-            $versionSource = (string) file_get_contents($versionPath);
-            file_put_contents(
-                $versionPath,
-                str_replace("VERSION = '$candidateVersion'", "VERSION = '$fromVersion'", $versionSource)
-            );
-
-            putenv('IDF_BOOTSTRAP_UPDATER=' . $upgradeActive . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php');
-            putenv('IDF_BOOTSTRAP_ACTIVE=' . $upgradeActive);
-            putenv('IDF_BOOTSTRAP_STORAGE=' . $upgradeStorage);
-            putenv('IDF_BOOTSTRAP_CANDIDATE=' . $candidatePackage);
-            putenv('IDF_BOOTSTRAP_VERSION=' . $candidateVersion);
-            $bootstrapCode = <<<'PHP'
+        $activationRunner = $testRoot . DIRECTORY_SEPARATOR . 'activate-package.php';
+        file_put_contents($activationRunner, <<<'PHP'
+<?php
 require getenv('IDF_BOOTSTRAP_UPDATER');
 $updater = new IdfDashboardUpdater(
     getenv('IDF_BOOTSTRAP_ACTIVE'),
@@ -479,35 +723,107 @@ $activate->invoke(
     getenv('IDF_BOOTSTRAP_CANDIDATE'),
     getenv('IDF_BOOTSTRAP_VERSION')
 );
-PHP;
-            $command = implode(' ', array_map('escapeshellarg', [
-                PHP_BINARY,
-                '-r',
-                $bootstrapCode,
-            ]));
+PHP);
+        $runActivation = static function (
+            string $active,
+            string $storage,
+            string $candidate,
+            string $version
+        ) use ($activationRunner): array {
+            putenv('IDF_BOOTSTRAP_UPDATER=' . $active . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php');
+            putenv('IDF_BOOTSTRAP_ACTIVE=' . $active);
+            putenv('IDF_BOOTSTRAP_STORAGE=' . $storage);
+            putenv('IDF_BOOTSTRAP_CANDIDATE=' . $candidate);
+            putenv('IDF_BOOTSTRAP_VERSION=' . $version);
             $output = [];
             $status = 1;
-            exec($command . ' 2>&1', $output, $status);
+            exec(
+                implode(' ', array_map('escapeshellarg', [PHP_BINARY, $activationRunner])) . ' 2>&1',
+                $output,
+                $status
+            );
 
-            $installedVersion = (string) file_get_contents($versionPath);
+            return [$status, $output];
+        };
+
+        foreach (['1.0.2', '1.0.3'] as $fromVersion) {
+            [$upgradeRoot, $upgradePlugins, $upgradeActive, $upgradeStorage] = $createEnvironment(
+                $testRoot . DIRECTORY_SEPARATOR . 'bridge-upgrade-' . str_replace('.', '-', $fromVersion),
+                'BOOTSTRAPPED-' . $fromVersion,
+                $fromVersion
+            );
+            $hydrateLegacyApplication($upgradeActive, 'v' . $fromVersion);
+            file_put_contents(
+                $upgradeActive . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'update.php',
+                $gitFile('v' . $fromVersion, 'bin/update.php')
+            );
+            $assert(true, 'published v' . $fromVersion . ' application and updater are available');
+
+            $bridgeUpgradePackage = $testRoot . DIRECTORY_SEPARATOR
+                . 'bridge-package-' . str_replace('.', '-', $fromVersion);
+            $functionalPackage = $testRoot . DIRECTORY_SEPARATOR
+                . 'functional-package-' . str_replace('.', '-', $fromVersion);
+            $copyBridgePackage($bridgeUpgradePackage, 'BRIDGE-' . $bridgeVersion);
+            $copyPackage($functionalPackage, 'FUNCTIONAL-' . $candidateVersion, $candidateVersion);
+
+            $versionPath = $upgradeActive . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php';
+            [$bridgeStatus, $bridgeOutput] = $runActivation(
+                $upgradeActive,
+                $upgradeStorage,
+                $bridgeUpgradePackage,
+                $bridgeVersion
+            );
+            $activeVersionSource = (string) file_get_contents($versionPath);
+            $assert(
+                $bridgeStatus === 0 && str_contains($activeVersionSource, "VERSION = '$bridgeVersion'"),
+                'published v' . $fromVersion . ' updater installs bridge v' . $bridgeVersion
+                    . ($bridgeStatus === 0 ? '' : ' (exit ' . $bridgeStatus . ': ' . implode(' | ', $bridgeOutput) . ')')
+            );
+
+            file_put_contents($upgradeRoot . DIRECTORY_SEPARATOR . 'fail-next-view-clear', '1');
+            [$rollbackStatus, $rollbackOutput] = $runActivation(
+                $upgradeActive,
+                $upgradeStorage,
+                $functionalPackage,
+                $candidateVersion
+            );
+            $rolledBackVersion = (string) file_get_contents($versionPath);
+            $assert(
+                $rollbackStatus !== 0
+                    && str_contains(implode(' ', $rollbackOutput), 'automatic rollback succeeded')
+                    && str_contains($rolledBackVersion, "VERSION = '$bridgeVersion'"),
+                'failed Phase 1 activation rolls back to bridge v' . $bridgeVersion
+            );
+
+            [$functionalStatus, $functionalOutput] = $runActivation(
+                $upgradeActive,
+                $upgradeStorage,
+                $functionalPackage,
+                $candidateVersion
+            );
+            $activeVersionSource = (string) file_get_contents($versionPath);
             $upgradeRelated = array_values(array_filter(
                 scandir($upgradePlugins) ?: [],
                 static fn (string $name): bool => preg_match('/^\.?IdfDashboard/', $name) === 1
             ));
             $backups = glob($upgradeStorage . DIRECTORY_SEPARATOR . 'IdfDashboard.backup-*') ?: [];
-            $backupVersion = count($backups) === 1
-                ? (string) file_get_contents($backups[0] . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php')
-                : '';
+            $backupVersions = array_map(
+                static fn (string $backup): string => (string) file_get_contents(
+                    $backup . DIRECTORY_SEPARATOR . 'Support' . DIRECTORY_SEPARATOR . 'Version.php'
+                ),
+                $backups
+            );
 
             $assert(
-                $status === 0 && str_contains($installedVersion, "VERSION = '$candidateVersion'"),
-                'bootstrapped updater upgrades v' . $fromVersion . ' to candidate v' . $candidateVersion
-                    . ($status === 0 ? '' : ' (exit ' . $status . ': ' . implode(' | ', $output) . ')')
+                $functionalStatus === 0 && str_contains($activeVersionSource, "VERSION = '$candidateVersion'"),
+                'bridge upgrades v' . $fromVersion . ' through v' . $bridgeVersion . ' to Phase 1 v' . $candidateVersion
+                    . ($functionalStatus === 0 ? '' : ' (exit ' . $functionalStatus . ': ' . implode(' | ', $functionalOutput) . ')')
             );
-            $assert($upgradeRelated === ['IdfDashboard'], 'candidate upgrade leaves clean plugin scan');
+            $assert($upgradeRelated === ['IdfDashboard'], 'bridge flow leaves a clean plugin scan');
             $assert(
-                str_contains($backupVersion, "VERSION = '$fromVersion'"),
-                'candidate upgrade retains the v' . $fromVersion . ' backup externally'
+                array_filter($backupVersions, fn (string $source): bool => str_contains($source, "VERSION = '$fromVersion'")) !== []
+                    && array_filter($backupVersions, fn (string $source): bool => str_contains($source, "VERSION = '$bridgeVersion'")) !== [],
+                'bridge flow retains source and bridge backups externally'
             );
         }
     }

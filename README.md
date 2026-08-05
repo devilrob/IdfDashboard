@@ -59,12 +59,13 @@ validates and self-tests the backup, restores it with a same-filesystem rename,
 clears compiled views and writes the result to the external audit log. The
 explicit root keeps recovery safe when `--backup-dir` was customized.
 
-When upgrading from a release whose installed updater does not yet support
-`--recover`, bootstrap only the updater from the target, checksum-verified ZIP
-before activation. For v1.0.3:
+When upgrading from v1.0.3 or earlier, install v1.0.4 first. Its updater bridge
+understands both the exact 14-file `1.0.x` package and the exact 18-file `1.1.x`
+package. Do not skip this bridge before an automatic v1.1.0 upgrade. Bootstrap
+only the updater from the checksum-verified v1.0.4 ZIP before activation:
 
 ```bash
-TAG=v1.0.3
+TAG=v1.0.4
 UPDATE_TMP="$(mktemp -d)"
 cd "$UPDATE_TMP"
 curl -fLO "https://github.com/devilrob/IdfDashboard/releases/download/${TAG}/IdfDashboard-${TAG}.zip"
@@ -79,6 +80,10 @@ php /opt/librenms/app/Plugins/IdfDashboard/bin/update.php --install --tag="$TAG"
 
 Remove the temporary download directory after reviewing the result. Do not run
 these commands as root.
+
+After v1.0.4 is active, use its installed updater to validate and install
+v1.1.0. The bridge rejects packages that do not exactly match the closed file
+profile selected by the target version.
 
 `--dry-run` performs every download and validation step without activation.
 Backups default to the five newest matching directories and can be configured
@@ -106,7 +111,7 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.0.3`. GitHub Actions validates the tag/version match, runs PHP
+tag such as `v1.0.4`. GitHub Actions validates the tag/version match, runs PHP
 and JavaScript checks, builds the minimal plugin ZIP, generates `SHA256SUMS`,
 and publishes both assets to the stable GitHub release.
 

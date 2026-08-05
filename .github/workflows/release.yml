@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Set up PHP
         uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
@@ -183,7 +185,22 @@ jobs:
           ARCHIVE="IdfDashboard-${TAG}.zip"
           mkdir -p dist/package/Support dist/package/resources/views dist/package/bin
           cp Menu.php Page.php Settings.php README.md CHANGELOG.md dist/package/
-          cp Support/Config.php Support/DeviceAccess.php Support/ProblemPolicy.php Support/UpdateStatus.php Support/Version.php dist/package/Support/
+          SUPPORT_FILES=(
+            Support/Config.php
+            Support/DeviceAccess.php
+            Support/ProblemPolicy.php
+            Support/UpdateStatus.php
+            Support/Version.php
+          )
+          if php -r 'exit(version_compare(getenv("VERSION"), "1.1.0", ">=") ? 0 : 1);'; then
+            SUPPORT_FILES+=(
+              Support/DeviceClassifier.php
+              Support/Freshness.php
+              Support/IssueBuilder.php
+              Support/Severity.php
+            )
+          fi
+          cp "${SUPPORT_FILES[@]}" dist/package/Support/
           cp resources/views/menu.blade.php resources/views/page.blade.php resources/views/settings.blade.php dist/package/resources/views/
           cp bin/update.php dist/package/bin/
           php -r 'require "bin/update.php"; (new IdfDashboardUpdater())->validateReleasePackage("dist/package", getenv("VERSION"));'

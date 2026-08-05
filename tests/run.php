@@ -88,6 +88,35 @@ $assert(IdfDashboardUpdater::isSafeArchivePath('Support/Version.php'), 'updater 
 $assert(! IdfDashboardUpdater::isSafeArchivePath('../Page.php'), 'updater rejects ZIP traversal');
 $assert(! IdfDashboardUpdater::isSafeArchivePath('Support//Version.php'), 'updater rejects ambiguous ZIP path');
 
+$legacyProfile = IdfDashboardUpdater::packageProfileForVersion('1.0.4');
+$phase1Profile = IdfDashboardUpdater::packageProfileForVersion('1.1.0');
+$assert(
+    $legacyProfile['name'] === 'legacy-v1'
+        && count($legacyProfile['required']) === 14
+        && $legacyProfile['optional'] === [],
+    'updater selects the exact closed 14-file legacy profile'
+);
+$assert(
+    $phase1Profile['name'] === 'phase1-v1'
+        && count($phase1Profile['required']) === 18
+        && $phase1Profile['optional'] === [],
+    'updater selects the exact closed 18-file Phase 1 profile'
+);
+$assert(
+    preg_match('/^[a-f0-9]{64}$/', $legacyProfile['checksum']) === 1
+        && preg_match('/^[a-f0-9]{64}$/', $phase1Profile['checksum']) === 1,
+    'package profiles expose stable file-list checksums'
+);
+$unknownProfileRejected = false;
+
+try {
+    IdfDashboardUpdater::packageProfileForVersion('2.0.0');
+} catch (RuntimeException $exception) {
+    $unknownProfileRejected = str_contains($exception->getMessage(), 'known package profile');
+}
+
+$assert($unknownProfileRejected, 'updater rejects an unknown package profile');
+
 $archiveEntryLimitRejected = false;
 
 try {

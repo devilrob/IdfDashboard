@@ -22,7 +22,7 @@ final class IdfDashboardUpdater
 
     private const MIN_STAGING_HEADROOM_BYTES = 5242880;
 
-    private const REQUIRED_PATHS = [
+    private const LEGACY_V1_PATHS = [
         'Menu.php',
         'Page.php',
         'Settings.php',
@@ -35,12 +35,29 @@ final class IdfDashboardUpdater
         'resources/views/page.blade.php',
         'resources/views/settings.blade.php',
         'bin/update.php',
-    ];
-
-    private const OPTIONAL_PATHS = [
         'CHANGELOG.md',
         'README.md',
-        'LICENSE',
+    ];
+
+    private const PHASE1_V1_PATHS = [
+        'Menu.php',
+        'Page.php',
+        'Settings.php',
+        'Support/Config.php',
+        'Support/DeviceAccess.php',
+        'Support/DeviceClassifier.php',
+        'Support/Freshness.php',
+        'Support/IssueBuilder.php',
+        'Support/ProblemPolicy.php',
+        'Support/Severity.php',
+        'Support/UpdateStatus.php',
+        'Support/Version.php',
+        'resources/views/menu.blade.php',
+        'resources/views/page.blade.php',
+        'resources/views/settings.blade.php',
+        'bin/update.php',
+        'CHANGELOG.md',
+        'README.md',
     ];
 
     private const ALLOWED_DIRECTORIES = [
@@ -120,27 +137,18 @@ final class IdfDashboardUpdater
 
         $comparison = version_compare($version, Version::VERSION);
 
-        if ($comparison < 0 && ! $options['allow_downgrade']) {
-            throw new RuntimeException('Downgrade refused. Use --allow-downgrade with an explicit --tag.');
-        }
-
         if ($comparison === 0 && $options['install'] && $options['tag'] === null) {
             fwrite(STDOUT, 'No newer stable release to install.' . PHP_EOL);
 
             return 0;
         }
 
-        if ($comparison === 0 && $options['install'] && ! $options['reinstall']) {
-            throw new RuntimeException('Reinstall refused. Use --reinstall with an explicit --tag.');
-        }
-
-        if ($comparison > 0 && $options['reinstall']) {
-            throw new RuntimeException('--reinstall is only valid for the currently installed version.');
-        }
-
-        if ($comparison >= 0 && $options['allow_downgrade']) {
-            throw new RuntimeException('--allow-downgrade is only valid for an older version.');
-        }
+        self::assertVersionTransition(
+            Version::VERSION,
+            $version,
+            $options['allow_downgrade'],
+            $options['reinstall']
+        );
 
         return $this->install(
             $release,
@@ -162,6 +170,31 @@ final class IdfDashboardUpdater
         }
 
         return substr($tag, 1);
+    }
+
+    public static function assertVersionTransition(
+        string $installedVersion,
+        string $targetVersion,
+        bool $allowDowngrade,
+        bool $reinstall
+    ): void {
+        $comparison = version_compare($targetVersion, $installedVersion);
+
+        if ($comparison < 0 && ! $allowDowngrade) {
+            throw new RuntimeException('Downgrade refused. Use --allow-downgrade with an explicit --tag.');
+        }
+
+        if ($comparison === 0 && ! $reinstall) {
+            throw new RuntimeException('Reinstall refused. Use --reinstall with an explicit --tag.');
+        }
+
+        if ($comparison > 0 && $reinstall) {
+            throw new RuntimeException('--reinstall is only valid for the currently installed version.');
+        }
+
+        if ($comparison >= 0 && $allowDowngrade) {
+            throw new RuntimeException('--allow-downgrade is only valid for an older version.');
+        }
     }
 
     public static function archiveName(string $version): string
@@ -188,6 +221,16 @@ final class IdfDashboardUpdater
         }
 
         throw new RuntimeException('SHA256SUMS must contain exactly the expected archive.');
+    }
+
+    public static function assertArchiveChecksum(string $expectedHash, string|false $actualHash): void
+    {
+        if (! is_string($actualHash)
+            || preg_match('/^[a-f0-9]{64}$/i', $expectedHash) !== 1
+            || ! hash_equals(strtolower($expectedHash), strtolower($actualHash))
+        ) {
+            throw new RuntimeException('Release archive SHA-256 verification failed.');
+        }
     }
 
     public static function isSafeArchivePath(string $path): bool
@@ -307,6 +350,45 @@ final class IdfDashboardUpdater
 
         $this->validatePackage($resolved, $expectedVersion);
         $this->lintPhp($resolved);
+    }
+
+    /**
+     * Select an exact, closed package manifest from the target version.
+     * The downloaded archive's SHA-256 is verified before extraction; this
+     * manifest checksum additionally makes the selected file set explicit.
+     *
+     * @return array{name: string, minimum: string, maximum_exclusive: string, required: array<int, string>, optional: array<int, string>, checksum: string}
+     */
+    public static function packageProfileForVersion(string $version): array
+    {
+        if (preg_match('/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/', $version) !== 1) {
+            throw new RuntimeException('Target version does not select a known package profile.');
+        }
+
+        if (version_compare($version, '1.0.0', '>=') && version_compare($version, '1.1.0', '<')) {
+            $name = 'legacy-v1';
+            $minimum = '1.0.0';
+            $maximum = '1.1.0';
+            $required = self::LEGACY_V1_PATHS;
+        } elseif (version_compare($version, '1.1.0', '>=') && version_compare($version, '2.0.0', '<')) {
+            $name = 'phase1-v1';
+            $minimum = '1.1.0';
+            $maximum = '2.0.0';
+            $required = self::PHASE1_V1_PATHS;
+        } else {
+            throw new RuntimeException('Target version does not select a known package profile.');
+        }
+
+        $optional = [];
+
+        return [
+            'name' => $name,
+            'minimum' => $minimum,
+            'maximum_exclusive' => $maximum,
+            'required' => $required,
+            'optional' => $optional,
+            'checksum' => hash('sha256', implode("\n", $required)),
+        ];
     }
 
     private function parseOptions(array $arguments): array
@@ -599,9 +681,7 @@ HELP);
             );
             $actualHash = hash_file('sha256', $archivePath);
 
-            if (! is_string($actualHash) || ! hash_equals($expectedHash, strtolower($actualHash))) {
-                throw new RuntimeException('Release archive SHA-256 verification failed.');
-            }
+            self::assertArchiveChecksum($expectedHash, $actualHash);
 
             $extracted = $tempDirectory . DIRECTORY_SEPARATOR . 'extracted';
             $this->extractArchive($archivePath, $extracted);
@@ -882,13 +962,15 @@ HELP);
 
     private function validatePackage(string $root, string $expectedVersion): void
     {
-        foreach (self::REQUIRED_PATHS as $path) {
+        $profile = self::packageProfileForVersion($expectedVersion);
+
+        foreach ($profile['required'] as $path) {
             if (! is_file($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $path))) {
                 throw new RuntimeException('Release package is missing required file: ' . $path);
             }
         }
 
-        $allowedFiles = array_merge(self::REQUIRED_PATHS, self::OPTIONAL_PATHS);
+        $allowedFiles = array_merge($profile['required'], $profile['optional']);
         $iterator = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
