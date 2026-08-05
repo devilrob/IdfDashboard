@@ -261,6 +261,11 @@
         border-left-color: #5c6bc0;
     }
 
+    .priority-stale {
+        background: #fffaf1;
+        border-left-color: #607d8b;
+    }
+
     .priority-severity {
         font-size: 10px;
         font-weight: 700;
@@ -276,6 +281,10 @@
 
     .priority-unknown .priority-severity {
         color: #5c6bc0;
+    }
+
+    .priority-stale .priority-severity {
+        color: #546e7a;
     }
 
     .priority-location,
@@ -298,9 +307,9 @@
 
     .priority-cause {
         font-size: 11px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+        white-space: normal;
     }
 
     .priority-since {
@@ -329,10 +338,7 @@
     }
 
     body.tv-mode-active .priority-panel {
-        background: #131a29;
-        border-color: #253046;
-        max-height: 30vh;
-        overflow-y: auto;
+        display: none !important;
     }
 
     body.tv-mode-active .priority-header {
@@ -500,6 +506,11 @@
         background: #5c6bc0;
     }
 
+    .pill-maintenance,
+    .pill-stale {
+        background: #607d8b;
+    }
+
     .location-counts {
         border-bottom: 1px solid #eee;
         color: #777;
@@ -534,6 +545,11 @@
         animation: cardCriticalGlow 2s ease-in-out infinite;
         background: #fdf2f2;
         border-left-color: #d9534f;
+    }
+
+    .device-row[data-health="maintenance"],
+    .device-row[data-health="stale"] {
+        border-left-color: #607d8b;
     }
 
     .device-row[data-health="unknown"] {
@@ -667,6 +683,27 @@
 
     .metric-missing {
         color: #888;
+    }
+
+    .metric-no_sensor {
+        background: #f7f7f7;
+        border-style: dotted;
+        color: #666;
+    }
+
+    .metric-freshness {
+        display: inline-block;
+        margin-left: 4px;
+        opacity: .78;
+    }
+
+    .health-maintenance {
+        border-color: #607d8b !important;
+    }
+
+    .health-stale {
+        border-color: #f0ad4e !important;
+        border-style: dashed !important;
     }
 
     /*
@@ -1034,7 +1071,7 @@
         color: #fff;
         display: none;
         flex-shrink: 0;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         gap: 5px;
         padding: 6px 10px;
@@ -1243,6 +1280,26 @@
         margin-top: 2px;
     }
 
+    body.tv-mode-active .device-name a {
+        font-size: 14px;
+    }
+
+    body.tv-mode-active .device-meta,
+    body.tv-mode-active .device-state,
+    body.tv-mode-active .sensor-pill,
+    body.tv-mode-active .metric-freshness,
+    body.tv-mode-active .service-summary,
+    body.tv-mode-active .service-issue,
+    body.tv-mode-active .service-message,
+    body.tv-mode-active .alert-issue-critical,
+    body.tv-mode-active .alert-issue-warning,
+    body.tv-mode-active .recent-event-line,
+    body.tv-mode-active .location-health-badge,
+    body.tv-mode-active .infra-section-meta {
+        font-size: 12px;
+        line-height: 1.35;
+    }
+
     body.tv-mode-active [data-location-card] {
         display: none !important;
     }
@@ -1323,7 +1380,7 @@
     body.tv-mode-active .tv-card-issue-badge {
         color: #ffc76b;
         display: block;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         margin-top: 3px;
     }
@@ -1469,7 +1526,7 @@
 
             $isStale = $metric['stale'] ?? false;
 
-            $title = e($metric['description']);
+            $title = e($metric['cause'] ?? $metric['description']);
 
             if ($metric['lastupdate']) {
                 $title .= ' · ' . e($metric['lastupdate']);
@@ -1484,6 +1541,9 @@
                 . '<i class="fa ' . e($icon) . ' metric-icon" aria-hidden="true"></i>'
                 . '<strong>' . e($metric['label']) . ':</strong> '
                 . e($metric['value'])
+                . (isset($metric['freshness']['label'])
+                    ? '<small class="metric-freshness">' . e($metric['freshness']['label']) . '</small>'
+                    : '')
                 . '</span>';
         }
 
@@ -1497,6 +1557,20 @@
 
     $renderIssues = function (array $device, int $limit = 3) {
         $html = '';
+
+        if ($device['maintenance']) {
+            $html .= '<div class="service-issue">'
+                . '<i class="fa fa-wrench fa-fw" aria-hidden="true"></i> '
+                . '<strong>MAINTENANCE</strong> — ' . e($device['maintenance_title'])
+                . '</div>';
+        }
+
+        if ($device['recovered_recently'] && $device['recovered_at']) {
+            $html .= '<div class="recent-event-line">'
+                . '<i class="fa fa-check-circle fa-fw" aria-hidden="true"></i> '
+                . 'Recovered ' . e($device['recovered_at']->diffForHumans())
+                . '</div>';
+        }
 
         foreach ($device['service_problems']->take($limit) as $service) {
             $html .= '<div class="service-issue">'
@@ -1587,6 +1661,7 @@
     data-idf-settings-version="{{ $settingsVersion }}"
     data-idf-refresh-seconds="{{ $refreshSeconds }}"
     data-idf-animations-enabled="{{ $config['animations_enabled'] ? '1' : '0' }}"
+    data-idf-severity-definitions="{{ json_encode($severityDefinitions) }}"
 >
     {{--
         The exit button used to be `position: fixed`, positioned by
@@ -1623,7 +1698,11 @@
         </button>
     </header>
 
-    <div class="tv-clock"></div>
+    <div
+        class="tv-clock"
+        data-updated-at="{{ $generatedAt }}"
+        data-updated-at-epoch="{{ strtotime($generatedAt) }}"
+    ></div>
 
     <div
         class="tv-status-banner"
@@ -1834,13 +1913,19 @@
                         href="{{ url('device/device=' . $item['device_id']) }}"
                         class="priority-item priority-{{ $item['severity'] }}"
                     >
-                        <span class="priority-severity">{{ strtoupper($item['severity']) }}</span>
+                        <span class="priority-severity">
+                            <i class="fa fa-{{ $item['icon'] }}" aria-hidden="true"></i>
+                            {{ strtoupper($item['severity']) }}
+                        </span>
                         <span class="priority-location">{{ e($item['location']) }}</span>
                         <span class="priority-device">{{ e($item['device_name']) }}</span>
-                        <span class="priority-role">{{ strtoupper($item['role']) }}</span>
+                        <span class="priority-role">{{ strtoupper($item['category']) }}</span>
                         <span class="priority-cause">{{ e($item['cause']) }}</span>
                         <span class="priority-since">
                             {{ $item['since'] ? 'Since ' . $item['since'] : '' }}
+                            @if($item['additional_count'] > 0)
+                                · +{{ $item['additional_count'] }} more
+                            @endif
                         </span>
                     </a>
                 @endforeach
@@ -1862,6 +1947,9 @@
                 {{ $coverage['unassigned_count'] }} Unassigned
                 @if($coverage['ignored_count'] > 0)
                     · {{ $coverage['ignored_count'] }} ignored (excluded)
+                @endif
+                @if($coverage['disabled_count'] > 0)
+                    · {{ $coverage['disabled_count'] }} disabled (excluded)
                 @endif
             </div>
         </div>
@@ -1992,6 +2080,13 @@
                 {{ $summary['stale_sensor_devices'] }}
             </div>
         </div>
+
+        <div class="summary-card">
+            <div class="summary-label">No sensor installed</div>
+            <div class="summary-value text-muted">
+                {{ $summary['no_sensor_installed'] }}
+            </div>
+        </div>
     </div>
 
     <div class="empty-filter-result">
@@ -2028,8 +2123,8 @@
                                 {{ $device['name'] }}
                             </a>
 
-                            <span class="{{ $device['status'] ? 'status-up' : 'status-down' }}">
-                                {{ $device['status'] ? 'UP' : 'DOWN' }}
+                            <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
+                                {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
                             </span>
                         </div>
 
@@ -2096,13 +2191,13 @@
                                 {{ $device['name'] }}
                             </a>
 
-                            <span class="{{ $device['status'] ? 'status-up' : 'status-down' }}">
-                                {{ $device['status'] ? 'UP' : 'DOWN' }}
+                            <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
+                                {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
                             </span>
                         </div>
 
                         <div class="device-card-meta">
-                            {{ strtoupper($device['role']) }} ·
+                            <span title="{{ e($device['classification']['reason']) }}">{{ strtoupper($device['category']) }}</span> ·
                             {{ $device['hostname'] }}
                         </div>
 
@@ -2145,13 +2240,13 @@
                                 {{ $device['name'] }}
                             </a>
 
-                            <span class="{{ $device['status'] ? 'status-up' : 'status-down' }}">
-                                {{ $device['status'] ? 'UP' : 'DOWN' }}
+                            <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
+                                {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
                             </span>
                         </div>
 
                         <div class="device-card-meta">
-                            {{ strtoupper($device['role']) }} ·
+                            <span title="{{ e($device['classification']['reason']) }}">{{ strtoupper($device['category']) }}</span> ·
                             {{ $device['hostname'] }} ·
                             {{ $device['os'] }}
                         </div>
@@ -2220,7 +2315,7 @@
 
                                     <div class="device-main">
                                         <i
-                                            class="fa fa-circle {{ $device['status'] ? 'status-up' : 'status-down' }}"
+                                            class="fa fa-circle {{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}"
                                             aria-hidden="true"
                                         ></i>
 
@@ -2231,13 +2326,13 @@
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
-                                                {{ strtoupper($device['role']) }} ·
+                                                <span title="{{ e($device['classification']['reason']) }}">{{ strtoupper($device['category']) }}</span> ·
                                                 {{ $device['os'] }}
                                             </div>
                                         </div>
 
-                                        <span class="device-state {{ $device['status'] ? 'status-up' : 'status-down' }}">
-                                            {{ $device['status'] ? 'UP' : 'DOWN' }}
+                                        <span class="device-state {{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
+                                            {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
                                         </span>
                                     </div>
 
@@ -2308,7 +2403,7 @@
 
                                     <div class="device-main">
                                         <i
-                                            class="fa fa-circle {{ $device['status'] ? 'status-up' : 'status-down' }}"
+                                            class="fa fa-circle {{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}"
                                             aria-hidden="true"
                                         ></i>
 
@@ -2319,13 +2414,13 @@
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
-                                                {{ strtoupper($device['role']) }} ·
+                                                <span title="{{ e($device['classification']['reason']) }}">{{ strtoupper($device['category']) }}</span> ·
                                                 {{ $device['os'] }}
                                             </div>
                                         </div>
 
-                                        <span class="device-state {{ $device['status'] ? 'status-up' : 'status-down' }}">
-                                            {{ $device['status'] ? 'UP' : 'DOWN' }}
+                                        <span class="device-state {{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
+                                            {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
                                         </span>
                                     </div>
 
@@ -2359,6 +2454,9 @@ let tvClockTimer = null;
 let dashboardKeydownHandler = null;
 let dashboardRefreshFailures = 0;
 let dashboardRefreshController = null;
+let dashboardConnectionState = 'connected';
+let dashboardRefreshStartedAt = null;
+let dashboardUpdateClock = null;
 let refreshSeconds = 30;
 
 // Both live outside initDashboard() for the same reason as the timers
@@ -2392,6 +2490,15 @@ function initDashboard() {
     const tvStorageKey = 'InfrastructureHealthDashboard.tvMode.v1';
 
     const dashboardEl = document.querySelector('.infra-dashboard');
+    let severityDefinitions = {};
+
+    try {
+        severityDefinitions = JSON.parse(
+            dashboardEl ? dashboardEl.dataset.idfSeverityDefinitions || '{}' : '{}'
+        );
+    } catch (error) {
+        severityDefinitions = {};
+    }
 
     // Changes every time an admin saves the Settings page (see
     // settingsVersion in Page.php::data()) — a hash of every resolved
@@ -2671,6 +2778,10 @@ function initDashboard() {
     function deviceMatches(device) {
         const health = device.dataset.health || 'healthy';
 
+        if (health === 'maintenance') {
+            return Boolean(state.healthy);
+        }
+
         if (!state[health]) {
             return false;
         }
@@ -2720,10 +2831,16 @@ function initDashboard() {
         const metricType = metricEl.dataset.metricType;
         const isStale = metricEl.dataset.metricStale === '1';
 
-        // "No sensor installed" / "No data" carry no information
-        // under any filter combination — pure noise, never rendered.
+        // Legacy missing rows remain hidden. The explicit no_sensor
+        // state is intentionally visible and informational.
         if (metricState === 'missing') {
             return false;
+        }
+
+        const filterKey = metricTypeFilterKey[metricType] || 'other';
+
+        if (metricState === 'no_sensor') {
+            return Boolean(state[filterKey]);
         }
 
         if (isStale && metricState === 'healthy' && !state.stale) {
@@ -2733,8 +2850,6 @@ function initDashboard() {
         if (!state[metricState]) {
             return false;
         }
-
-        const filterKey = metricTypeFilterKey[metricType] || 'other';
 
         return Boolean(state[filterKey]);
     }
@@ -3182,26 +3297,15 @@ function initDashboard() {
     // Critical=0, Warning=1, Unknown=2 — a Healthy unit only ever
     // reaches the combined pool at all if Settings' `default_severity_
     // healthy` is on, in which case it sorts last, same idea as
-    // healthPriority() on the PHP side.
-    // Written as a plain if-chain (not an object-literal lookup with
-    // `??`) deliberately — a TV/kiosk display is exactly the kind of
-    // browser most likely to run an older, less standards-compliant
-    // JS engine, and this value drives sort order, so it should never
-    // depend on a newer-syntax feature behaving exactly as expected.
+    // Ranking is emitted by Support/Severity.php with the refreshed
+    // dashboard markup. JavaScript only consumes it; it never defines
+    // a second severity order that could drift from PHP.
     function tvSeverityRank(health) {
-        if (health === 'critical') {
-            return 0;
-        }
+        const definition = severityDefinitions[health];
 
-        if (health === 'warning') {
-            return 1;
-        }
-
-        if (health === 'unknown') {
-            return 2;
-        }
-
-        return 3;
+        return definition && Number.isFinite(Number(definition.rank))
+            ? Number(definition.rank)
+            : 999;
     }
 
     // One merged pool across every enabled section instead of one
@@ -3215,6 +3319,7 @@ function initDashboard() {
     // mucho que empiece a mostrar lo que falta."
     function tvCombinedUnits() {
         const units = [];
+        const locationDevicesPerCard = 2;
 
         ['mdfServers', 'mdfPower', 'mdfInfrastructure'].forEach(function (name) {
             if (!defaults[name]) {
@@ -3264,7 +3369,15 @@ function initDashboard() {
                     return Math.min(best, tvSeverityRank(device.dataset.health));
                 }, 3);
 
-                units.push({ el: card, rank: worstRank });
+                for (let start = 0; start < matchingDevices.length; start += locationDevicesPerCard) {
+                    units.push({
+                        el: card,
+                        rank: worstRank,
+                        deviceStart: start,
+                        deviceEnd: Math.min(start + locationDevicesPerCard, matchingDevices.length),
+                        deviceTotal: matchingDevices.length
+                    });
+                }
             });
         });
 
@@ -3359,6 +3472,31 @@ function initDashboard() {
         slide.units.forEach(function (unit) {
             const clone = unit.el.cloneNode(true);
 
+            if (Number.isInteger(unit.deviceStart)) {
+                const matchingDevices = Array.from(
+                    clone.querySelectorAll('.monitor-device')
+                ).filter(tvDeviceMatches);
+
+                Array.from(clone.querySelectorAll('.monitor-device')).forEach(function (device) {
+                    if (!matchingDevices.includes(device)) {
+                        device.remove();
+                    }
+                });
+
+                matchingDevices.forEach(function (device, index) {
+                    if (index < unit.deviceStart || index >= unit.deviceEnd) {
+                        device.remove();
+                    }
+                });
+
+                const badge = clone.querySelector('[data-tv-issue-badge]');
+
+                if (badge) {
+                    badge.textContent = (unit.deviceStart + 1) + '–' + unit.deviceEnd
+                        + ' of ' + unit.deviceTotal + ' shown';
+                }
+            }
+
             clone.classList.add('tv-active-card');
             fragment.appendChild(clone);
         });
@@ -3440,12 +3578,41 @@ function initDashboard() {
 
         const now = new Date();
 
-        clock.textContent = now.toLocaleDateString(undefined, {
+        if (
+            dashboardConnectionState === 'refreshing'
+            && dashboardRefreshStartedAt !== null
+            && Date.now() - dashboardRefreshStartedAt >= 30000
+        ) {
+            dashboardConnectionState = 'disconnected';
+        }
+
+        const currentTime = now.toLocaleDateString(undefined, {
             weekday: 'short',
             month: 'short',
             day: 'numeric'
         }) + ' · ' + now.toLocaleTimeString();
+        const updatedAt = clock.dataset.updatedAt || '';
+        const updatedEpoch = Number(clock.dataset.updatedAtEpoch || 0);
+        const hasValidUpdate = updatedAt !== '' && Number.isFinite(updatedEpoch) && updatedEpoch > 0;
+        const ageSeconds = hasValidUpdate
+            ? Math.max(0, Math.floor(Date.now() / 1000) - updatedEpoch)
+            : null;
+        const ageLabel = ageSeconds === null
+            ? ''
+            : (ageSeconds < 60
+                ? ageSeconds + 's ago'
+                : Math.floor(ageSeconds / 60) + 'm ago');
+        const connectionLabel = dashboardConnectionState === 'connected'
+            ? 'Connected'
+            : (dashboardConnectionState === 'refreshing' ? 'Refreshing' : 'Connection issue');
+        const updatedLabel = hasValidUpdate
+            ? 'Last updated: ' + updatedAt + ' (' + ageLabel + ')'
+            : 'Last updated: unavailable';
+
+        clock.textContent = connectionLabel + ' · ' + currentTime + ' · ' + updatedLabel;
     }
+
+    dashboardUpdateClock = updateClock;
 
     // Counts the devices currently passing Settings' criteria (the
     // same set the slides rotate through — `tvDeviceMatches()`/
@@ -3708,6 +3875,12 @@ function refreshDashboardData() {
     }, 30000);
 
     dashboardRefreshController = controller;
+    dashboardConnectionState = 'refreshing';
+    dashboardRefreshStartedAt = Date.now();
+
+    if (dashboardUpdateClock) {
+        dashboardUpdateClock();
+    }
 
     fetch(window.location.href, {
         cache: 'no-store',
@@ -3732,10 +3905,18 @@ function refreshDashboardData() {
 
             currentDashboard.replaceWith(nextDashboard);
             dashboardRefreshFailures = 0;
+            dashboardConnectionState = 'connected';
+            dashboardRefreshStartedAt = null;
             initDashboard();
         })
         .catch(function () {
             dashboardRefreshFailures += 1;
+            dashboardConnectionState = 'disconnected';
+            dashboardRefreshStartedAt = null;
+
+            if (dashboardUpdateClock) {
+                dashboardUpdateClock();
+            }
 
             // A handful of consecutive failures (network blip, plugin
             // briefly unreachable) falls back to a real navigation

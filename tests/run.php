@@ -3,14 +3,22 @@
 declare(strict_types=1);
 
 use App\Plugins\IdfDashboard\Support\Config;
+use App\Plugins\IdfDashboard\Support\DeviceClassifier;
+use App\Plugins\IdfDashboard\Support\Freshness;
+use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
+use App\Plugins\IdfDashboard\Support\Severity;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
 use App\Plugins\IdfDashboard\Support\Version;
 
 $root = dirname(__DIR__);
 
 require $root . '/Support/Config.php';
+require $root . '/Support/DeviceClassifier.php';
+require $root . '/Support/Freshness.php';
+require $root . '/Support/IssueBuilder.php';
 require $root . '/Support/ProblemPolicy.php';
+require $root . '/Support/Severity.php';
 require $root . '/Support/Version.php';
 require $root . '/Support/UpdateStatus.php';
 require $root . '/bin/update.php';
@@ -24,6 +32,143 @@ $assert = static function (bool $condition, string $name) use (&$failures): void
         $failures++;
     }
 };
+
+$severityOrder = [
+    Severity::CRITICAL,
+    Severity::WARNING,
+    Severity::UNKNOWN,
+    Severity::STALE,
+    Severity::MAINTENANCE,
+    Severity::DISABLED,
+    Severity::IGNORED,
+    Severity::HEALTHY,
+    Severity::NO_SENSOR,
+];
+$severityRanks = array_map(
+    fn (string $state): int => Severity::metadata($state)['rank'],
+    $severityOrder
+);
+$assert($severityRanks === array_values(array_unique($severityRanks)), 'severity ranking is explicit and unique');
+$assert(Severity::worst([Severity::HEALTHY, Severity::WARNING, Severity::CRITICAL]) === Severity::CRITICAL, 'severity selects the worst state once');
+$assert(Severity::worst([Severity::HEALTHY, Severity::STALE]) === Severity::HEALTHY, 'informational stale does not elevate health');
+$assert(Severity::worst([Severity::HEALTHY, Severity::STALE], true) === Severity::STALE, 'actionable stale can elevate health');
+$assert(Severity::metadata(Severity::NO_SENSOR)['actionable'] === false, 'no sensor is informational');
+$assert(Severity::worst([Severity::MAINTENANCE]) === Severity::MAINTENANCE, 'maintenance remains distinct from down');
+$assert(Severity::worst([Severity::DISABLED]) === Severity::DISABLED, 'disabled remains a distinct state');
+$assert(Severity::worst([Severity::IGNORED]) === Severity::IGNORED, 'ignored remains a distinct state');
+$assert(Severity::fromLibreNmsGenericState(0) === Severity::HEALTHY, 'state translation maps healthy');
+$assert(Severity::fromLibreNmsGenericState(1) === Severity::WARNING, 'state translation maps warning');
+$assert(Severity::fromLibreNmsGenericState(2) === Severity::CRITICAL, 'state translation maps critical');
+$assert(Severity::fromLibreNmsGenericState(3) === Severity::UNKNOWN, 'state translation maps LibreNMS unknown');
+$assert(Severity::fromLibreNmsGenericState(null) === Severity::UNKNOWN, 'missing state translation is unknown');
+
+$freshnessNow = new DateTimeImmutable('2026-08-04 12:00:00 UTC');
+$fresh = Freshness::evaluate('2026-08-04 11:55:00 UTC', 30, true, true, $freshnessNow);
+$aging = Freshness::evaluate('2026-08-04 11:40:00 UTC', 30, true, true, $freshnessNow);
+$stale = Freshness::evaluate('2026-08-04 11:00:00 UTC', 30, true, true, $freshnessNow);
+$disabledStale = Freshness::evaluate('2026-08-04 11:00:00 UTC', 30, false, true, $freshnessNow);
+$future = Freshness::evaluate('2026-08-04 12:05:00 UTC', 30, true, true, $freshnessNow);
+$atBoundary = Freshness::evaluate('2026-08-04 11:30:00 UTC', 30, true, true, $freshnessNow);
+$assert($fresh['state'] === Freshness::FRESH && $fresh['age_seconds'] === 300, 'freshness recognizes fresh timestamps');
+$assert($aging['state'] === Freshness::AGING, 'freshness recognizes aging timestamps');
+$assert($stale['state'] === Freshness::STALE && $stale['actionable'], 'freshness recognizes actionable stale timestamps');
+$assert($disabledStale['state'] === Freshness::STALE && ! $disabledStale['actionable'], 'disabled stale never becomes actionable');
+$assert($future['state'] === Freshness::FRESH && $future['age_seconds'] === 0, 'future timestamps clamp to fresh without negative age');
+$assert($atBoundary['state'] === Freshness::AGING && ! $atBoundary['actionable'], 'exact stale boundary is aging, not stale');
+$assert(Freshness::evaluate(null, 30)['state'] === Freshness::UNKNOWN, 'freshness treats null timestamps as unknown');
+$assert(Freshness::evaluate('not-a-date', 30)['reason'] === 'Last poll unavailable', 'freshness explains invalid timestamps');
+
+$classificationFixtures = [
+    'Power' => [['type' => 'network', 'hardware' => 'APC Smart-UPS 3000'], ['voltage', 'charge']],
+    'Security' => [['type' => 'firewall', 'os' => 'fortios'], []],
+    'Wireless' => [['type' => 'wireless', 'hardware' => 'Wireless Controller'], []],
+    'Printer' => [['type' => 'printer', 'hardware' => 'LaserJet'], []],
+    'Camera' => [['type' => 'appliance', 'purpose' => 'CCTV camera'], []],
+    'POS' => [['type' => 'appliance', 'purpose' => 'Oracle MICROS workstation'], []],
+    'Controller' => [['type' => 'appliance', 'purpose' => 'Building Management System controller'], []],
+    'Server' => [['type' => 'server', 'hostname' => 'host-01'], []],
+    'Network' => [['type' => 'network', 'hardware' => 'Ethernet switch'], []],
+    'Other' => [['type' => 'appliance', 'hostname' => '10.1.2.3'], []],
+];
+
+foreach ($classificationFixtures as $expected => [$deviceFixture, $sensorClasses]) {
+    $classification = DeviceClassifier::classify($deviceFixture, $sensorClasses);
+    $assert($classification['category'] === $expected, 'classifier identifies ' . $expected);
+    $assert(in_array($classification['confidence'], ['high', 'medium', 'low'], true), 'classifier confidence is valid for ' . $expected);
+}
+
+$conflict = DeviceClassifier::classify(['type' => 'server', 'hardware' => 'APC UPS controller']);
+$assert($conflict['category'] === 'Power', 'classifier resolves conflicts with documented precedence');
+$genericName = DeviceClassifier::classify(['hostname' => 'hotel-prod-01', 'display' => 'Back Office']);
+$assert($genericName['category'] === 'Other', 'classifier does not infer server from a generic name');
+
+$sensorIssue = IssueBuilder::make([
+    'key' => 'sensor:7:high',
+    'device_id' => 7,
+    'severity' => Severity::CRITICAL,
+    'source' => 'sensor',
+    'type' => 'temperature',
+    'title' => 'Temperature',
+    'value' => 87.4,
+    'unit' => '°F',
+    'threshold' => 82.0,
+    'threshold_direction' => 'above critical high',
+    'description' => 'Temperature 87.4 °F — above high limit 82 °F',
+]);
+$assert($sensorIssue['priority'] === IssueBuilder::PRIORITY_CRITICAL_SENSOR, 'issue priority follows operational source order');
+$assert([
+    IssueBuilder::PRIORITY_DEVICE_DOWN,
+    IssueBuilder::PRIORITY_CRITICAL_SENSOR,
+    IssueBuilder::PRIORITY_CRITICAL_SERVICE,
+    IssueBuilder::PRIORITY_CRITICAL_ALERT,
+    IssueBuilder::PRIORITY_WARNING_SENSOR,
+    IssueBuilder::PRIORITY_WARNING_SERVICE,
+    IssueBuilder::PRIORITY_STALE,
+    IssueBuilder::PRIORITY_UNKNOWN,
+] === [10, 20, 30, 40, 50, 60, 70, 80], 'Priority Attention order is exact');
+$assert($sensorIssue['description'] !== '', 'critical issue always has a cause');
+$fallbackIssue = IssueBuilder::make(['severity' => 'warning', 'source' => 'sensor', 'value' => null]);
+$assert($fallbackIssue['description'] === 'Current value unavailable', 'warning issue explains an unavailable value');
+$assert(array_keys($sensorIssue) === [
+    'key', 'device_id', 'location_id', 'severity', 'priority', 'source', 'type', 'title', 'description', 'value', 'unit', 'threshold', 'threshold_direction', 'timestamp', 'age_seconds', 'actionable', 'device_url',
+], 'issue structure is stable');
+$assert(
+    IssueBuilder::evaluateNumericSensor(90, 82, 78, null, null) === [
+        'severity' => Severity::CRITICAL, 'threshold' => 82.0, 'direction' => 'above critical high',
+    ],
+    'numeric sensor identifies critical high limit'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(80, 90, 78, null, null)['severity'] === Severity::WARNING,
+    'numeric sensor identifies warning high limit'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(102, null, null, 100, 110)['severity'] === Severity::WARNING,
+    'numeric sensor identifies warning low limit'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(95, null, null, 100, 110)['direction'] === 'below critical low',
+    'numeric sensor identifies critical low direction'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(-12, 0, null, -20, -10)['severity'] === Severity::WARNING,
+    'numeric sensor preserves valid negative values'
+);
+$assert(IssueBuilder::evaluateNumericSensor(null, 10, 8, 1, 2)['severity'] === Severity::UNKNOWN, 'numeric sensor treats null as unknown');
+$assert(IssueBuilder::evaluateNumericSensor(NAN, 10, 8, 1, 2)['severity'] === Severity::UNKNOWN, 'numeric sensor rejects NaN');
+$assert(IssueBuilder::evaluateNumericSensor(INF, 10, 8, 1, 2)['severity'] === Severity::UNKNOWN, 'numeric sensor rejects infinity');
+$assert(
+    IssueBuilder::evaluateNumericSensor(85, 80, 90, null, null)['direction'] === 'invalid threshold order',
+    'numeric sensor rejects inverted high thresholds'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(15, null, null, 20, 10)['direction'] === 'invalid threshold order',
+    'numeric sensor rejects inverted low thresholds'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(0, null, null, 0, null, true)['severity'] === Severity::HEALTHY,
+    'numeric sensor ignores lower zero only for explicitly resting-at-zero sensors'
+);
 
 $defaults = Config::resolve([]);
 $assert($defaults['refresh_seconds'] === 30, 'config defaults');
@@ -176,6 +321,15 @@ try {
 }
 
 $assert($extraChecksumRejected, 'updater rejects extra checksum entries');
+$invalidArchiveChecksumRejected = false;
+
+try {
+    IdfDashboardUpdater::assertArchiveChecksum(str_repeat('a', 64), str_repeat('b', 64));
+} catch (RuntimeException $exception) {
+    $invalidArchiveChecksumRejected = str_contains($exception->getMessage(), 'SHA-256');
+}
+
+$assert($invalidArchiveChecksumRejected, 'updater rejects an invalid archive checksum');
 $assert(
     IdfDashboardUpdater::backupsToPrune([
         'IdfDashboard.backup-20260803-120000-v0.9.0',
@@ -227,6 +381,7 @@ $assert(
 );
 
 $pageSource = (string) file_get_contents($root . '/Page.php');
+$pageBladeSource = (string) file_get_contents($root . '/resources/views/page.blade.php');
 $deviceAccessSource = (string) file_get_contents($root . '/Support/DeviceAccess.php');
 $menuSource = (string) file_get_contents($root . '/Menu.php');
 $settingsSource = (string) file_get_contents($root . '/Settings.php');
@@ -261,6 +416,64 @@ $assert($unsupportedCalls === [], 'hooks avoid unsupported or discarding User au
 $assert(! str_contains($pageSource, "DB::table('devices"), 'dashboard has no unscoped devices query');
 $assert(str_contains($pageSource, 'ROW_NUMBER() OVER'), 'event query ranks rows in SQL');
 $assert(str_contains($pageSource, 'RECENT_EVENTS_GLOBAL_LIMIT'), 'event query has global ceiling');
+$assert(
+    str_contains($pageSource, 'private function telemetryMetricEnabled')
+        && str_contains($pageSource, '[Severity::CRITICAL, Severity::WARNING, Severity::UNKNOWN]'),
+    'stale disabled never hides a critical, warning or unknown cause'
+);
+$assert(
+    str_contains($pageSource, "'severityDefinitions' => Severity::definitions()")
+        && str_contains($pageBladeSource, 'data-idf-severity-definitions')
+        && str_contains($pageBladeSource, 'severityDefinitions[health]'),
+    'Blade and TV consume the centralized severity model'
+);
+$assert(
+    str_contains($pageBladeSource, '@media (prefers-reduced-motion: reduce)')
+        && str_contains($pageBladeSource, 'animation: none !important;')
+        && str_contains($pageBladeSource, 'transition: none !important;'),
+    'desktop and TV honor reduced-motion without duplicating severity logic'
+);
+$assert(
+    str_contains($pageBladeSource, 'const locationDevicesPerCard = 2;')
+        && str_contains($pageBladeSource, 'deviceStart: start')
+        && str_contains($pageBladeSource, "body.tv-mode-active .priority-panel")
+        && str_contains($pageBladeSource, 'display: none !important;'),
+    'TV paginates large locations and hides the duplicate Priority panel'
+);
+$assert(
+    str_contains($pageBladeSource, 'data-updated-at="{{ $generatedAt }}"')
+        && str_contains($pageBladeSource, 'data-updated-at-epoch="{{ strtotime($generatedAt) }}"')
+        && str_contains($pageBladeSource, "'Last updated: unavailable'")
+        && str_contains($pageBladeSource, "'Connection issue'")
+        && str_contains($pageBladeSource, "dashboardConnectionState = 'disconnected'")
+        && str_contains($pageBladeSource, 'Date.now() - dashboardRefreshStartedAt >= 30000')
+        && str_contains($pageBladeSource, 'window.clearInterval(tvRotationTimer)')
+        && str_contains($pageBladeSource, 'window.clearInterval(tvClockTimer)'),
+    'TV exposes the last refresh and replaces existing rotation timers'
+);
+$refreshSource = substr($pageBladeSource, (int) strpos($pageBladeSource, 'function refreshDashboardData()'));
+$assert(
+    str_contains($pageBladeSource, 'dashboardUpdateClock = updateClock;')
+        && str_contains($refreshSource, 'dashboardUpdateClock();')
+        && ! str_contains($refreshSource, "\n    updateClock();"),
+    'background refresh updates the TV clock through the current initialized callback'
+);
+$assert(
+    str_contains($pageSource, "DB::table('device_outages')")
+        && str_contains($pageSource, "->whereIn('device_id', \$deviceIds)"),
+    'outage and recovery queries stay inside authorized device IDs'
+);
+$assert(
+    ! str_contains($pageSource, 'use LibreNMS\\Cache\\DeviceMaintenanceCache')
+        && ! str_contains($pageSource, 'app(DeviceMaintenanceCache'),
+    'dashboard avoids the core global maintenance cache'
+);
+$assert(
+    str_contains($pageSource, "'sensors_to_state_indexes'")
+        && str_contains($pageSource, "'state_indexes'")
+        && str_contains($pageSource, "'state_translations'"),
+    'state sensors use all LibreNMS state translation tables'
+);
 
 $topLevelHooks = array_map('basename', glob($root . '/*.php') ?: []);
 sort($topLevelHooks);
@@ -291,9 +504,14 @@ $assert($versionDeclarations === 1, 'plugin version has one source declaration')
 $readmeSource = (string) file_get_contents($root . '/README.md');
 $changelogSource = (string) file_get_contents($root . '/CHANGELOG.md');
 $assert(
-    str_contains($readmeSource, 'TAG=v' . Version::VERSION)
+    str_contains($readmeSource, 'tag such as `v' . Version::VERSION . '`')
         && str_contains($changelogSource, '## [' . Version::VERSION . ']'),
-    'README bootstrap tag and changelog match installed version'
+    'README release example and changelog match installed version'
+);
+$assert(
+    str_contains($readmeSource, 'TAG=v1.0.4')
+        && str_contains($readmeSource, 'Do not skip this bridge'),
+    'README preserves the mandatory v1.0.4 bootstrap path'
 );
 $assert(
     str_contains($updaterSource, '--recover')
@@ -307,6 +525,16 @@ $assert(
         && str_contains($workflowSource, '51344f722110350bb7301dde8b13bcf23ff65156')
         && str_contains($workflowSource, 'DeviceAccessTest.php'),
     'CI runs plugin integration tests against pinned LibreNMS 26.8'
+);
+$assert(
+    array_reduce(
+        ['DeviceClassifier.php', 'Freshness.php', 'IssueBuilder.php', 'Severity.php'],
+        fn (bool $present, string $file): bool => $present
+            && str_contains($updaterSource, "'Support/{$file}'")
+            && str_contains($workflowSource, "Support/{$file}"),
+        true
+    ),
+    'release whitelist includes every Phase 1 Support class explicitly'
 );
 $assert(
     str_contains($workflowSource, 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6')

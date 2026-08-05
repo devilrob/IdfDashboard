@@ -6,17 +6,26 @@ namespace LibreNMS\Tests\Feature\Plugins\IdfDashboard;
 
 use App\Facades\Permissions;
 use App\Http\Controllers\PluginSettingsController;
+use App\Models\Alert;
+use App\Models\AlertRule;
+use App\Models\AlertSchedule;
 use App\Models\Device;
+use App\Models\DeviceGroup;
+use App\Models\DeviceOutage;
 use App\Models\Location;
 use App\Models\Plugin;
+use App\Models\Sensor;
+use App\Models\Service;
 use App\Models\User;
 use App\Plugins\IdfDashboard\Menu;
 use App\Plugins\IdfDashboard\Page;
 use App\Plugins\IdfDashboard\Settings;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
+use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use LibreNMS\Interfaces\Plugins\PluginManagerInterface;
 use LibreNMS\Tests\TestCase;
 use Mockery;
@@ -39,14 +48,25 @@ class DeviceAccessTest extends TestCase
     public function testAdministratorCanSeeEveryDevice(): void
     {
         $devices = Device::factory()->count(2)->create();
+        Device::factory()->create(['hostname' => 'ignored.example.com', 'disabled' => 0, 'ignore' => 1]);
+        Device::factory()->create(['hostname' => 'disabled.example.com', 'disabled' => 1, 'ignore' => 0]);
         $user = User::factory()->create(['enabled' => 1]);
         $user->assignRole('admin');
 
         $this->assertTrue((new Page())->authorize($user));
         $this->assertEqualsCanonicalizing(
-            $devices->pluck('device_id')->all(),
+            Device::query()->pluck('device_id')->all(),
             DeviceAccess::query($user)->pluck('device_id')->all()
         );
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data([], $request);
+        $this->assertSame($devices->count(), $payload['summary']['active_devices']);
+        $this->assertSame(1, $payload['coverage']['ignored_count']);
+        $this->assertSame(1, $payload['coverage']['disabled_count']);
+        $encoded = json_encode($payload, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('ignored.example.com', $encoded);
+        $this->assertStringNotContainsString('disabled.example.com', $encoded);
     }
 
     public function testGlobalReadUserCanSeeEveryDevice(): void
@@ -72,10 +92,53 @@ class DeviceAccessTest extends TestCase
             'disabled' => 0,
             'ignore' => 0,
         ]);
-        Device::factory()->create([
+        $hidden = Device::factory()->create([
             'hostname' => 'hidden-device.example.com',
+            'ip' => inet_pton('10.250.250.250'),
             'location_id' => $hiddenLocation->id,
             'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($hidden)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'HIDDEN-SENSOR-EVIDENCE',
+            'sensor_current' => 99,
+            'sensor_limit' => 50,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        Service::factory()->for($hidden)->create([
+            'service_name' => 'HIDDEN-SERVICE-EVIDENCE',
+            'service_status' => 2,
+            'service_message' => 'HIDDEN-SERVICE-MESSAGE',
+        ]);
+        $hiddenRule = AlertRule::factory()->create([
+            'name' => 'HIDDEN-ALERT-EVIDENCE',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $hidden->device_id,
+            'rule_id' => $hiddenRule->id,
+        ]);
+        $hiddenDownAt = now()->subDays(7)->timestamp;
+        DeviceOutage::factory()->for($hidden)->open()->create([
+            'going_down' => $hiddenDownAt,
+        ]);
+        $hiddenSchedule = AlertSchedule::factory()->create([
+            'title' => 'HIDDEN-MAINTENANCE-EVIDENCE',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $hiddenSchedule->devices()->attach($hidden->device_id);
+        Device::factory()->create([
+            'hostname' => 'hidden-ignored.example.com',
+            'disabled' => 0,
+            'ignore' => 1,
+        ]);
+        Device::factory()->create([
+            'hostname' => 'hidden-disabled.example.com',
+            'disabled' => 1,
             'ignore' => 0,
         ]);
         $user = User::factory()->create(['enabled' => 1]);
@@ -97,11 +160,336 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(1, $payload['summary']['active_devices']);
         $this->assertStringContainsString('allowed-device.example.com', $encoded);
         $this->assertStringNotContainsString('hidden-device.example.com', $encoded);
+        $this->assertStringNotContainsString('HIDDEN-SENSOR-EVIDENCE', $encoded);
+        $this->assertStringNotContainsString('HIDDEN-MAINTENANCE-EVIDENCE', $encoded);
+        $this->assertStringNotContainsString('HIDDEN-SERVICE-EVIDENCE', $encoded);
+        $this->assertStringNotContainsString('HIDDEN-SERVICE-MESSAGE', $encoded);
+        $this->assertStringNotContainsString('HIDDEN-ALERT-EVIDENCE', $encoded);
+        $this->assertStringNotContainsString('10.250.250.250', $encoded);
+        $this->assertStringNotContainsString((string) $hiddenDownAt, $encoded);
+        $this->assertSame(0, $payload['coverage']['ignored_count']);
+        $this->assertSame(0, $payload['coverage']['disabled_count']);
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $this->writeVisualFixture('limited.html', $html);
+        $this->assertStringNotContainsString('hidden-device.example.com', $html);
+        $this->assertStringNotContainsString('HIDDEN-SENSOR-EVIDENCE', $html);
+        $this->assertStringNotContainsString('HIDDEN-SERVICE-EVIDENCE', $html);
+        $this->assertStringNotContainsString('HIDDEN-ALERT-EVIDENCE', $html);
+        $this->assertStringNotContainsString((string) $hiddenLocation->location, $html);
+    }
+
+    public function testPhaseOneOperationalStatesUseAuthorizedLibreNmsData(): void
+    {
+        $location = Location::factory()->create(['location' => 'Phase 1 Lab']);
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        $down = Device::factory()->create([
+            'display' => 'Down Router',
+            'hostname' => 'down-router.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 0,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        DeviceOutage::factory()->for($down)->open()->create([
+            'going_down' => now()->subMinutes(12)->timestamp,
+        ]);
+        DeviceOutage::factory()->for($down)->open()->create([
+            'going_down' => now()->subHour()->timestamp,
+        ]);
+
+        $maintained = Device::factory()->create([
+            'display' => 'Maintained Switch',
+            'hostname' => 'maintenance.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 0,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $schedule = AlertSchedule::factory()->create([
+            'title' => 'Approved maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $schedule->devices()->attach($maintained->device_id);
+
+        $recovered = Device::factory()->create([
+            'display' => 'Recovered Server',
+            'hostname' => 'recovered.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        DeviceOutage::factory()->for($recovered)->closed()->create([
+            'going_down' => now()->subMinutes(20)->timestamp,
+            'up_again' => now()->subMinutes(5)->timestamp,
+        ]);
+        DeviceOutage::factory()->for($recovered)->closed()->create([
+            'going_down' => now()->subDays(3)->timestamp,
+            'up_again' => now()->subDays(2)->timestamp,
+        ]);
+        $oldRecovery = Device::factory()->create([
+            'display' => 'Old Recovery',
+            'hostname' => 'old-recovery.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        DeviceOutage::factory()->for($oldRecovery)->closed()->create([
+            'going_down' => now()->subDays(4)->timestamp,
+            'up_again' => now()->subDays(3)->timestamp,
+        ]);
+
+        $ups = Device::factory()->create([
+            'display' => 'UPS Lab',
+            'hostname' => 'ups-lab.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $sensorDevice = Device::factory()->create([
+            'display' => 'Sensor Host',
+            'hostname' => 'sensor-host.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($sensorDevice)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'CPU Temperature',
+            'sensor_current' => 40,
+            'sensor_limit' => 35,
+            'sensor_limit_warn' => 30,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($sensorDevice)->create([
+            'sensor_class' => 'humidity',
+            'sensor_descr' => 'Room Humidity',
+            'sensor_current' => 72,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        Service::factory()->for($sensorDevice)->create([
+            'service_name' => 'SQL Server',
+            'service_status' => 2,
+            'service_message' => 'Connection refused',
+            'service_changed' => now()->subMinutes(8)->timestamp,
+        ]);
+        Service::factory()->for($sensorDevice)->create([
+            'service_name' => 'Backup Agent',
+            'service_status' => 1,
+            'service_message' => 'Slow response',
+            'service_changed' => now()->subMinutes(4)->timestamp,
+        ]);
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'Vendor power alarm',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $sensorDevice->device_id,
+            'rule_id' => $criticalRule->id,
+        ]);
+        $warningRule = AlertRule::factory()->create([
+            'name' => 'Vendor warning alarm',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $sensorDevice->device_id,
+            'rule_id' => $warningRule->id,
+        ]);
+        $duplicateSensorRule = AlertRule::factory()->create([
+            'name' => 'Sensor over limit - Check Device Health Settings',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $sensorDevice->device_id,
+            'rule_id' => $duplicateSensorRule->id,
+        ]);
+        $duplicateDownRule = AlertRule::factory()->create([
+            'name' => 'Device Down',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $down->device_id,
+            'rule_id' => $duplicateDownRule->id,
+        ]);
+
+        $warningAlertOnly = Device::factory()->create([
+            'display' => 'Warning Alert Only',
+            'hostname' => 'warning-alert.example.com',
+            'location_id' => $location->id,
+            'type' => 'appliance',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $warningOnlyRule = AlertRule::factory()->create([
+            'name' => 'Noncritical vendor warning',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $warningAlertOnly->device_id,
+            'rule_id' => $warningOnlyRule->id,
+        ]);
+
+        $stateSensor = Sensor::factory()->for($sensorDevice)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'System Status',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $stateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'phase1-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $stateSensor->sensor_id,
+            'state_index_id' => $stateIndexId,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $stateIndexId,
+            'state_descr' => 'failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        $queryCount = 0;
+        DB::listen(static function () use (&$queryCount): void {
+            $queryCount++;
+        });
+        $start = hrtime(true);
+        $memoryBefore = memory_get_usage(true);
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data([], $request);
+        $elapsedMs = (hrtime(true) - $start) / 1_000_000;
+        $memoryDelta = max(0, memory_get_peak_usage(true) - $memoryBefore);
+        $dataQueryCount = $queryCount;
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $this->writeVisualFixture('global.html', $html);
+        $htmlBytes = strlen($html);
+
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group) => $group['devices'])
+            ->keyBy('device_id');
+
+        $downData = $devices->get($down->device_id);
+        $maintenanceData = $devices->get($maintained->device_id);
+        $recoveredData = $devices->get($recovered->device_id);
+        $oldRecoveryData = $devices->get($oldRecovery->device_id);
+        $upsData = $devices->get($ups->device_id);
+        $sensorData = $devices->get($sensorDevice->device_id);
+        $warningAlertData = $devices->get($warningAlertOnly->device_id);
+
+        $this->assertSame('critical', $downData['health']);
+        $this->assertGreaterThanOrEqual(660, $downData['down_age_seconds']);
+        $this->assertLessThan(900, $downData['down_age_seconds']);
+        $this->assertStringContainsString('unavailable for', $downData['issues']->first()['description']);
+        $this->assertSame('maintenance', $maintenanceData['health']);
+        $this->assertFalse($maintenanceData['issues']->contains('type', 'device_down'));
+        $this->assertTrue($recoveredData['recovered_recently']);
+        $this->assertFalse($oldRecoveryData['recovered_recently']);
+        $this->assertSame('Power', $upsData['category']);
+        $this->assertGreaterThan(0, $upsData['no_sensor_count']);
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => str_contains($issue['description'], '104')
+                && str_contains($issue['description'], '95')
+        ));
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => $issue['type'] === 'state'
+                && str_contains($issue['description'], 'failed')
+        ));
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'service'
+                && $issue['severity'] === 'critical'
+                && str_contains($issue['description'], 'Connection refused')
+        ));
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && $issue['severity'] === 'critical'
+                && str_contains($issue['description'], 'Vendor power alarm')
+        ));
+        $this->assertFalse($sensorData['issues']->contains(
+            fn (array $issue): bool => str_contains($issue['description'], 'Sensor over limit')
+        ));
+        $this->assertCount(1, $downData['issues']->where('type', 'device_down'));
+        $this->assertFalse($downData['issues']->contains(
+            fn (array $issue): bool => str_contains($issue['description'], 'Device Down')
+        ));
+        $this->assertSame('warning', $warningAlertData['health']);
+        $this->assertFalse(collect($payload['priorityAttention']['items'])->contains(
+            'device_id',
+            $warningAlertOnly->device_id
+        ));
+        $requiredIssueFields = [
+            'key', 'device_id', 'severity', 'priority', 'source', 'type',
+            'title', 'description', 'timestamp', 'actionable', 'device_url',
+        ];
+
+        foreach ($devices as $deviceData) {
+            foreach ($deviceData['issues']->whereIn('severity', ['critical', 'warning']) as $issue) {
+                $this->assertEqualsCanonicalizing(
+                    $requiredIssueFields,
+                    array_values(array_intersect($requiredIssueFields, array_keys($issue)))
+                );
+                $this->assertNotSame('', $issue['title']);
+                $this->assertNotSame('', $issue['description']);
+                $this->assertSame($deviceData['device_id'], $issue['device_id']);
+            }
+        }
+        $this->assertSame('device_down', $payload['priorityAttention']['items'][0]['type']);
+        $this->assertSame(IssueBuilder::PRIORITY_DEVICE_DOWN, $payload['priorityAttention']['items'][0]['priority']);
+        $this->assertLessThan(80, $dataQueryCount, 'Phase 1 remains fixed-query and avoids N+1 behavior.');
+        $this->assertLessThan(5000, $elapsedMs, 'Fixture Page::data() remains within a defensive local ceiling.');
+        $this->assertLessThan(64 * 1024 * 1024, $memoryDelta, 'Fixture Page::data() memory delta remains bounded.');
+        $this->assertLessThan(2 * 1024 * 1024, $htmlBytes, 'Fixture HTML remains within a defensive ceiling.');
+        $this->assertStringContainsString('Device down — unavailable for', $html);
+        $this->assertStringContainsString('No sensor installed', $html);
+
+        fwrite(STDOUT, sprintf(
+            "Phase 1 metrics: devices=%d sensors=%d issues=%d queries=%d data_ms=%.2f memory_delta=%d html_bytes=%d\n",
+            $payload['summary']['active_devices'],
+            Sensor::query()->whereIn('device_id', $devices->keys())->count(),
+            collect($devices)->sum(fn (array $row): int => $row['issues']->count()),
+            $dataQueryCount,
+            $elapsedMs,
+            $memoryDelta,
+            $htmlBytes
+        ));
     }
 
     public function testUserWithoutDevicePermissionGetsAnEmptyDeviceSet(): void
     {
-        Device::factory()->count(2)->create();
+        $hidden = Device::factory()->create([
+            'hostname' => 'NO-ACCESS-DEVICE.example.com',
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($hidden)->create([
+            'sensor_descr' => 'NO-ACCESS-SENSOR',
+            'sensor_current' => 123,
+            'lastupdate' => now(),
+        ]);
         $user = User::factory()->create(['enabled' => 1]);
         $user->assignRole('user');
 
@@ -124,6 +512,271 @@ class DeviceAccessTest extends TestCase
         $this->assertCount(0, $payload['otherLocations']);
         $this->assertSame(0, $payload['priorityAttention']['total']);
         $this->assertSame([], $payload['priorityAttention']['items']);
+        $this->assertSame(0, $payload['summary']['no_sensor_installed']);
+        $this->assertSame(0, $payload['summary']['recent_recoveries']);
+        $this->assertSame(0, $payload['coverage']['ignored_count']);
+        $this->assertSame(0, $payload['coverage']['disabled_count']);
+        $this->assertStringNotContainsString('sensor_current', json_encode($payload, JSON_THROW_ON_ERROR));
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $this->writeVisualFixture('empty.html', $html);
+        $this->assertStringNotContainsString('NO-ACCESS-DEVICE', $html);
+        $this->assertStringNotContainsString('NO-ACCESS-SENSOR', $html);
+    }
+
+    public function testMaintenanceAliasesAndWindowsStayInsideAuthorizedDevices(): void
+    {
+        $location = Location::factory()->create(['location' => 'Authorized Maintenance Location']);
+        $hiddenLocation = Location::factory()->create(['location' => 'HIDDEN MAINTENANCE LOCATION']);
+        $makeDevice = static fn (string $hostname, ?int $locationId = null): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $locationId,
+            'type' => 'network',
+            'status' => 0,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $direct = $makeDevice('maintenance-direct.example.com');
+        $byLocation = $makeDevice('maintenance-location.example.com', $location->id);
+        $byGroup = $makeDevice('maintenance-group.example.com');
+        $expired = $makeDevice('maintenance-expired.example.com');
+        $future = $makeDevice('maintenance-future.example.com');
+        $hidden = $makeDevice('HIDDEN-MAINTENANCE-DEVICE.example.com', $hiddenLocation->id);
+
+        $activeValues = [
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ];
+        $directSchedule = AlertSchedule::factory()->create(['title' => 'Direct device'] + $activeValues);
+        $directSchedule->devices()->attach($direct->device_id);
+        $locationSchedule = AlertSchedule::factory()->create(['title' => 'Inherited location'] + $activeValues);
+        $locationSchedule->locations()->attach($location->id);
+        $group = DeviceGroup::factory()->create(['name' => 'Phase 1 maintenance group']);
+        $group->devices()->attach($byGroup->device_id);
+        $groupSchedule = AlertSchedule::factory()->create(['title' => 'Inherited group'] + $activeValues);
+        $groupSchedule->deviceGroups()->attach($group->id);
+        $expiredSchedule = AlertSchedule::factory()->create([
+            'title' => 'Expired window',
+            'start' => now()->subHours(2),
+            'end' => now()->subHour(),
+            'behavior' => 1,
+        ]);
+        $expiredSchedule->devices()->attach($expired->device_id);
+        $futureSchedule = AlertSchedule::factory()->create([
+            'title' => 'Future window',
+            'start' => now()->addHour(),
+            'end' => now()->addHours(2),
+            'behavior' => 1,
+        ]);
+        $futureSchedule->devices()->attach($future->device_id);
+        $hiddenSchedule = AlertSchedule::factory()->create(['title' => 'HIDDEN SCHEDULE'] + $activeValues);
+        $hiddenSchedule->locations()->attach($hiddenLocation->id);
+
+        $this->assertEqualsCanonicalizing(
+            ['device', 'device_group', 'location'],
+            DB::table('alert_schedulables')->distinct()->pluck('alert_schedulable_type')->all()
+        );
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('user');
+        $user->devicesOwned()->attach([
+            $direct->device_id,
+            $byLocation->device_id,
+            $byGroup->device_id,
+            $expired->device_id,
+            $future->device_id,
+        ]);
+        Permissions::invalidateCache();
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data([], $request);
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertTrue($devices->get($direct->device_id)['maintenance']);
+        $this->assertTrue($devices->get($byLocation->device_id)['maintenance']);
+        $this->assertTrue($devices->get($byGroup->device_id)['maintenance']);
+        $this->assertFalse($devices->get($expired->device_id)['maintenance']);
+        $this->assertFalse($devices->get($future->device_id)['maintenance']);
+        $this->assertSame('critical', $devices->get($expired->device_id)['health']);
+        $this->assertSame('critical', $devices->get($future->device_id)['health']);
+        $encoded = json_encode($payload, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('HIDDEN-MAINTENANCE-DEVICE', $encoded);
+        $this->assertStringNotContainsString('HIDDEN MAINTENANCE LOCATION', $encoded);
+        $this->assertStringNotContainsString('HIDDEN SCHEDULE', $encoded);
+    }
+
+    public function testRepresentativePerformanceScaleHasFixedQueryCount(): void
+    {
+        $scale = getenv('IDF_PERFORMANCE_SCALE') ?: 'small';
+        $scales = [
+            'small' => ['devices' => 20, 'sensors' => 500, 'problems' => 1, 'max_ms' => 5000],
+            'medium' => ['devices' => 200, 'sensors' => 6000, 'problems' => 10, 'max_ms' => 20000],
+            'large' => ['devices' => 1000, 'sensors' => 30000, 'problems' => 50, 'max_ms' => 90000],
+        ];
+        $this->assertArrayHasKey($scale, $scales, 'IDF_PERFORMANCE_SCALE must be small, medium or large.');
+        $target = $scales[$scale];
+        $devices = Device::factory()->count($target['devices'])->create([
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+            'last_polled' => now(),
+        ]);
+        $perDevice = intdiv($target['sensors'], $target['devices']);
+        $rows = [];
+
+        foreach ($devices as $device) {
+            for ($index = 0; $index < $perDevice; $index++) {
+                $rows[] = [
+                    'device_id' => $device->device_id,
+                    'sensor_class' => 'temperature',
+                    'sensor_oid' => '.1.3.6.1.4.1.99999.' . $device->device_id . '.' . $index,
+                    'sensor_index' => (string) $index,
+                    'sensor_type' => 'phase1-performance',
+                    'sensor_descr' => 'Temperature ' . $index,
+                    'sensor_current' => 22,
+                    'sensor_limit' => 45,
+                    'sensor_limit_warn' => 40,
+                    'sensor_alert' => 1,
+                    'lastupdate' => now(),
+                ];
+
+                if (count($rows) === 1000) {
+                    DB::table('sensors')->insert($rows);
+                    $rows = [];
+                }
+            }
+        }
+
+        if ($rows !== []) {
+            DB::table('sensors')->insert($rows);
+        }
+
+        $problemDevices = $devices->take($target['problems']);
+        $maintenanceDevices = $devices->slice($target['problems'], $target['problems']);
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'Performance fixture critical alert',
+            'severity' => 'critical',
+        ]);
+        $maintenance = AlertSchedule::factory()->create([
+            'title' => 'Performance fixture maintenance',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenance->devices()->attach($maintenanceDevices->pluck('device_id')->all());
+
+        foreach ($problemDevices as $device) {
+            $device->update(['status' => 0]);
+            DeviceOutage::factory()->for($device)->open()->create([
+                'going_down' => now()->subMinutes(15)->timestamp,
+            ]);
+            Service::factory()->for($device)->create([
+                'service_name' => 'Performance service',
+                'service_status' => 2,
+                'service_message' => 'Connection refused',
+                'service_changed' => now()->subMinutes(10)->timestamp,
+            ]);
+            Alert::factory()->create([
+                'device_id' => $device->device_id,
+                'rule_id' => $criticalRule->id,
+            ]);
+        }
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $queryCount = 0;
+        DB::listen(static function () use (&$queryCount): void {
+            $queryCount++;
+        });
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $memoryBefore = memory_get_usage(true);
+        $start = hrtime(true);
+        $payload = (new Page())->data([], $request);
+        $dataMs = (hrtime(true) - $start) / 1_000_000;
+        $memoryAfterData = memory_get_usage(true);
+        $dataQueryCount = $queryCount;
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $issueCount = collect($payload['otherLocations'])
+            ->flatMap(fn (array $location): iterable => $location['devices'])
+            ->sum(fn (array $device): int => $device['issues']->count());
+
+        $this->assertSame($target['devices'], $payload['summary']['active_devices']);
+        $this->assertSame($target['sensors'], DB::table('sensors')->count());
+        $this->assertGreaterThanOrEqual($target['problems'], $issueCount);
+        $this->assertLessThan(60, $dataQueryCount, 'Query count must stay fixed and independent of device count.');
+        $this->assertLessThan($target['max_ms'], $dataMs, 'Page::data() exceeded the defensive scale ceiling.');
+        $this->assertLessThan(256 * 1024 * 1024, max(0, $memoryAfterData - $memoryBefore), 'Page::data() memory growth is excessive.');
+
+        fwrite(STDOUT, sprintf(
+            "Phase 1 performance: scale=%s devices=%d sensors=%d services=%d alerts=%d outages=%d maintenance=%d issues=%d queries=%d data_ms=%.2f memory_growth=%d peak_memory=%d html_bytes=%d\n",
+            $scale,
+            $target['devices'],
+            $target['sensors'],
+            $target['problems'],
+            $target['problems'],
+            $target['problems'],
+            $maintenanceDevices->count(),
+            $issueCount,
+            $dataQueryCount,
+            $dataMs,
+            max(0, $memoryAfterData - $memoryBefore),
+            memory_get_peak_usage(true),
+            strlen($html)
+        ));
+    }
+
+    public function testRealDeviceRowsReceiveExactlyOneSupportedClassification(): void
+    {
+        $fixtures = [
+            'ups-real.example.com' => [['type' => 'network', 'hardware' => 'APC Smart-UPS'], 'Power'],
+            'pdu-real.example.com' => [['type' => 'power', 'hardware' => 'Rack PDU'], 'Power'],
+            'switch-real.example.com' => [['type' => 'network', 'hardware' => 'Ethernet switch'], 'Network'],
+            'server-real.example.com' => [['type' => 'server'], 'Server'],
+            'ap-real.example.com' => [['type' => 'wireless', 'hardware' => 'Access Point'], 'Wireless'],
+            'printer-real.example.com' => [['type' => 'printer', 'hardware' => 'LaserJet'], 'Printer'],
+            'camera-real.example.com' => [['type' => 'appliance', 'purpose' => 'CCTV camera'], 'Camera'],
+            'pos-real.example.com' => [['type' => 'appliance', 'purpose' => 'Oracle MICROS workstation'], 'POS'],
+            'controller-real.example.com' => [['type' => 'appliance', 'purpose' => 'BMS controller'], 'Controller'],
+            'firewall-real.example.com' => [['type' => 'firewall', 'os' => 'fortios'], 'Security'],
+            '10.20.30.40' => [['type' => 'appliance'], 'Other'],
+        ];
+
+        foreach ($fixtures as $hostname => [$attributes]) {
+            Device::factory()->create($attributes + [
+                'hostname' => $hostname,
+                'status' => 1,
+                'disabled' => 0,
+                'ignore' => 0,
+            ]);
+        }
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data([], $request);
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('hostname');
+
+        foreach ($fixtures as $hostname => [, $expected]) {
+            $device = $devices->get($hostname);
+            $this->assertSame($expected, $device['category'], $hostname);
+            $this->assertSame($expected, $device['classification']['category'], $hostname);
+            $this->assertNotSame('', $device['classification']['reason'], $hostname);
+            $this->assertContains($device['classification']['confidence'], ['high', 'medium', 'low']);
+            $this->assertIsArray($device['classification']['signals']);
+        }
     }
 
     public function testLibreNmsControllerStillProtectsPluginSettings(): void
@@ -145,5 +798,14 @@ class DeviceAccessTest extends TestCase
             Mockery::mock(PluginManagerInterface::class),
             $plugin
         );
+    }
+
+    private function writeVisualFixture(string $name, string $html): void
+    {
+        $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
+
+        if (is_string($directory) && is_dir($directory)) {
+            file_put_contents($directory . DIRECTORY_SEPARATOR . $name, $html);
+        }
     }
 }

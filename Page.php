@@ -2,11 +2,16 @@
 
 namespace App\Plugins\IdfDashboard;
 
+use App\Models\AlertSchedule;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
+use App\Plugins\IdfDashboard\Support\DeviceClassifier;
+use App\Plugins\IdfDashboard\Support\Freshness;
+use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
+use App\Plugins\IdfDashboard\Support\Severity;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\Request;
@@ -43,6 +48,8 @@ class Page extends PageHook
     private int $processorCriticalPercent;
 
     private int $refreshSeconds;
+
+    private bool $staleEnabled;
 
     /**
      * The Settings page's "Default Problem Types" checkboxes — set
@@ -128,6 +135,7 @@ class Page extends PageHook
         $this->memoryCriticalPercent = $config['memory_critical_percent'];
         $this->processorCriticalPercent = $config['processor_critical_percent'];
         $this->refreshSeconds = $config['refresh_seconds'];
+        $this->staleEnabled = (bool) $config['default_problem_stale'];
 
         /*
          * Reported directly by a user of this dashboard: turning a
@@ -189,10 +197,12 @@ class Page extends PageHook
          */
         $authorizedDevices = DeviceAccess::query($user);
 
-        $ignoredCount = (int) (clone $authorizedDevices)
-            ->where('disabled', 0)
-            ->where('ignore', 1)
-            ->count();
+        $excludedCounts = (clone $authorizedDevices)
+            ->selectRaw('SUM(CASE WHEN disabled = 1 THEN 1 ELSE 0 END) as disabled_count')
+            ->selectRaw('SUM(CASE WHEN disabled = 0 AND `ignore` = 1 THEN 1 ELSE 0 END) as ignored_count')
+            ->first();
+        $ignoredCount = (int) ($excludedCounts->ignored_count ?? 0);
+        $disabledCount = (int) ($excludedCounts->disabled_count ?? 0);
 
         $rawDevices = (clone $authorizedDevices)
             ->leftJoin('locations as l', 'l.id', '=', 'devices.location_id')
@@ -207,7 +217,11 @@ class Page extends PageHook
                 'devices.sysName',
                 'devices.type',
                 'devices.os',
+                'devices.hardware',
+                'devices.sysDescr',
+                'devices.purpose',
                 'devices.status',
+                'devices.status_reason',
                 'devices.last_polled',
             ])
             ->orderBy('l.location')
@@ -283,6 +297,7 @@ class Page extends PageHook
                     $translation = $stateTranslations->get((int) $sensor->sensor_id);
 
                     $sensor->state_descr = $translation->state_descr ?? null;
+                    $sensor->state_name = $translation->state_name ?? null;
                     $sensor->state_generic_value = $translation !== null
                         ? (int) $translation->state_generic_value
                         : null;
@@ -341,6 +356,8 @@ class Page extends PageHook
         $deviceStorage = $this->loadStorage($allDeviceIds);
         $deviceMempools = $this->loadMempools($allDeviceIds);
         $deviceProcessors = $this->loadProcessors($allDeviceIds);
+        $deviceOutages = $this->loadDeviceOutages($allDeviceIds);
+        $maintenanceMap = $this->loadMaintenanceDevices($allDeviceIds);
 
         /*
          * Normalize every active device exactly once.
@@ -353,7 +370,9 @@ class Page extends PageHook
                 $deviceEvents,
                 $deviceStorage,
                 $deviceMempools,
-                $deviceProcessors
+                $deviceProcessors,
+                $deviceOutages,
+                $maintenanceMap
             ): array {
                 $deviceId = (int) $device->device_id;
 
@@ -365,7 +384,10 @@ class Page extends PageHook
                     $deviceEvents['byDevice']->get($deviceId, collect()),
                     $deviceStorage->get($deviceId, collect()),
                     $deviceMempools->get($deviceId, collect()),
-                    $deviceProcessors->get($deviceId, collect())
+                    $deviceProcessors->get($deviceId, collect()),
+                    $deviceOutages['current']->get($deviceId),
+                    $deviceOutages['recovered']->get($deviceId),
+                    $maintenanceMap->get($deviceId)
                 );
             })
             ->values();
@@ -389,18 +411,18 @@ class Page extends PageHook
             ->values();
 
         $mdfServers = $this->sortDevices(
-            $mdfDevices->where('type', 'server')->values()
+            $mdfDevices->where('category', 'Server')->values()
         );
 
         $mdfPower = $this->sortDevices(
-            $mdfDevices->where('type', 'power')->values()
+            $mdfDevices->where('category', 'Power')->values()
         );
 
         $mdfInfrastructure = $this->sortDevices(
             $mdfDevices
                 ->reject(fn (array $device): bool => in_array(
-                    $device['type'],
-                    ['server', 'power'],
+                    $device['category'],
+                    ['Server', 'Power'],
                     true
                 ))
                 ->values()
@@ -502,6 +524,22 @@ class Page extends PageHook
             ))
             ->count();
 
+        $maintenanceCount = $devices
+            ->where('maintenance', true)
+            ->count();
+
+        $noSensorInstalled = $devices->sum(
+            fn (array $device): int => $device['no_sensor_count']
+        );
+
+        $recentRecoveries = $devices
+            ->where('recovered_recently', true)
+            ->count();
+
+        $operationalDown = $devices
+            ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
+            ->count();
+
         $priorityAttention = $this->buildPriorityAttention($devices);
 
         return [
@@ -515,7 +553,9 @@ class Page extends PageHook
             'mdf' => [
                 'total_devices' => $mdfDevices->count(),
                 'devices_up' => $mdfDevices->where('status', 1)->count(),
-                'devices_down' => $mdfDevices->where('status', 0)->count(),
+                'devices_down' => $mdfDevices
+                    ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
+                    ->count(),
 
                 'servers' => $mdfServers,
                 'server_count' => $mdfServers->count(),
@@ -530,7 +570,7 @@ class Page extends PageHook
             'summary' => [
                 'active_devices' => $activeCount,
                 'devices_up' => $devices->where('status', 1)->count(),
-                'devices_down' => $devices->where('status', 0)->count(),
+                'devices_down' => $operationalDown,
 
                 'critical_devices' => $devices
                     ->where('health', 'critical')
@@ -543,6 +583,12 @@ class Page extends PageHook
                 'unknown_devices' => $devices
                     ->where('health', 'unknown')
                     ->count(),
+
+                'stale_devices' => $devices
+                    ->where('health', Severity::STALE)
+                    ->count(),
+
+                'maintenance_devices' => $maintenanceCount,
 
                 'healthy_devices' => $devices
                     ->where('health', 'healthy')
@@ -561,11 +607,14 @@ class Page extends PageHook
                 'devices_with_active_alerts' => $devicesWithActiveAlerts,
 
                 'stale_sensor_devices' => $staleSensorDevices,
+                'no_sensor_installed' => $noSensorInstalled,
+                'recent_recoveries' => $recentRecoveries,
             ],
 
             'coverage' => [
                 'active_devices' => $activeCount,
                 'ignored_count' => $ignoredCount,
+                'disabled_count' => $disabledCount,
                 'idf_count' => $idfDevices->count(),
                 'mdf_count' => $mdfDevices->count(),
                 'other_count' => $otherDevices->count(),
@@ -599,6 +648,7 @@ class Page extends PageHook
             'refreshSeconds' => $this->refreshSeconds,
             'sensorFreshMinutes' => $this->sensorFreshMinutes,
             'eventWindowHours' => $this->eventWindowHours,
+            'severityDefinitions' => Severity::definitions(),
 
             // Every admin-configured default the toolbar/TV Mode JS
             // needs — see Support/Config.php for the full schema.
@@ -684,6 +734,29 @@ class Page extends PageHook
         return 'other';
     }
 
+    private function telemetryMetricEnabled(array $metric): bool
+    {
+        $type = $this->metricProblemType($metric);
+
+        if (! ($this->enabledProblemTypes[$type] ?? true)) {
+            return false;
+        }
+
+        $stale = (bool) ($metric['stale'] ?? false);
+
+        if (ProblemPolicy::metricEnabled($this->enabledProblemTypes, $type, $stale)) {
+            return true;
+        }
+
+        // Disabling stale removes stale-only healthy telemetry, but must
+        // never hide a real last-known Critical/Warning/Unknown cause.
+        return in_array(
+            Severity::normalize((string) ($metric['state'] ?? Severity::UNKNOWN)),
+            [Severity::CRITICAL, Severity::WARNING, Severity::UNKNOWN],
+            true
+        );
+    }
+
     private function normalizeDevice(
         object $device,
         Collection $sensors,
@@ -692,7 +765,10 @@ class Page extends PageHook
         Collection $events,
         Collection $storage,
         Collection $mempools,
-        Collection $processors
+        Collection $processors,
+        ?object $currentOutage = null,
+        ?object $recentRecovery = null,
+        ?object $maintenance = null
     ): array {
         $name = $this->deviceName($device);
 
@@ -704,8 +780,20 @@ class Page extends PageHook
 
         $role = $this->deviceRole(
             $name,
-            (string) $device->type
+            (string) $device->type,
+            (string) ($device->hardware ?? ''),
+            (string) ($device->sysDescr ?? '')
         );
+
+        $classification = DeviceClassifier::classify([
+            'type' => $device->type,
+            'os' => $device->os,
+            'hardware' => $device->hardware,
+            'sysDescr' => $device->sysDescr,
+            'purpose' => $device->purpose,
+            'hostname' => $device->hostname,
+            'display' => $name,
+        ], $sensors->pluck('sensor_class')->all());
 
         // A Problem Type turned off in Settings is an *admin* decision
         // that the signal doesn't matter for this fleet at all — not a
@@ -717,11 +805,7 @@ class Page extends PageHook
         $telemetry = collect($this->buildTelemetry($role, $sensors))
             ->concat($this->buildResourceTelemetry($storage, $mempools, $processors))
             ->filter(function (array $metric): bool {
-                return ProblemPolicy::metricEnabled(
-                    $this->enabledProblemTypes,
-                    $this->metricProblemType($metric),
-                    (bool) ($metric['stale'] ?? false)
-                );
+                return $this->telemetryMetricEnabled($metric);
             })
             ->values();
 
@@ -804,14 +888,6 @@ class Page extends PageHook
 
         $activeAlerts = $alerts->values();
 
-        $criticalAlerts = $activeAlerts
-            ->where('severity_class', 'critical')
-            ->values();
-
-        $warningAlerts = $activeAlerts
-            ->where('severity_class', '!=', 'critical')
-            ->values();
-
         $recentEvents = $events->values();
 
         // Same admin exclusion as the telemetry filter above, applied
@@ -827,36 +903,45 @@ class Page extends PageHook
         $serviceCounts = $this->enabledProblemTypes['service'] ?? true;
         $alertsCount = $this->enabledProblemTypes['alert'] ?? true;
 
-        // Hierarchy: critical > warning > unknown > healthy. 'unknown'
-        // means a state sensor's current value has no resolvable
-        // translation (see sensorState()'s state_class branch) — never
-        // confirmed a real problem, but never silently folded into
-        // "healthy" either, matching LibreNMS's own native
-        // HasThresholds::currentStatus()/SensorState::Unknown split.
-        $health = 'healthy';
+        $maintenanceActive = $maintenance !== null;
+        $downSince = $currentOutage !== null && isset($currentOutage->going_down)
+            ? Carbon::createFromTimestamp((int) $currentOutage->going_down)
+            : null;
+        $recoveredAt = (int) $device->status === 1
+            && $recentRecovery !== null
+            && isset($recentRecovery->up_again)
+                ? Carbon::createFromTimestamp((int) $recentRecovery->up_again)
+                : null;
 
-        if ($deviceDownCounts && (int) $device->status === 0) {
-            $health = 'critical';
-        } elseif (
-            ($serviceCounts && $serviceProblems->contains('status', 2))
-            || $issueTelemetry->contains('state', 'critical')
-            || ($alertsCount && $criticalAlerts->isNotEmpty())
-        ) {
-            $health = 'critical';
-        } elseif (
-            ($serviceCounts && $serviceProblems->isNotEmpty())
-            || $issueTelemetry->contains('state', 'warning')
-            || $staleIsUrgent
-            || ($alertsCount && $warningAlerts->isNotEmpty())
-        ) {
-            $health = 'warning';
-        } elseif ($issueTelemetry->contains('state', 'unknown')) {
-            $health = 'unknown';
+        $issues = $this->buildDeviceIssues(
+            $device,
+            $location,
+            $sensors,
+            $telemetry,
+            $serviceProblems,
+            $activeAlerts,
+            $maintenanceActive,
+            $downSince,
+            $staleIsUrgent,
+            $deviceDownCounts,
+            $serviceCounts,
+            $alertsCount
+        );
+
+        $health = Severity::worst(
+            $issues
+                ->filter(fn (array $issue): bool => (bool) $issue['actionable'])
+                ->pluck('severity'),
+            true
+        );
+
+        if ($health === Severity::HEALTHY && $maintenanceActive) {
+            $health = Severity::MAINTENANCE;
         }
 
         $problemTypes = collect();
 
-        if ($deviceDownCounts && (int) $device->status === 0) {
+        if ($deviceDownCounts && ! $maintenanceActive && (int) $device->status === 0) {
             $problemTypes->push('device');
         }
 
@@ -900,9 +985,14 @@ class Page extends PageHook
             'hostname' => (string) $device->hostname,
             'type' => (string) $device->type,
             'os' => (string) $device->os,
+            'hardware' => (string) ($device->hardware ?? ''),
+            'purpose' => (string) ($device->purpose ?? ''),
             'status' => (int) $device->status,
+            'status_reason' => (string) ($device->status_reason ?? ''),
             'last_polled' => $device->last_polled,
             'role' => $role,
+            'classification' => $classification,
+            'category' => $classification['category'],
             'health' => $health,
 
             'telemetry' => $telemetry,
@@ -919,12 +1009,241 @@ class Page extends PageHook
             'recent_events' => $recentEvents->take(3)->values(),
             'recent_event_count' => $recentEvents->count(),
 
-            'has_issue' => $health !== 'healthy',
+            'maintenance' => $maintenanceActive,
+            'maintenance_title' => $maintenanceActive
+                ? trim((string) ($maintenance->title ?? 'Scheduled maintenance'))
+                : null,
+            'down_since' => $downSince,
+            'down_age_seconds' => $downSince !== null ? max(0, now()->timestamp - $downSince->timestamp) : null,
+            'recovered_at' => $recoveredAt,
+            'recovered_recently' => $recoveredAt !== null,
+            'issues' => $issues,
+            'issue_count' => $issues->where('actionable', true)->count(),
+            'no_sensor_count' => $issues->where('severity', Severity::NO_SENSOR)->count(),
+            'has_issue' => Severity::metadata($health, $health === Severity::STALE)['actionable'],
             'problem_types' => $problemTypes
                 ->unique()
                 ->values()
                 ->all(),
         ];
+    }
+
+    /**
+     * Build every operational condition once. Device health, summaries and
+     * Priority Attention consume this same structure instead of independently
+     * re-interpreting sensor/service/alert state.
+     */
+    private function buildDeviceIssues(
+        object $device,
+        string $location,
+        Collection $sensors,
+        Collection $telemetry,
+        Collection $serviceProblems,
+        Collection $alerts,
+        bool $maintenance,
+        ?Carbon $downSince,
+        bool $staleIsUrgent,
+        bool $deviceDownCounts,
+        bool $serviceCounts,
+        bool $alertsCount
+    ): Collection {
+        $deviceId = (int) $device->device_id;
+        $locationId = $device->location_id !== null ? (int) $device->location_id : null;
+        $deviceUrl = url('device/device=' . $deviceId);
+        $issues = collect();
+
+        if ($deviceDownCounts && ! $maintenance && (int) $device->status === 0) {
+            $ageSeconds = $downSince !== null ? max(0, now()->timestamp - $downSince->timestamp) : null;
+            $duration = $ageSeconds !== null ? $this->formatDuration((float) $ageSeconds) : 'duration unavailable';
+            $issues->push(IssueBuilder::make([
+                'key' => 'device:' . $deviceId . ':down',
+                'device_id' => $deviceId,
+                'location_id' => $locationId,
+                'severity' => Severity::CRITICAL,
+                'priority' => IssueBuilder::PRIORITY_DEVICE_DOWN,
+                'source' => 'device',
+                'type' => 'device_down',
+                'title' => 'Device Down',
+                'description' => 'Device down — unavailable for ' . $duration,
+                'timestamp' => $downSince?->format('Y-m-d H:i:s'),
+                'age_seconds' => $ageSeconds,
+                'actionable' => true,
+                'device_url' => $deviceUrl,
+            ]));
+        }
+
+        $representedSensorIds = $telemetry
+            ->pluck('sensor_id')
+            ->filter()
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+        $issueMetrics = $telemetry->values();
+
+        foreach ($sensors as $sensor) {
+            if (in_array((int) $sensor->sensor_id, $representedSensorIds, true)) {
+                continue;
+            }
+
+            [$sensorLabel, $sensorFormat] = $this->sensorPresentation((string) $sensor->sensor_class);
+            $description = trim((string) $sensor->sensor_descr);
+            $metric = $this->individualSensorMetric(
+                $sensor,
+                $description !== '' ? $description : $sensorLabel,
+                $sensorFormat
+            ) + ['curated' => false];
+
+            if (! $this->telemetryMetricEnabled($metric)) {
+                continue;
+            }
+
+            if (in_array($metric['state'], [Severity::CRITICAL, Severity::WARNING, Severity::UNKNOWN], true)) {
+                $issueMetrics->push($metric);
+            }
+        }
+
+        foreach ($issueMetrics as $metric) {
+            $state = Severity::normalize($metric['state'] ?? null);
+            $sensorId = (int) ($metric['sensor_id'] ?? 0);
+            $type = $this->metricProblemType($metric);
+            $freshness = is_array($metric['freshness'] ?? null) ? $metric['freshness'] : [];
+            $description = trim((string) ($metric['cause'] ?? ''));
+
+            if ($description === '') {
+                $description = trim((string) ($metric['label'] ?? 'Sensor'))
+                    . ' — ' . trim((string) ($metric['value'] ?? 'Current value unavailable'));
+            }
+
+            if (in_array($state, [Severity::CRITICAL, Severity::WARNING, Severity::UNKNOWN], true)) {
+                $issues->push(IssueBuilder::make([
+                    'key' => 'sensor:' . $deviceId . ':' . $sensorId . ':' . $state,
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => $state,
+                    'source' => 'sensor',
+                    'type' => $type,
+                    'title' => (string) $metric['label'],
+                    'description' => $description,
+                    'value' => $metric['current_value'] ?? null,
+                    'unit' => $metric['unit'] ?? null,
+                    'threshold' => $metric['threshold'] ?? null,
+                    'threshold_direction' => $metric['threshold_direction'] ?? null,
+                    'timestamp' => $metric['lastupdate'] ?? null,
+                    'age_seconds' => $freshness['age_seconds'] ?? null,
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+
+            if ($state === Severity::NO_SENSOR) {
+                $issues->push(IssueBuilder::make([
+                    'key' => 'sensor:' . $deviceId . ':missing:' . $type,
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => Severity::NO_SENSOR,
+                    'priority' => IssueBuilder::PRIORITY_INFORMATIONAL,
+                    'source' => 'sensor',
+                    'type' => $type,
+                    'title' => (string) $metric['label'],
+                    'description' => $description,
+                    'actionable' => false,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+
+            if ($staleIsUrgent
+                && $state === Severity::HEALTHY
+                && ($metric['stale'] ?? false)
+                && ($metric['curated'] ?? false)
+            ) {
+                $issues->push(IssueBuilder::make([
+                    'key' => 'sensor:' . $deviceId . ':' . $sensorId . ':stale',
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => Severity::STALE,
+                    'priority' => IssueBuilder::PRIORITY_STALE,
+                    'source' => 'sensor',
+                    'type' => 'stale',
+                    'title' => 'Sensor stale',
+                    'description' => 'Sensor stale — ' . ($freshness['reason'] ?? 'last update unavailable'),
+                    'value' => $metric['current_value'] ?? null,
+                    'unit' => $metric['unit'] ?? null,
+                    'timestamp' => $metric['lastupdate'] ?? null,
+                    'age_seconds' => $freshness['age_seconds'] ?? null,
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+        }
+
+        if ($serviceCounts) {
+            foreach ($serviceProblems as $service) {
+                $severity = match ((int) $service['status']) {
+                    2 => Severity::CRITICAL,
+                    1 => Severity::WARNING,
+                    default => Severity::UNKNOWN,
+                };
+                $changed = $service['changed'] instanceof Carbon ? $service['changed'] : null;
+                $ageSeconds = $changed !== null ? max(0, now()->timestamp - $changed->timestamp) : null;
+                $description = 'Service ' . $service['name'] . ' — ' . Str::title(Str::lower($service['status_label']));
+
+                if ($ageSeconds !== null) {
+                    $description .= ' for ' . $this->formatDuration((float) $ageSeconds);
+                }
+
+                if ($service['message'] !== '') {
+                    $description .= ' — ' . $service['message'];
+                }
+
+                $issues->push(IssueBuilder::make([
+                    'key' => 'service:' . $deviceId . ':' . $service['service_id'] . ':' . $service['status'],
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => $severity,
+                    'source' => 'service',
+                    'type' => 'service',
+                    'title' => 'Service ' . $service['name'],
+                    'description' => $description,
+                    'timestamp' => $changed?->format('Y-m-d H:i:s'),
+                    'age_seconds' => $ageSeconds,
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+        }
+
+        if ($alertsCount) {
+            foreach ($alerts as $alert) {
+                $name = trim((string) $alert['name']);
+                $isDownDuplicate = (int) $device->status === 0
+                    && preg_match('/\b(?:device|host)\b.*\b(?:down|unreachable)\b/i', $name) === 1;
+
+                if ($isDownDuplicate) {
+                    continue;
+                }
+
+                $severity = ($alert['severity_class'] ?? '') === Severity::CRITICAL
+                    ? Severity::CRITICAL
+                    : Severity::WARNING;
+                $issues->push(IssueBuilder::make([
+                    'key' => 'alert:' . $deviceId . ':' . md5($name),
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => $severity,
+                    'source' => 'alert',
+                    'type' => 'alert',
+                    'title' => 'Active alert',
+                    'description' => 'Active alert — ' . ($name !== '' ? $name : 'rule name unavailable'),
+                    'timestamp' => $alert['timestamp'] ?? null,
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+        }
+
+        return $issues
+            ->unique('key')
+            ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
+            ->values();
     }
 
     /**
@@ -941,15 +1260,36 @@ class Page extends PageHook
         int $limit = 20
     ): array {
         $items = $devices
-            ->filter(fn (array $device): bool => $device['health'] !== 'healthy')
-            ->map(fn (array $device): array => $this->primaryIssueFor($device))
-            ->values();
+            ->map(function (array $device): ?array {
+                $actionable = $device['issues']
+                    ->filter(fn (array $issue): bool => $issue['actionable']
+                        && ! ($issue['source'] === 'alert' && $issue['severity'] === Severity::WARNING))
+                    ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
+                    ->values();
+                $primary = $actionable->first();
 
-        $severityRank = ['critical' => 0, 'warning' => 1];
+                if ($primary === null) {
+                    return null;
+                }
+
+                return $primary + [
+                    'icon' => Severity::metadata($primary['severity'], $primary['severity'] === Severity::STALE)['icon'],
+                    'cause' => $primary['description'],
+                    'since' => $this->relativeTime($primary['timestamp']),
+                    'location' => $device['location'],
+                    'device_name' => $device['name'],
+                    'role' => $device['role'],
+                    'category' => $device['category'],
+                    'additional_count' => max(0, $actionable->count() - 1),
+                    'all_issues' => $actionable,
+                ];
+            })
+            ->filter()
+            ->values();
 
         $sorted = $items
             ->sortBy(fn (array $item): array => [
-                $severityRank[$item['severity']] ?? 2,
+                $item['priority'],
                 $item['device_name'],
             ])
             ->values();
@@ -957,160 +1297,6 @@ class Page extends PageHook
         return [
             'items' => $sorted->take($limit)->all(),
             'total' => $sorted->count(),
-        ];
-    }
-
-    /**
-     * Picks the single most useful cause to represent a device in the
-     * Priority Attention feed, in the same precedence normalizeDevice()
-     * itself already uses to decide health (device down > critical
-     * alert/service/sensor > warning alert/service/sensor > stale-
-     * curated-only) — so the headline cause shown here is always
-     * consistent with *why* the device's badge is the color it is.
-     */
-    private function primaryIssueFor(array $device): array
-    {
-        $base = [
-            'severity' => $device['health'],
-            'location' => $device['location'],
-            'device_name' => $device['name'],
-            'device_id' => $device['device_id'],
-            'role' => $device['role'],
-        ];
-
-        // Guarded by enabledProblemTypes['device'] — found during a
-        // full-plugin audit, not reported by a user: normalizeDevice()
-        // already stopped letting a down device drive $health when
-        // Settings' "Device down" Problem Type is off, but this method
-        // still unconditionally treated status===0 as the headline
-        // cause. Unreachable while device-down is the *only* issue
-        // (buildPriorityAttention() only calls this for devices whose
-        // health isn't healthy, and health can't be non-healthy from a
-        // disabled cause alone) — but a device that is both down *and*
-        // has some other real, enabled issue (e.g. a genuine Warning
-        // temperature reading) would still reach here and get blamed
-        // on "Device unreachable," even though Settings says being
-        // down doesn't count. Same rule as everywhere else in this
-        // file: an admin exclusion must hold everywhere that reason
-        // could surface, not just in the one place a user happened to
-        // notice it.
-        if ($this->enabledProblemTypes['device'] && (int) $device['status'] === 0) {
-            $downAlert = $device['alerts']->first(
-                fn (array $alert): bool => Str::contains(
-                    Str::lower($alert['name']),
-                    'down'
-                )
-            );
-
-            return $base + [
-                'cause' => 'Device unreachable',
-                'source' => 'device',
-                'since' => $downAlert !== null
-                    ? $this->relativeTime($downAlert['timestamp'])
-                    : null,
-            ];
-        }
-
-        // Same guard as above, same reason: 'alerts'/'service_problems'
-        // on $device are the full, unfiltered lists (normalizeDevice()
-        // keeps them that way on purpose for other display uses — see
-        // its own comment), so a disabled Alert/Service Problem Type
-        // can still have a "critical" entry sitting in here even
-        // though it no longer drives $health. Without this guard, a
-        // device Critical from a real, enabled sensor reading while
-        // also carrying an excluded critical alert/service would get
-        // blamed on the excluded one instead of its actual cause.
-        $criticalAlert = $this->enabledProblemTypes['alert']
-            ? $device['alerts']->firstWhere('severity_class', 'critical')
-            : null;
-
-        if ($device['health'] === 'critical' && $criticalAlert !== null) {
-            return $base + [
-                'cause' => 'Alert: ' . $criticalAlert['name'],
-                'source' => 'alert',
-                'since' => $this->relativeTime($criticalAlert['timestamp']),
-            ];
-        }
-
-        $criticalService = $this->enabledProblemTypes['service']
-            ? $device['service_problems']->firstWhere('status', 2)
-            : null;
-
-        if ($device['health'] === 'critical' && $criticalService !== null) {
-            return $base + [
-                'cause' => $criticalService['name'] . ': ' . $criticalService['status_label']
-                    . ($criticalService['message'] !== '' ? ' — ' . $criticalService['message'] : ''),
-                'source' => 'service',
-                'since' => $this->relativeTime($criticalService['changed']),
-            ];
-        }
-
-        $worstSensor = $device['issue_telemetry']
-            ->first(fn (array $metric): bool => $metric['state'] === $device['health'])
-            ?? $device['issue_telemetry']->first();
-
-        if ($worstSensor !== null) {
-            return $base + [
-                'cause' => $worstSensor['label'] . ': ' . explode(' · ', $worstSensor['value'])[0],
-                'source' => 'sensor',
-                'since' => $this->relativeTime($worstSensor['lastupdate']),
-            ];
-        }
-
-        // Same guard again — a non-critical (warning-tier) fallback
-        // this time, reached when nothing above explains the health
-        // yet. Realistically only matters in a narrow combination
-        // (e.g. Service excluded but a real $staleIsUrgent warning
-        // co-exists with an unrelated, non-counting service problem),
-        // but the rule is the rule: an excluded signal never becomes
-        // "the cause" shown to a NOC operator just because it's the
-        // first thing left in an unfiltered list.
-        $anyService = $this->enabledProblemTypes['service']
-            ? $device['service_problems']->first()
-            : null;
-
-        if ($anyService !== null) {
-            return $base + [
-                'cause' => $anyService['name'] . ': ' . $anyService['status_label'],
-                'source' => 'service',
-                'since' => $this->relativeTime($anyService['changed']),
-            ];
-        }
-
-        $anyAlert = $this->enabledProblemTypes['alert']
-            ? $device['alerts']->first()
-            : null;
-
-        if ($anyAlert !== null) {
-            return $base + [
-                'cause' => 'Alert: ' . $anyAlert['name'],
-                'source' => 'alert',
-                'since' => $this->relativeTime($anyAlert['timestamp']),
-            ];
-        }
-
-        // Only reachable for a device whose sole reason for Warning is
-        // $staleIsUrgent (a curated reading that was last seen
-        // healthy, but hasn't updated recently) — every other health
-        // path is covered above.
-        $staleCurated = $device['telemetry']->first(
-            fn (array $metric): bool => ($metric['stale'] ?? false)
-                && $metric['state'] === 'healthy'
-                && ($metric['curated'] ?? false)
-        );
-
-        if ($staleCurated !== null) {
-            return $base + [
-                'cause' => $staleCurated['label'] . ': no fresh reading',
-                'source' => 'stale',
-                'since' => $this->relativeTime($staleCurated['lastupdate']),
-            ];
-        }
-
-        return $base + [
-            'cause' => 'Active issue',
-            'source' => 'other',
-            'since' => null,
         ];
     }
 
@@ -1151,16 +1337,9 @@ class Page extends PageHook
                 $unknown = $sortedDevices
                     ->where('health', 'unknown')
                     ->count();
-
-                $health = 'healthy';
-
-                if ($critical > 0) {
-                    $health = 'critical';
-                } elseif ($warning > 0) {
-                    $health = 'warning';
-                } elseif ($unknown > 0) {
-                    $health = 'unknown';
-                }
+                $stale = $sortedDevices->where('health', Severity::STALE)->count();
+                $maintenance = $sortedDevices->where('health', Severity::MAINTENANCE)->count();
+                $health = Severity::worst($sortedDevices->pluck('health'), true);
 
                 return [
                     'location_id' => $sortedDevices
@@ -1180,6 +1359,8 @@ class Page extends PageHook
                     'critical' => $critical,
                     'warning' => $warning,
                     'unknown' => $unknown,
+                    'stale' => $stale,
+                    'maintenance' => $maintenance,
 
                     'issue_count' => $sortedDevices
                         ->where('has_issue', true)
@@ -1215,12 +1396,7 @@ class Page extends PageHook
 
     private function healthPriority(string $health): string
     {
-        return match ($health) {
-            'critical' => '0',
-            'warning' => '1',
-            'unknown' => '2',
-            default => '3',
-        };
+        return str_pad((string) Severity::metadata($health, $health === Severity::STALE)['rank'], 3, '0', STR_PAD_LEFT);
     }
 
     private function rolePriority(string $role): string
@@ -1266,15 +1442,21 @@ class Page extends PageHook
 
     private function deviceRole(
         string $name,
-        string $type
+        string $type,
+        string $hardware = '',
+        string $sysDescr = ''
     ): string {
-        $upperName = strtoupper($name);
+        $identity = strtoupper($name . ' ' . $hardware . ' ' . $sysDescr);
 
-        if (str_contains($upperName, 'PDU')) {
+        if (preg_match('/(?<![A-Z0-9])PDU(?![A-Z0-9])/', $identity) === 1
+            || str_contains($identity, 'POWER DISTRIBUTION UNIT')
+        ) {
             return 'pdu';
         }
 
-        if (str_contains($upperName, 'UPS')) {
+        if (preg_match('/(?<![A-Z0-9])UPS(?![A-Z0-9])/', $identity) === 1
+            || str_contains($identity, 'UNINTERRUPTIBLE POWER')
+        ) {
             return 'ups';
         }
 
@@ -1366,7 +1548,17 @@ class Page extends PageHook
          * sensors is not.
          */
         $curated = array_map(
-            fn (array $metric): array => $metric + ['curated' => true],
+            function (array $metric) use ($role): array {
+                $metric['curated'] = true;
+
+                if (isset($metric['freshness']) && is_array($metric['freshness'])) {
+                    $metric['freshness']['actionable'] = $metric['freshness']['state'] === Freshness::STALE
+                        && $this->staleEnabled
+                        && in_array($role, self::STALE_IS_URGENT_ROLES, true);
+                }
+
+                return $metric;
+            },
             $curated
         );
 
@@ -1489,6 +1681,15 @@ class Page extends PageHook
         $displayLabel = $instanceCount > 1
             ? $label . ' (worst of ' . $instanceCount . ')'
             : $label;
+        $worstSource = $rows->first(
+            fn (object $row): bool => $idOf($row) === $worst['id']
+        );
+        $warningThreshold = $worstSource !== null ? $percWarnOf($worstSource) : null;
+        $resourceThreshold = match ($worst['state']) {
+            Severity::CRITICAL => (float) $criticalPercent,
+            Severity::WARNING => $warningThreshold ?? ($worst['perc'] >= $criticalPercent ? (float) $criticalPercent : null),
+            default => null,
+        };
 
         return [
             'label' => $displayLabel,
@@ -1498,6 +1699,15 @@ class Page extends PageHook
             'description' => trim($worst['descr'], ": \t"),
             'lastupdate' => null,
             'sensor_id' => $worst['id'],
+            'current_value' => $worst['perc'],
+            'unit' => '%',
+            'threshold' => $resourceThreshold,
+            'threshold_direction' => in_array($worst['state'], [Severity::CRITICAL, Severity::WARNING], true)
+                ? 'above configured limit'
+                : null,
+            'freshness' => Freshness::evaluate(null, $this->sensorFreshMinutes, false),
+            'cause' => $displayLabel . ' ' . round($worst['perc']) . '%'
+                . ($resourceThreshold !== null ? ' — above configured limit ' . $resourceThreshold . '%' : ''),
         ];
     }
 
@@ -1563,27 +1773,6 @@ class Page extends PageHook
         Collection $sensors,
         array $usedSensorIds
     ): array {
-        $classLabels = [
-            'temperature' => ['Temperature', 'temperature'],
-            'humidity' => ['Humidity', 'humidity'],
-            'voltage' => ['Voltage', 'voltage'],
-            'fanspeed' => ['Fan Speed', 'rpm'],
-            'runtime' => ['Runtime', 'duration'],
-            'state' => ['State', 'raw'],
-            'charge' => ['Battery', 'percent'],
-            'current' => ['Current', 'amps'],
-            'power' => ['Power', 'watts'],
-            'frequency' => ['Frequency', 'hertz'],
-            'signal' => ['Signal', 'dbm'],
-            'load' => ['Load', 'percent'],
-            'count' => ['Count', 'raw'],
-            'pressure' => ['Pressure', 'raw'],
-            'airflow' => ['Airflow', 'raw'],
-            'dbm' => ['Signal', 'dbm'],
-            'percent' => ['Utilization', 'percent'],
-            'power_consumed' => ['Energy', 'raw'],
-        ];
-
         $remaining = $sensors->reject(
             fn ($sensor): bool => in_array(
                 (int) $sensor->sensor_id,
@@ -1598,11 +1787,8 @@ class Page extends PageHook
             ->values();
 
         return $classes
-            ->map(function (string $class) use ($remaining, $classLabels): array {
-                [$label, $format] = $classLabels[$class] ?? [
-                    Str::title(str_replace(['_', '-'], ' ', $class)),
-                    'raw',
-                ];
+            ->map(function (string $class) use ($remaining): array {
+                [$label, $format] = $this->sensorPresentation($class);
 
                 return $this->sensorMetric(
                     $remaining,
@@ -1618,6 +1804,27 @@ class Page extends PageHook
             ->reject(fn (array $metric): bool => $metric['state'] === 'missing')
             ->values()
             ->all();
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function sensorPresentation(string $class): array
+    {
+        return match ($class) {
+            'temperature' => ['Temperature', 'temperature'],
+            'humidity' => ['Humidity', 'humidity'],
+            'voltage' => ['Voltage', 'voltage'],
+            'fanspeed' => ['Fan Speed', 'rpm'],
+            'runtime' => ['Runtime', 'duration'],
+            'state' => ['State', 'raw'],
+            'charge' => ['Battery', 'percent'],
+            'current' => ['Current', 'amps'],
+            'power' => ['Power', 'watts'],
+            'frequency' => ['Frequency', 'hertz'],
+            'signal', 'dbm' => ['Signal', 'dbm'],
+            'load', 'percent' => ['Utilization', 'percent'],
+            'count', 'pressure', 'airflow', 'power_consumed' => [Str::title(str_replace(['_', '-'], ' ', $class)), 'raw'],
+            default => [Str::title(str_replace(['_', '-'], ' ', $class)), 'raw'],
+        };
     }
 
     private function batteryChargeMetric(
@@ -1642,29 +1849,13 @@ class Page extends PageHook
             ->values();
 
         if ($chargeSensors->isEmpty()) {
-            return [
-                'label' => 'Battery Charge',
-                'value' => 'No sensor installed',
-                'state' => 'missing',
-                'stale' => false,
-                'description' => '',
-                'lastupdate' => null,
-                'sensor_id' => null,
-            ];
+            return $this->unavailableSensorMetric('Battery Charge', null);
         }
 
         $sensor = $chargeSensors->first();
 
-        if ($sensor->sensor_current === null) {
-            return [
-                'label' => 'Battery Charge',
-                'value' => 'No data',
-                'state' => 'missing',
-                'stale' => false,
-                'description' => (string) $sensor->sensor_descr,
-                'lastupdate' => $sensor->lastupdate,
-                'sensor_id' => (int) $sensor->sensor_id,
-            ];
+        if ($this->finiteNumber($sensor->sensor_current) === null) {
+            return $this->unavailableSensorMetric('Battery Charge', $sensor);
         }
 
         /*
@@ -1677,8 +1868,13 @@ class Page extends PageHook
          * view uses to show how old the reading is; it never changes
          * `state`.
          */
-        $value = (float) $sensor->sensor_current;
-        $stale = ! $this->sensorIsFresh($sensor->lastupdate);
+        $value = $this->finiteNumber($sensor->sensor_current);
+        $freshness = Freshness::evaluate(
+            $sensor->lastupdate,
+            $this->sensorFreshMinutes,
+            $this->staleEnabled
+        );
+        $stale = $freshness['state'] === Freshness::STALE;
         $alertingEnabled = $this->sensorAlertingEnabled($sensor);
 
         if ($alertingEnabled && $value <= $this->batteryCriticalPercent) {
@@ -1695,6 +1891,11 @@ class Page extends PageHook
             $displayValue .= ' · last known' . $this->staleAge($sensor->lastupdate);
         }
 
+        $threshold = match ($state) {
+            Severity::CRITICAL => (float) $this->batteryCriticalPercent,
+            Severity::WARNING => (float) $this->batteryWarningPercent,
+            default => null,
+        };
         return [
             'label' => 'Battery Charge',
             'value' => $displayValue,
@@ -1703,6 +1904,14 @@ class Page extends PageHook
             'description' => (string) $sensor->sensor_descr,
             'lastupdate' => $sensor->lastupdate,
             'sensor_id' => (int) $sensor->sensor_id,
+            'current_value' => $value,
+            'unit' => '%',
+            'threshold' => $threshold,
+            'threshold_direction' => $threshold !== null ? 'below configured threshold' : null,
+            'freshness' => $freshness,
+            'cause' => $threshold !== null
+                ? 'Battery ' . number_format($value, 0) . '% — below ' . strtolower($state) . ' threshold ' . number_format($threshold, 0) . '%'
+                : 'Battery ' . number_format($value, 0) . '%',
         ];
     }
 
@@ -1718,15 +1927,7 @@ class Page extends PageHook
             ->values();
 
         if ($classSensors->isEmpty()) {
-            return [
-                'label' => $label,
-                'value' => 'No sensor installed',
-                'state' => 'missing',
-                'stale' => false,
-                'description' => '',
-                'lastupdate' => null,
-                'sensor_id' => null,
-            ];
+            return $this->unavailableSensorMetric($label, null);
         }
 
         $selected = null;
@@ -1797,7 +1998,7 @@ class Page extends PageHook
              * freshness break the tie, preferring the more current one.
              */
             $withValue = $matches
-                ->filter(fn ($sensor): bool => $sensor->sensor_current !== null)
+                ->filter(fn ($sensor): bool => $this->finiteNumber($sensor->sensor_current) !== null)
                 ->values();
 
             if ($withValue->isNotEmpty()) {
@@ -1817,16 +2018,8 @@ class Page extends PageHook
             }
         }
 
-        if ($selected === null || $selected->sensor_current === null) {
-            return [
-                'label' => $label,
-                'value' => $selected === null ? 'No sensor installed' : 'No data',
-                'state' => 'missing',
-                'stale' => false,
-                'description' => $selected === null ? '' : (string) $selected->sensor_descr,
-                'lastupdate' => $selected === null ? null : $selected->lastupdate,
-                'sensor_id' => $selected === null ? null : (int) $selected->sensor_id,
-            ];
+        if ($selected === null || $this->finiteNumber($selected->sensor_current) === null) {
+            return $this->unavailableSensorMetric($label, $selected);
         }
 
         /*
@@ -1836,6 +2029,8 @@ class Page extends PageHook
          * layered onto the value text below; it never softens the
          * computed `state`.
          */
+        $numericValue = $this->finiteNumber($selected->sensor_current);
+
         if (
             $selected->sensor_class === 'state'
             && property_exists($selected, 'state_descr')
@@ -1848,14 +2043,24 @@ class Page extends PageHook
             $value = (string) $selected->state_descr;
         } else {
             $value = $this->formatSensorValue(
-                (float) $selected->sensor_current,
+                $numericValue,
                 $format
             );
         }
 
+        $freshness = Freshness::evaluate(
+            $selected->lastupdate,
+            $this->sensorFreshMinutes,
+            $this->staleEnabled
+        );
+        $stale = $freshness['state'] === Freshness::STALE;
+
         if ($stale) {
             $value .= ' · last known' . $this->staleAge($selected->lastupdate);
         }
+
+        $state = $this->sensorState($selected);
+        $threshold = $this->sensorThreshold($selected, $state, $format);
 
         return [
             // Flags that this is the worst of several same-class
@@ -1868,12 +2073,193 @@ class Page extends PageHook
                 : $label,
 
             'value' => $value,
-            'state' => $this->sensorState($selected),
+            'state' => $state,
             'stale' => $stale,
             'description' => (string) $selected->sensor_descr,
             'lastupdate' => $selected->lastupdate,
             'sensor_id' => (int) $selected->sensor_id,
+            'current_value' => $selected->sensor_class === 'state'
+                ? ($selected->state_descr ?? $numericValue)
+                : $this->displayNumber($numericValue, $format),
+            'unit' => $this->sensorUnit($format),
+            'threshold' => $threshold['value'],
+            'threshold_direction' => $threshold['direction'],
+            'freshness' => $freshness,
+            'cause' => $this->sensorCause($label, $state, $selected, $numericValue, $format, $threshold),
         ];
+    }
+
+    private function unavailableSensorMetric(string $label, ?object $sensor): array
+    {
+        $installed = $sensor !== null;
+        $freshness = $installed
+            ? Freshness::evaluate($sensor->lastupdate ?? null, $this->sensorFreshMinutes, $this->staleEnabled)
+            : [
+                'state' => Freshness::UNKNOWN,
+                'age_seconds' => null,
+                'age_minutes' => null,
+                'timestamp' => null,
+                'label' => 'Unknown',
+                'actionable' => false,
+                'reason' => 'No sensor installed',
+            ];
+
+        return [
+            'label' => $label,
+            'value' => $installed ? 'Sensor unavailable' : 'No sensor installed',
+            'state' => $installed ? Severity::UNKNOWN : Severity::NO_SENSOR,
+            'stale' => $installed && $freshness['state'] === Freshness::STALE,
+            'description' => $installed ? (string) ($sensor->sensor_descr ?? '') : '',
+            'lastupdate' => $installed ? ($sensor->lastupdate ?? null) : null,
+            'sensor_id' => $installed ? (int) $sensor->sensor_id : null,
+            'current_value' => null,
+            'unit' => null,
+            'threshold' => null,
+            'threshold_direction' => null,
+            'freshness' => $freshness,
+            'cause' => $installed ? 'Current value unavailable' : 'No ' . strtolower($label) . ' sensor installed',
+        ];
+    }
+
+    private function individualSensorMetric(object $sensor, string $label, string $format): array
+    {
+        $numericValue = $this->finiteNumber($sensor->sensor_current ?? null);
+
+        if ($numericValue === null) {
+            return $this->unavailableSensorMetric($label, $sensor);
+        }
+
+        $state = $this->sensorState($sensor);
+        $threshold = $this->sensorThreshold($sensor, $state, $format);
+        $freshness = Freshness::evaluate(
+            $sensor->lastupdate ?? null,
+            $this->sensorFreshMinutes,
+            $this->staleEnabled
+        );
+        $stale = $freshness['state'] === Freshness::STALE;
+        $translated = $sensor->sensor_class === 'state'
+            ? trim((string) ($sensor->state_descr ?? ''))
+            : '';
+        $value = $translated !== ''
+            ? $translated
+            : $this->formatSensorValue($numericValue, $format);
+
+        if ($stale) {
+            $value .= ' · last known' . $this->staleAge($sensor->lastupdate ?? null);
+        }
+
+        return [
+            'label' => $label,
+            'value' => $value,
+            'state' => $state,
+            'stale' => $stale,
+            'description' => (string) ($sensor->sensor_descr ?? ''),
+            'lastupdate' => $sensor->lastupdate ?? null,
+            'sensor_id' => (int) $sensor->sensor_id,
+            'current_value' => $sensor->sensor_class === 'state'
+                ? ($translated !== '' ? $translated : $numericValue)
+                : $this->displayNumber($numericValue, $format),
+            'unit' => $this->sensorUnit($format),
+            'threshold' => $threshold['value'],
+            'threshold_direction' => $threshold['direction'],
+            'freshness' => $freshness,
+            'cause' => $this->sensorCause($label, $state, $sensor, $numericValue, $format, $threshold),
+        ];
+    }
+
+    private function finiteNumber(mixed $value): ?float
+    {
+        if (! is_int($value) && ! is_float($value) && ! (is_string($value) && is_numeric(trim($value)))) {
+            return null;
+        }
+
+        $number = (float) $value;
+
+        return is_finite($number) ? $number : null;
+    }
+
+    /** @return array{value: float|null, direction: string|null} */
+    private function sensorThreshold(object $sensor, string $state, string $format): array
+    {
+        if (! in_array($state, [Severity::CRITICAL, Severity::WARNING], true)) {
+            return ['value' => null, 'direction' => null];
+        }
+
+        $restingAtZero = $sensor->sensor_class === 'current'
+            || $this->isOnBatteryDurationSensor($sensor);
+        $evaluation = IssueBuilder::evaluateNumericSensor(
+            $sensor->sensor_current,
+            $sensor->sensor_limit ?? null,
+            $sensor->sensor_limit_warn ?? null,
+            $sensor->sensor_limit_low ?? null,
+            $sensor->sensor_limit_low_warn ?? null,
+            $restingAtZero
+        );
+
+        if ($evaluation['severity'] === $state && $evaluation['threshold'] !== null) {
+            return [
+                'value' => $this->displayNumber($evaluation['threshold'], $format),
+                'direction' => $evaluation['direction'],
+            ];
+        }
+
+        return ['value' => null, 'direction' => null];
+    }
+
+    /** @param array{value: float|null, direction: string|null} $threshold */
+    private function sensorCause(
+        string $label,
+        string $state,
+        object $sensor,
+        float $current,
+        string $format,
+        array $threshold
+    ): string {
+        if ($sensor->sensor_class === 'state') {
+            $translated = trim((string) ($sensor->state_descr ?? ''));
+
+            return $translated !== ''
+                ? $label . ' — ' . $translated
+                : $label . ' — translation unknown; raw value ' . $current;
+        }
+
+        $display = $this->displayNumber($current, $format);
+        $unit = $this->sensorUnit($format);
+        $cause = $label . ' ' . $display . ($unit !== null ? ' ' . $unit : '');
+
+        if ($threshold['direction'] !== null && $threshold['value'] !== null) {
+            $direction = str_replace(
+                ['above critical high', 'above warning high', 'below critical low', 'below warning low'],
+                ['above high limit', 'above warning limit', 'below low limit', 'below warning limit'],
+                $threshold['direction']
+            );
+            $cause .= ' — ' . $direction . ' ' . $threshold['value'] . ($unit !== null ? ' ' . $unit : '');
+        } elseif (in_array($state, [Severity::CRITICAL, Severity::WARNING], true)) {
+            $cause .= ' — threshold not configured';
+        }
+
+        return $cause;
+    }
+
+    private function displayNumber(float $value, string $format): float
+    {
+        return $format === 'temperature' ? round(($value * 9 / 5) + 32, 1) : $value;
+    }
+
+    private function sensorUnit(string $format): ?string
+    {
+        return match ($format) {
+            'temperature' => '°F',
+            'humidity', 'percent' => '%',
+            'voltage' => 'V',
+            'rpm' => 'RPM',
+            'duration' => 's',
+            'amps' => 'A',
+            'watts' => 'W',
+            'hertz' => 'Hz',
+            'dbm' => 'dBm',
+            default => null,
+        };
     }
 
     /**
@@ -1900,17 +2286,13 @@ class Page extends PageHook
 
     private function sensorIsFresh(mixed $lastUpdate): bool
     {
-        if ($lastUpdate === null || $lastUpdate === '') {
-            return false;
-        }
+        $freshness = Freshness::evaluate(
+            $lastUpdate,
+            $this->sensorFreshMinutes,
+            $this->staleEnabled
+        );
 
-        try {
-            return Carbon::parse($lastUpdate)
-                ->diffInMinutes(now())
-                <= $this->sensorFreshMinutes;
-        } catch (\Throwable) {
-            return false;
-        }
+        return in_array($freshness['state'], [Freshness::FRESH, Freshness::AGING], true);
     }
 
     /**
@@ -2017,8 +2399,8 @@ class Page extends PageHook
         // called directly on such a sensor in the future; freshness
         // is tracked separately from severity throughout this file
         // (see AUDIT_NOTES.md).
-        if ($sensor->sensor_current === null) {
-            return 'healthy';
+        if ($this->finiteNumber($sensor->sensor_current) === null) {
+            return Severity::UNKNOWN;
         }
 
         if (! $this->sensorAlertingEnabled($sensor)) {
@@ -2060,17 +2442,7 @@ class Page extends PageHook
                 ? $sensor->state_generic_value
                 : null;
 
-            return match ($genericValue !== null ? (int) $genericValue : -1) {
-                0 => 'healthy',
-                1 => 'warning',
-                2 => 'critical',
-                // 3 (LibreNMS's own "Unknown" generic value), any other
-                // unrecognized code, and "no translation resolved at
-                // all" are deliberately the same outcome — none of them
-                // is evidence of a real problem, but none of them is
-                // confirmed-healthy either.
-                default => 'unknown',
-            };
+            return Severity::fromLibreNmsGenericState($genericValue);
         }
 
         $current = (float) $sensor->sensor_current;
@@ -2108,39 +2480,14 @@ class Page extends PageHook
         $restingAtZero = $sensor->sensor_class === 'current'
             || $this->isOnBatteryDurationSensor($sensor);
 
-        if (
-            $sensor->sensor_limit !== null
-            && (float) $sensor->sensor_limit !== 0.0
-            && $current >= (float) $sensor->sensor_limit
-        ) {
-            return 'critical';
-        }
-
-        if (
-            $sensor->sensor_limit_low !== null
-            && ! ($restingAtZero && (float) $sensor->sensor_limit_low === 0.0)
-            && $current <= (float) $sensor->sensor_limit_low
-        ) {
-            return 'critical';
-        }
-
-        if (
-            $sensor->sensor_limit_warn !== null
-            && (float) $sensor->sensor_limit_warn !== 0.0
-            && $current >= (float) $sensor->sensor_limit_warn
-        ) {
-            return 'warning';
-        }
-
-        if (
-            $sensor->sensor_limit_low_warn !== null
-            && ! ($restingAtZero && (float) $sensor->sensor_limit_low_warn === 0.0)
-            && $current <= (float) $sensor->sensor_limit_low_warn
-        ) {
-            return 'warning';
-        }
-
-        return 'healthy';
+        return IssueBuilder::evaluateNumericSensor(
+            $current,
+            $sensor->sensor_limit ?? null,
+            $sensor->sensor_limit_warn ?? null,
+            $sensor->sensor_limit_low ?? null,
+            $sensor->sensor_limit_low_warn ?? null,
+            $restingAtZero
+        )['severity'];
     }
 
     private function formatSensorValue(
@@ -2218,6 +2565,7 @@ class Page extends PageHook
     {
         if ($deviceIds->isEmpty()
             || ! $this->tableExists('sensors_to_state_indexes')
+            || ! $this->tableExists('state_indexes')
             || ! $this->tableExists('state_translations')
         ) {
             return collect();
@@ -2226,6 +2574,7 @@ class Page extends PageHook
         try {
             return DB::table('sensors as s')
                 ->join('sensors_to_state_indexes as ssi', 'ssi.sensor_id', '=', 's.sensor_id')
+                ->join('state_indexes as si', 'si.state_index_id', '=', 'ssi.state_index_id')
                 ->join('state_translations as st', function ($join): void {
                     $join->on('st.state_index_id', '=', 'ssi.state_index_id')
                         ->whereColumn('st.state_value', '=', 's.sensor_current');
@@ -2233,7 +2582,7 @@ class Page extends PageHook
                 ->whereIn('s.device_id', $deviceIds)
                 ->where('s.sensor_class', 'state')
                 ->where('s.sensor_deleted', 0)
-                ->select(['s.sensor_id', 'st.state_descr', 'st.state_generic_value'])
+                ->select(['s.sensor_id', 'si.state_name', 'st.state_descr', 'st.state_generic_value'])
                 ->get()
                 ->keyBy('sensor_id');
         } catch (\Throwable) {
@@ -2422,6 +2771,103 @@ class Page extends PageHook
             'complete' => $requestedLimit <= self::RECENT_EVENTS_GLOBAL_LIMIT,
             'byDevice' => $byDevice,
         ];
+    }
+
+    /**
+     * Current outages and reliable recent recoveries from LibreNMS's
+     * device_outages table. Both queries are grouped in SQL and restricted
+     * to the already-authorized IDs; alerts are never used as a substitute
+     * for outage timestamps.
+     *
+     * @return array{current: Collection, recovered: Collection}
+     */
+    private function loadDeviceOutages(Collection $deviceIds): array
+    {
+        $empty = ['current' => collect(), 'recovered' => collect()];
+
+        if ($deviceIds->isEmpty() || ! $this->tableExists('device_outages')) {
+            return $empty;
+        }
+
+        try {
+            $current = DB::table('device_outages')
+                ->whereIn('device_id', $deviceIds)
+                ->whereNull('up_again')
+                ->selectRaw('device_id, MAX(going_down) as going_down')
+                ->groupBy('device_id')
+                ->get()
+                ->keyBy('device_id');
+
+            $recovered = DB::table('device_outages')
+                ->whereIn('device_id', $deviceIds)
+                ->whereNotNull('up_again')
+                ->where('up_again', '>=', Carbon::now()->subHours($this->eventWindowHours)->timestamp)
+                ->selectRaw('device_id, MAX(up_again) as up_again')
+                ->groupBy('device_id')
+                ->get()
+                ->keyBy('device_id');
+
+            return ['current' => $current, 'recovered' => $recovered];
+        } catch (\Throwable) {
+            return $empty;
+        }
+    }
+
+    /**
+     * Resolve active maintenance without DeviceMaintenanceCache: that core
+     * cache intentionally loads every scheduled device, while this plugin's
+     * security boundary requires every query to stay inside the authorized
+     * device IDs. Direct-device, location and device-group schedules are
+     * therefore resolved by three fixed, scoped queries (never per device).
+     */
+    private function loadMaintenanceDevices(Collection $deviceIds): Collection
+    {
+        if ($deviceIds->isEmpty()
+            || ! $this->tableExists('alert_schedule')
+            || ! $this->tableExists('alert_schedulables')
+        ) {
+            return collect();
+        }
+
+        try {
+            $direct = AlertSchedule::query()
+                ->isActive()
+                ->join('alert_schedulables as scheduled', 'scheduled.schedule_id', '=', 'alert_schedule.schedule_id')
+                ->where('scheduled.alert_schedulable_type', 'device')
+                ->whereIn('scheduled.alert_schedulable_id', $deviceIds)
+                ->selectRaw('scheduled.alert_schedulable_id as device_id, alert_schedule.behavior, alert_schedule.title')
+                ->get();
+
+            $locations = AlertSchedule::query()
+                ->isActive()
+                ->join('alert_schedulables as scheduled', 'scheduled.schedule_id', '=', 'alert_schedule.schedule_id')
+                ->join('devices as maintenance_devices', 'maintenance_devices.location_id', '=', 'scheduled.alert_schedulable_id')
+                ->where('scheduled.alert_schedulable_type', 'location')
+                ->whereIn('maintenance_devices.device_id', $deviceIds)
+                ->selectRaw('maintenance_devices.device_id, alert_schedule.behavior, alert_schedule.title')
+                ->get();
+
+            $groups = collect();
+
+            if ($this->tableExists('device_group_device')) {
+                $groups = AlertSchedule::query()
+                    ->isActive()
+                    ->join('alert_schedulables as scheduled', 'scheduled.schedule_id', '=', 'alert_schedule.schedule_id')
+                    ->join('device_group_device as grouped_devices', 'grouped_devices.device_group_id', '=', 'scheduled.alert_schedulable_id')
+                    ->where('scheduled.alert_schedulable_type', 'device_group')
+                    ->whereIn('grouped_devices.device_id', $deviceIds)
+                    ->selectRaw('grouped_devices.device_id, alert_schedule.behavior, alert_schedule.title')
+                    ->get();
+            }
+
+            return $direct
+                ->concat($locations)
+                ->concat($groups)
+                ->sortBy('behavior')
+                ->keyBy('device_id');
+        } catch (\Throwable) {
+            return collect();
+        }
     }
 
     /**
