@@ -126,6 +126,10 @@ class Page extends PageHook
         }
 
         $config = Config::resolve($settings);
+        $dashboardRequest = Config::normalizeDashboardRequest(
+            $request?->query() ?? request()->query(),
+            $config
+        );
 
         $this->sensorFreshMinutes = $config['sensor_fresh_minutes'];
         $this->eventWindowHours = $config['event_window_hours'];
@@ -213,6 +217,7 @@ class Page extends PageHook
                 'l.location',
                 'devices.device_id',
                 'devices.hostname',
+                'devices.ip',
                 'devices.display',
                 'devices.sysName',
                 'devices.type',
@@ -223,6 +228,8 @@ class Page extends PageHook
                 'devices.status',
                 'devices.status_reason',
                 'devices.last_polled',
+                'devices.last_ping_timetaken',
+                'devices.uptime',
             ])
             ->orderBy('l.location')
             ->orderBy('devices.display')
@@ -357,6 +364,7 @@ class Page extends PageHook
         $deviceMempools = $this->loadMempools($allDeviceIds);
         $deviceProcessors = $this->loadProcessors($allDeviceIds);
         $deviceOutages = $this->loadDeviceOutages($allDeviceIds);
+        $deviceAvailability = $this->loadAvailability($allDeviceIds);
         $maintenanceMap = $this->loadMaintenanceDevices($allDeviceIds);
 
         /*
@@ -372,6 +380,7 @@ class Page extends PageHook
                 $deviceMempools,
                 $deviceProcessors,
                 $deviceOutages,
+                $deviceAvailability,
                 $maintenanceMap
             ): array {
                 $deviceId = (int) $device->device_id;
@@ -387,6 +396,7 @@ class Page extends PageHook
                     $deviceProcessors->get($deviceId, collect()),
                     $deviceOutages['current']->get($deviceId),
                     $deviceOutages['recovered']->get($deviceId),
+                    $deviceAvailability->get($deviceId, collect()),
                     $maintenanceMap->get($deviceId)
                 );
             })
@@ -540,7 +550,49 @@ class Page extends PageHook
             ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
             ->count();
 
-        $priorityAttention = $this->buildPriorityAttention($devices);
+        $priorityAttention = $this->buildPriorityAttention(
+            $devices,
+            (int) $config['maximum_priority_issues']
+        );
+        $allLocations = $this->buildLocationGroups($devices);
+        $filteredDevices = $this->filterDevices($devices, $dashboardRequest);
+        $filteredLocations = $this->buildLocationGroups($filteredDevices);
+
+        if (! $config['show_healthy_locations'] && $dashboardRequest['severity'] !== Severity::HEALTHY) {
+            $filteredLocations = $filteredLocations
+                ->reject(fn (array $location): bool => $location['health'] === Severity::HEALTHY)
+                ->values();
+        }
+
+        $viewData = $this->buildViewData(
+            $dashboardRequest,
+            $devices,
+            $filteredDevices,
+            $allLocations,
+            $filteredLocations,
+            $priorityAttention
+        );
+        $visibleSummary = [
+            'critical_devices' => $filteredDevices->where('health', Severity::CRITICAL)->count(),
+            'warning_devices' => $filteredDevices->where('health', Severity::WARNING)->count(),
+            'devices_down' => $filteredDevices
+                ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
+                ->count(),
+            'service_problems' => $filteredDevices->sum('service_problem_count'),
+            'locations_affected' => $filteredLocations->where('issue_count', '>', 0)->count(),
+            'stale_sensor_devices' => $filteredDevices
+                ->filter(fn (array $device): bool => in_array('stale', $device['problem_types'], true))
+                ->count(),
+            'no_sensor_installed' => $filteredDevices->sum('no_sensor_count'),
+            'devices' => $filteredDevices->count(),
+        ];
+        $locationOptions = $allLocations
+            ->map(fn (array $location): array => [
+                'id' => $location['location_id'] ?? 0,
+                'name' => $location['name'],
+            ])
+            ->sortBy('name')
+            ->values();
 
         return [
             'pluginTitle' => 'Infrastructure Health Dashboard',
@@ -609,6 +661,7 @@ class Page extends PageHook
                 'stale_sensor_devices' => $staleSensorDevices,
                 'no_sensor_installed' => $noSensorInstalled,
                 'recent_recoveries' => $recentRecoveries,
+                'locations_affected' => $allLocations->where('issue_count', '>', 0)->count(),
             ],
 
             'coverage' => [
@@ -677,6 +730,184 @@ class Page extends PageHook
              * actually change again.
              */
             'settingsVersion' => md5(json_encode($config)),
+            'dashboardView' => $dashboardRequest['view'],
+            'filters' => $dashboardRequest,
+            'viewData' => $viewData,
+            'allLocations' => $allLocations,
+            'locationOptions' => $locationOptions,
+            'categories' => DeviceClassifier::CATEGORIES,
+            'dashboardUrl' => url('/plugin/IdfDashboard'),
+            'visibleSummary' => $visibleSummary,
+        ];
+    }
+
+    /**
+     * Apply Phase 2 filters only after the collection has been built from the
+     * authorized SQL boundary. No filter is ever used as an authorization
+     * substitute, and every sort key is selected from a fixed whitelist in
+     * Config::normalizeDashboardRequest().
+     *
+     * @param  array<string, mixed>  $filters
+     */
+    private function filterDevices(Collection $devices, array $filters): Collection
+    {
+        $search = Str::lower((string) $filters['search']);
+
+        $filtered = $devices
+            ->filter(function (array $device) use ($filters, $search): bool {
+                if ($search !== '') {
+                    $haystack = Str::lower(implode(' ', [
+                        $device['name'],
+                        $device['hostname'],
+                        $device['ip'],
+                        $device['hardware'],
+                        $device['location'],
+                    ]));
+
+                    if (! str_contains($haystack, $search)) {
+                        return false;
+                    }
+                }
+
+                if ($filters['severity'] !== '' && $device['health'] !== $filters['severity']) {
+                    return false;
+                }
+
+                if ($filters['category'] !== '' && $device['category'] !== $filters['category']) {
+                    return false;
+                }
+
+                if ($filters['problem'] !== '' && ! in_array($filters['problem'], $device['problem_types'], true)) {
+                    return false;
+                }
+
+                if ($filters['location'] !== null && ($device['location_id'] ?? 0) !== $filters['location']) {
+                    return false;
+                }
+
+                if ($filters['problems_only'] && ! $device['has_issue']) {
+                    return false;
+                }
+
+                if ($filters['stale'] && ! in_array('stale', $device['problem_types'], true)) {
+                    return false;
+                }
+
+                return ! $filters['no_sensor'] || $device['no_sensor_count'] > 0;
+            })
+            ->values();
+
+        $sorter = match ($filters['sort']) {
+            'name' => fn (array $device): array => [Str::lower($device['name']), $device['device_id']],
+            'location' => fn (array $device): array => [Str::lower($device['location']), Str::lower($device['name']), $device['device_id']],
+            'freshness' => fn (array $device): array => [-(int) ($device['freshness']['age_seconds'] ?? -1), Str::lower($device['name']), $device['device_id']],
+            default => fn (array $device): array => [(int) Severity::metadata($device['health'], $device['health'] === Severity::STALE)['rank'], Str::lower($device['name']), $device['device_id']],
+        };
+
+        return ($filters['direction'] === 'desc' ? $filtered->sortByDesc($sorter) : $filtered->sortBy($sorter))
+            ->values();
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     * @return array<string, mixed>
+     */
+    private function buildViewData(
+        array $filters,
+        Collection $devices,
+        Collection $filteredDevices,
+        Collection $allLocations,
+        Collection $filteredLocations,
+        array $priorityAttention
+    ): array {
+        $view = $filters['view'];
+
+        if ($view === 'devices') {
+            return [
+                'kind' => 'devices',
+                'devices' => $this->paginateCollection($filteredDevices, $filters['page'], $filters['per_page']),
+            ];
+        }
+
+        if ($view === 'locations') {
+            return [
+                'kind' => 'locations',
+                'locations' => $this->paginateCollection($filteredLocations, $filters['page'], $filters['per_page']),
+            ];
+        }
+
+        if ($view === 'location') {
+            $locationId = $filters['id'];
+            $location = $locationId === null
+                ? null
+                : $allLocations->first(fn (array $row): bool => ($row['location_id'] ?? 0) === $locationId);
+
+            if ($location === null) {
+                return ['kind' => 'location', 'found' => false];
+            }
+
+            $locationDevices = $this->filterDevices(
+                collect($location['devices']),
+                array_replace($filters, ['location' => null])
+            );
+
+            return [
+                'kind' => 'location',
+                'found' => true,
+                'location' => $location,
+                'devices' => $this->paginateCollection($locationDevices, $filters['page'], $filters['per_page']),
+            ];
+        }
+
+        if ($view === 'device') {
+            $device = $filters['id'] === null
+                ? null
+                : $devices->first(fn (array $row): bool => $row['device_id'] === $filters['id']);
+
+            return [
+                'kind' => 'device',
+                'found' => $device !== null,
+                'device' => $device,
+            ];
+        }
+
+        $visiblePriority = $this->buildPriorityAttention(
+            $filteredDevices,
+            max(1, count($priorityAttention['items']))
+        );
+        $problemLocations = $filteredLocations
+            ->where('issue_count', '>', 0)
+            ->take(8)
+            ->values();
+
+        return [
+            'kind' => 'overview',
+            'priority' => $visiblePriority,
+            'critical_locations' => $problemLocations,
+            'healthy' => [
+                'devices' => $filteredDevices->where('health', Severity::HEALTHY)->count(),
+                'locations' => $filteredLocations->where('health', Severity::HEALTHY)->count(),
+            ],
+        ];
+    }
+
+    /** @return array{items: array<int, mixed>, total: int, page: int, per_page: int, pages: int, from: int, to: int} */
+    private function paginateCollection(Collection $items, int $page, int $perPage): array
+    {
+        $total = $items->count();
+        $pages = max(1, (int) ceil($total / $perPage));
+        $page = max(1, min($page, $pages));
+        $from = $total === 0 ? 0 : (($page - 1) * $perPage) + 1;
+        $pageItems = $items->slice(($page - 1) * $perPage, $perPage)->values();
+
+        return [
+            'items' => $pageItems->all(),
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
+            'pages' => $pages,
+            'from' => $from,
+            'to' => $total === 0 ? 0 : $from + $pageItems->count() - 1,
         ];
     }
 
@@ -768,6 +999,7 @@ class Page extends PageHook
         Collection $processors,
         ?object $currentOutage = null,
         ?object $recentRecovery = null,
+        ?Collection $availability = null,
         ?object $maintenance = null
     ): array {
         $name = $this->deviceName($device);
@@ -974,6 +1206,20 @@ class Page extends PageHook
             $problemTypes->push('other');
         }
 
+        $primaryIssue = $issues
+            ->where('actionable', true)
+            ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
+            ->first();
+        $pollFreshness = Freshness::evaluate(
+            $device->last_polled,
+            $this->sensorFreshMinutes,
+            $this->staleEnabled,
+            false
+        );
+        $availabilityRows = $availability ?? collect();
+        $availabilityRow = $availabilityRows->firstWhere('duration', 86400)
+            ?? $availabilityRows->sortBy('duration')->first();
+
         return [
             'location_id' => $device->location_id !== null
                 ? (int) $device->location_id
@@ -983,6 +1229,8 @@ class Page extends PageHook
             'device_id' => (int) $device->device_id,
             'name' => $name,
             'hostname' => (string) $device->hostname,
+            'ip' => (string) ($device->ip ?? ''),
+            'sys_name' => (string) ($device->sysName ?? ''),
             'type' => (string) $device->type,
             'os' => (string) $device->os,
             'hardware' => (string) ($device->hardware ?? ''),
@@ -990,6 +1238,21 @@ class Page extends PageHook
             'status' => (int) $device->status,
             'status_reason' => (string) ($device->status_reason ?? ''),
             'last_polled' => $device->last_polled,
+            'uptime_seconds' => max(0, (int) ($device->uptime ?? 0)),
+            'uptime' => ((int) ($device->uptime ?? 0)) > 0
+                ? $this->formatDuration((float) $device->uptime)
+                : null,
+            'freshness' => $pollFreshness,
+            'latency_ms' => $device->last_ping_timetaken !== null
+                ? round((float) $device->last_ping_timetaken, 2)
+                : null,
+            'availability' => $availabilityRow !== null
+                ? [
+                    'percent' => round((float) $availabilityRow->availability_perc, 3),
+                    'duration_seconds' => (int) $availabilityRow->duration,
+                    'window' => $this->formatDuration((float) $availabilityRow->duration),
+                ]
+                : null,
             'role' => $role,
             'classification' => $classification,
             'category' => $classification['category'],
@@ -1018,6 +1281,7 @@ class Page extends PageHook
             'recovered_at' => $recoveredAt,
             'recovered_recently' => $recoveredAt !== null,
             'issues' => $issues,
+            'primary_issue' => $primaryIssue,
             'issue_count' => $issues->where('actionable', true)->count(),
             'no_sensor_count' => $issues->where('severity', Severity::NO_SENSOR)->count(),
             'has_issue' => Severity::metadata($health, $health === Severity::STALE)['actionable'],
@@ -1025,6 +1289,7 @@ class Page extends PageHook
                 ->unique()
                 ->values()
                 ->all(),
+            'device_url' => url('device/device=' . (int) $device->device_id),
         ];
     }
 
@@ -1340,6 +1605,13 @@ class Page extends PageHook
                 $stale = $sortedDevices->where('health', Severity::STALE)->count();
                 $maintenance = $sortedDevices->where('health', Severity::MAINTENANCE)->count();
                 $health = Severity::worst($sortedDevices->pluck('health'), true);
+                $temperatureMax = $this->maximumTelemetryValue($sortedDevices, 'temperature');
+                $humidityMax = $this->maximumTelemetryValue($sortedDevices, 'humidity');
+                $lastUpdated = $sortedDevices
+                    ->pluck('last_polled')
+                    ->filter()
+                    ->sortDesc()
+                    ->first();
 
                 return [
                     'location_id' => $sortedDevices
@@ -1353,7 +1625,7 @@ class Page extends PageHook
                         ->count(),
 
                     'down' => $sortedDevices
-                        ->where('status', 0)
+                        ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
                         ->count(),
 
                     'critical' => $critical,
@@ -1366,6 +1638,15 @@ class Page extends PageHook
                         ->where('has_issue', true)
                         ->count(),
 
+                    'temperature_max' => $temperatureMax,
+                    'humidity_max' => $humidityMax,
+                    'power_affected' => $sortedDevices
+                        ->filter(fn (array $device): bool => $device['category'] === 'Power' && $device['has_issue'])
+                        ->count(),
+                    'services_affected' => $sortedDevices->sum('service_problem_count'),
+                    'no_sensor' => $sortedDevices->sum('no_sensor_count'),
+                    'last_updated' => $lastUpdated,
+
                     'health' => $health,
                     'devices' => $sortedDevices,
                 ];
@@ -1376,6 +1657,23 @@ class Page extends PageHook
                 ) . '-' . $location['name'];
             })
             ->values();
+    }
+
+    private function maximumTelemetryValue(Collection $devices, string $class): ?float
+    {
+        $values = $devices
+            ->flatMap(fn (array $device): iterable => $device['telemetry'])
+            ->filter(function (array $metric) use ($class): bool {
+                $label = Str::lower((string) ($metric['label'] ?? ''));
+
+                return str_contains($label, $class)
+                    && isset($metric['current_value'])
+                    && is_numeric($metric['current_value']);
+            })
+            ->pluck('current_value')
+            ->map(fn ($value): float => (float) $value);
+
+        return $values->isEmpty() ? null : (float) $values->max();
     }
 
     private function sortDevices(
@@ -2810,6 +3108,29 @@ class Page extends PageHook
             return ['current' => $current, 'recovered' => $recovered];
         } catch (\Throwable) {
             return $empty;
+        }
+    }
+
+    /**
+     * LibreNMS 26.8 stores precomputed availability windows in its core
+     * availability table. Loading them once for authorized IDs avoids RRD
+     * access and avoids a relationship query for every device.
+     */
+    private function loadAvailability(Collection $deviceIds): Collection
+    {
+        if ($deviceIds->isEmpty() || ! $this->tableExists('availability')) {
+            return collect();
+        }
+
+        try {
+            return DB::table('availability')
+                ->whereIn('device_id', $deviceIds)
+                ->select(['device_id', 'duration', 'availability_perc'])
+                ->orderBy('duration')
+                ->get()
+                ->groupBy('device_id');
+        } catch (\Throwable) {
+            return collect();
         }
     }
 

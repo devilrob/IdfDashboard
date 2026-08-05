@@ -63,6 +63,7 @@
                 'timing' => 'Refresh & Timing',
                 'thresholds' => 'Battery Charge Thresholds',
                 'visual' => 'Visual Effects',
+                'navigation' => 'Navigation & Lists',
                 'updates' => 'Updates',
                 'severity' => 'Default Severity Shown on Load',
                 'problem' => 'Default Problem Types Shown on Load',
@@ -87,6 +88,18 @@
                                         @checked($resolved[$key])
                                     >
                                     {{ $field['label'] }}
+                                </label>
+                            @elseif ($field['type'] === 'choice')
+                                <label class="idf-settings-number-label">
+                                    <span>{{ $field['label'] }}</span>
+                                    <select name="settings[{{ $key }}]">
+                                        @foreach ($field['options'] as $optionValue => $optionLabel)
+                                            <option
+                                                value="{{ $optionValue }}"
+                                                @selected((string) $resolved[$key] === (string) $optionValue)
+                                            >{{ $optionLabel }}</option>
+                                        @endforeach
+                                    </select>
                                 </label>
                             @else
                                 <label class="idf-settings-number-label">
@@ -294,7 +307,8 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         gap: 4px;
     }
 
-    .idf-settings-number-label input {
+    .idf-settings-number-label input,
+    .idf-settings-number-label select {
         border: 1px solid #ccc;
         border-radius: 3px;
         padding: 4px 6px;

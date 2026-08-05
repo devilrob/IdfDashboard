@@ -1698,6 +1698,247 @@
         </button>
     </header>
 
+    @php
+        $dashboardLink = function (array $changes = [], array $remove = []) use ($dashboardUrl, $filters) {
+            $keys = ['view', 'id', 'search', 'severity', 'category', 'problem', 'location', 'problems_only', 'stale', 'no_sensor', 'sort', 'direction', 'page', 'per_page', 'tv'];
+            $params = [];
+
+            foreach ($keys as $key) {
+                $value = $filters[$key] ?? null;
+
+                if ($value !== null && $value !== '' && $value !== false) {
+                    $params[$key] = $value === true ? 1 : $value;
+                }
+            }
+
+            foreach ($remove as $key) {
+                unset($params[$key]);
+            }
+
+            if (! array_key_exists('page', $changes)) {
+                unset($params['page']);
+            }
+
+            foreach ($changes as $key => $value) {
+                if ($value === null || $value === '' || $value === false) {
+                    unset($params[$key]);
+                } else {
+                    $params[$key] = $value === true ? 1 : $value;
+                }
+            }
+
+            return $dashboardUrl . ($params === [] ? '' : '?' . http_build_query($params));
+        };
+
+        $stateLabel = fn (array $device) => $device['maintenance']
+            ? 'Maintenance'
+            : ucfirst($device['health']);
+        $cause = fn (array $device) => $device['primary_issue']['description'] ?? 'No active operational issue';
+        $formatMetric = fn (?float $value, string $unit) => $value === null
+            ? null
+            : rtrim(rtrim(number_format($value, 1), '0'), '.') . $unit;
+    @endphp
+
+    <style>
+        .phase2-nav { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 6px; padding: 7px; margin-bottom: 8px; background: #f7f9fb; border: 1px solid #d9e1e8; border-radius: 4px; }
+        .phase2-nav a { min-height: 34px; display: inline-flex; align-items: center; padding: 6px 12px; color: #34495e; border: 1px solid transparent; border-radius: 3px; font-size: 13px; font-weight: 700; text-decoration: none; }
+        .phase2-nav a:focus, .phase2-nav a:hover { outline: 2px solid #337ab7; outline-offset: 1px; }
+        .phase2-nav a.is-active { color: #fff; background: #337ab7; }
+        .phase2-nav-spacer { flex: 1; }
+        .phase2-connection { display: inline-flex; align-items: center; gap: 5px; min-height: 34px; color: #52606d; font-size: 12px; font-weight: 700; }
+        .phase2-summary { position: sticky; top: 50px; z-index: 15; display: grid; grid-template-columns: repeat(8, minmax(105px, 1fr)); gap: 6px; padding: 6px 0; background: #f5f7f9; }
+        .phase2-counter { min-height: 62px; padding: 7px 9px; color: #333; background: #fff; border: 1px solid #d8dee4; border-left: 4px solid #607d8b; border-radius: 3px; text-decoration: none; }
+        .phase2-counter strong { display: block; font-size: 21px; line-height: 1.1; }
+        .phase2-counter span { font-size: 12px; font-weight: 700; }
+        .phase2-counter-critical { border-left-color: #d9534f; }
+        .phase2-counter-warning { border-left-color: #f0ad4e; }
+        .phase2-counter-healthy { border-left-color: #27ae60; }
+        .phase2-filters { display: grid; grid-template-columns: minmax(180px, 2fr) repeat(4, minmax(130px, 1fr)) auto; gap: 8px; align-items: end; padding: 10px; margin: 8px 0; background: #fff; border: 1px solid #d8dee4; border-radius: 4px; }
+        .phase2-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 12px; font-weight: 700; }
+        .phase2-field input, .phase2-field select { width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid #aeb8c2; border-radius: 3px; font-size: 13px; font-weight: 400; }
+        .phase2-checks { display: flex; flex-wrap: wrap; gap: 8px 14px; grid-column: 1 / -1; font-size: 12px; }
+        .phase2-panel { margin-top: 10px; background: #fff; border: 1px solid #d8dee4; border-radius: 4px; }
+        .phase2-panel > header { display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 8px 12px; border-bottom: 1px solid #e5e9ed; }
+        .phase2-panel h2, .phase2-panel h3 { margin: 0; font-size: 16px; }
+        .phase2-location-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; padding: 10px; }
+        .phase2-location { display: block; padding: 10px; color: inherit; border: 1px solid #d8dee4; border-left: 5px solid #607d8b; border-radius: 4px; text-decoration: none; }
+        .phase2-location.health-critical { border-left-color: #d9534f; }
+        .phase2-location.health-warning { border-left-color: #f0ad4e; }
+        .phase2-location.health-healthy { border-left-color: #27ae60; }
+        .phase2-location-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .phase2-location-head strong { overflow-wrap: anywhere; font-size: 14px; }
+        .phase2-metrics { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+        .phase2-pill { padding: 3px 6px; background: #eef2f5; border: 1px solid #d6dde3; border-radius: 999px; font-size: 12px; }
+        .phase2-list { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .phase2-list th, .phase2-list td { padding: 8px; border-bottom: 1px solid #e5e9ed; text-align: left; vertical-align: top; font-size: 12px; overflow-wrap: anywhere; }
+        .phase2-list th { background: #f7f9fb; font-size: 12px; }
+        .phase2-list .col-status { width: 95px; }
+        .phase2-list .col-name { width: 22%; }
+        .phase2-list .col-category { width: 105px; }
+        .phase2-list .col-time { width: 125px; }
+        .phase2-device-name { font-weight: 700; }
+        .phase2-muted { color: #687785; }
+        .phase2-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid currentColor; border-radius: 3px; font-size: 12px; font-weight: 700; }
+        .phase2-badge-critical { color: #b52b27; background: #fdf0ef; }
+        .phase2-badge-warning, .phase2-badge-stale { color: #805400; background: #fff8e8; }
+        .phase2-badge-healthy { color: #19703a; background: #eef9f2; }
+        .phase2-badge-unknown, .phase2-badge-maintenance { color: #4f5f6e; background: #f0f3f5; }
+        .phase2-breadcrumb { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; font-size: 12px; }
+        .phase2-detail { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 2fr); gap: 10px; }
+        .phase2-detail-block { padding: 12px; background: #fff; border: 1px solid #d8dee4; border-radius: 4px; }
+        .phase2-detail-block h2, .phase2-detail-block h3 { margin: 0 0 10px; font-size: 16px; }
+        .phase2-kv { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 10px; font-size: 12px; }
+        .phase2-kv dt { color: #687785; }
+        .phase2-kv dd { margin: 0; overflow-wrap: anywhere; }
+        .phase2-issue { padding: 8px 10px; border-bottom: 1px solid #e5e9ed; border-left: 4px solid #607d8b; font-size: 12px; }
+        .phase2-issue:last-child { border-bottom: 0; }
+        .phase2-issue-critical { border-left-color: #d9534f; }
+        .phase2-issue-warning { border-left-color: #f0ad4e; }
+        .phase2-pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px; font-size: 12px; }
+        .phase2-pager-links { display: flex; gap: 5px; }
+        .phase2-empty { padding: 36px 16px; text-align: center; color: #687785; }
+        .phase2-tv-source { display: none; }
+        .infra-dashboard .infra-refresh,
+        .phase2-desktop .priority-item > *,
+        .phase2-tv-source .device-name,
+        .phase2-tv-source .device-meta,
+        .phase2-tv-source .device-state { font-size: 12px; }
+        .phase2-desktop .infra-button { min-height: 34px; font-size: 12px; }
+        @media (max-width: 1200px) { .phase2-summary { grid-template-columns: repeat(4, 1fr); position: static; } .phase2-filters { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 760px) { .phase2-nav { position: static; overflow-x: auto; } .phase2-summary { grid-template-columns: repeat(2, 1fr); } .phase2-filters { grid-template-columns: 1fr; } .phase2-detail { grid-template-columns: 1fr; } .phase2-list { min-width: 850px; } .phase2-table-wrap { overflow-x: auto; } }
+        body.tv-mode-active .phase2-nav, body.tv-mode-active .phase2-summary, body.tv-mode-active .phase2-desktop { display: none !important; }
+        body.tv-mode-active .phase2-tv-source { display: block; }
+    </style>
+
+    <nav class="phase2-nav phase2-desktop" aria-label="Dashboard views">
+        @foreach(['overview' => 'Overview', 'locations' => 'Locations', 'devices' => 'Devices'] as $viewKey => $viewLabel)
+            <a
+                href="{{ $dashboardLink(['view' => $viewKey], ['id']) }}"
+                class="{{ ($dashboardView === $viewKey || ($viewKey === 'locations' && $dashboardView === 'location') || ($viewKey === 'devices' && $dashboardView === 'device')) ? 'is-active' : '' }}"
+                @if($dashboardView === $viewKey) aria-current="page" @endif
+            >{{ $viewLabel }}</a>
+        @endforeach
+        <span class="phase2-nav-spacer"></span>
+        <span class="phase2-connection" data-phase2-connection><i class="fa fa-circle" aria-hidden="true"></i> Connected</span>
+        <a href="{{ $dashboardLink(['view' => 'overview', 'tv' => 1], ['id', 'page']) }}" data-enter-tv>
+            <i class="fa fa-television fa-fw" aria-hidden="true"></i> TV Mode
+        </a>
+    </nav>
+
+    <div class="phase2-summary phase2-desktop" aria-label="Operational summary">
+        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'critical']) }}"><strong>{{ $visibleSummary['critical_devices'] }}</strong><span>Critical</span></a>
+        <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'warning']) }}"><strong>{{ $visibleSummary['warning_devices'] }}</strong><span>Warning</span></a>
+        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'device']) }}"><strong>{{ $visibleSummary['devices_down'] }}</strong><span>Devices Down</span></a>
+        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'service']) }}"><strong>{{ $visibleSummary['service_problems'] }}</strong><span>Services Down</span></a>
+        <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'locations', 'problems_only' => 1]) }}"><strong>{{ $visibleSummary['locations_affected'] }}</strong><span>Locations Affected</span></a>
+        <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'stale' => 1]) }}"><strong>{{ $visibleSummary['stale_sensor_devices'] }}</strong><span>Stale</span></a>
+        <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'no_sensor' => 1]) }}"><strong>{{ $visibleSummary['no_sensor_installed'] }}</strong><span>No Sensor</span></a>
+        <div class="phase2-counter phase2-counter-healthy"><strong data-last-updated>{{ date('H:i:s', strtotime($generatedAt)) }}</strong><span>Last Updated</span></div>
+    </div>
+
+    @if(in_array($dashboardView, ['locations', 'devices', 'location'], true))
+        <form class="phase2-filters phase2-desktop" method="get" action="{{ $dashboardUrl }}">
+            <input type="hidden" name="view" value="{{ $dashboardView }}">
+            @if($dashboardView === 'location')<input type="hidden" name="id" value="{{ $filters['id'] ?? '' }}">@endif
+            <label class="phase2-field">Search<input type="search" name="search" maxlength="100" value="{{ $filters['search'] }}" placeholder="Name, host, IP, hardware or location"></label>
+            <label class="phase2-field">Severity<select name="severity"><option value="">All severities</option>@foreach(['critical','warning','unknown','stale','maintenance','healthy'] as $option)<option value="{{ $option }}" @selected($filters['severity'] === $option)>{{ ucfirst($option) }}</option>@endforeach</select></label>
+            <label class="phase2-field">Category<select name="category"><option value="">All categories</option>@foreach($categories as $option)<option value="{{ $option }}" @selected($filters['category'] === $option)>{{ $option }}</option>@endforeach</select></label>
+            <label class="phase2-field">Problem<select name="problem"><option value="">All problem types</option>@foreach(['device' => 'Device down', 'service' => 'Service', 'alert' => 'Alert', 'temperature' => 'Temperature', 'humidity' => 'Humidity', 'battery' => 'Battery', 'voltage' => 'Voltage', 'state' => 'State', 'storage' => 'Storage', 'memory' => 'Memory', 'processor' => 'Processor', 'other' => 'Other'] as $key => $label)<option value="{{ $key }}" @selected($filters['problem'] === $key)>{{ $label }}</option>@endforeach</select></label>
+            @if($dashboardView !== 'location')
+                <label class="phase2-field">Location<select name="location"><option value="">All locations</option>@foreach($locationOptions as $option)<option value="{{ $option['id'] }}" @selected($filters['location'] === $option['id'])>{{ $option['name'] }}</option>@endforeach</select></label>
+            @endif
+            <label class="phase2-field">Sort<select name="sort">@foreach(['severity' => 'Severity', 'name' => 'Name', 'location' => 'Location', 'freshness' => 'Freshness'] as $key => $label)<option value="{{ $key }}" @selected($filters['sort'] === $key)>{{ $label }}</option>@endforeach</select></label>
+            <button class="infra-button" type="submit">Apply filters</button>
+            <div class="phase2-checks">
+                <input type="hidden" name="problems_only" value="0"><label><input type="checkbox" name="problems_only" value="1" @checked($filters['problems_only'])> Problems only</label>
+                <label><input type="checkbox" name="stale" value="1" @checked($filters['stale'])> Stale</label>
+                <label><input type="checkbox" name="no_sensor" value="1" @checked($filters['no_sensor'])> No sensor installed</label>
+                <label>Per page <select name="per_page">@foreach([25,50,100] as $size)<option value="{{ $size }}" @selected($filters['per_page'] === $size)>{{ $size }}</option>@endforeach</select></label>
+                <a href="{{ $dashboardLink(['view' => $dashboardView], ['search','severity','category','problem','location','problems_only','stale','no_sensor','sort','direction','page']) }}">Clear filters</a>
+            </div>
+        </form>
+    @endif
+
+    <main class="phase2-desktop" id="phase2-content" tabindex="-1">
+        @if($viewData['kind'] === 'overview')
+            <section class="phase2-panel">
+                <header><h2><i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i> Priority Attention</h2><span>{{ $viewData['priority']['total'] }} visible</span></header>
+                @forelse($viewData['priority']['items'] as $item)
+                    <a class="priority-item priority-{{ $item['severity'] }}" href="{{ $dashboardLink(['view' => 'device', 'id' => $item['device_id']], ['page']) }}">
+                        <span class="priority-severity">{{ strtoupper($item['severity']) }}</span><span class="priority-role">{{ $item['category'] }}</span><strong>{{ $item['device_name'] }}</strong><span class="priority-location">{{ $item['location'] }}</span><span>{{ $item['cause'] }}@if($item['additional_count'] > 0) · +{{ $item['additional_count'] }} additional {{ $item['additional_count'] === 1 ? 'cause' : 'causes' }}@endif</span><span>{{ $item['since'] ?? 'Duration unknown' }}</span>
+                    </a>
+                @empty
+                    <div class="phase2-empty"><i class="fa fa-check-circle fa-fw" aria-hidden="true"></i> No actionable issues match the current filter.</div>
+                @endforelse
+            </section>
+            <section class="phase2-panel">
+                <header><h2>Critical Locations</h2><a href="{{ $dashboardLink(['view' => 'locations', 'problems_only' => 1]) }}">View all affected locations</a></header>
+                <div class="phase2-location-grid">
+                    @forelse($viewData['critical_locations'] as $location)
+                        <a class="phase2-location health-{{ $location['health'] }}" href="{{ $dashboardLink(['view' => 'location', 'id' => $location['location_id'] ?? 0], ['page']) }}">
+                            <div class="phase2-location-head"><strong>{{ $location['name'] }}</strong><span class="phase2-badge phase2-badge-{{ $location['health'] }}">{{ ucfirst($location['health']) }}</span></div>
+                            <div class="phase2-metrics"><span class="phase2-pill">{{ $location['total'] }} devices</span><span class="phase2-pill">{{ $location['down'] }} down</span><span class="phase2-pill">{{ $location['issue_count'] }} affected</span>@if($location['services_affected'] > 0)<span class="phase2-pill">{{ $location['services_affected'] }} services</span>@endif</div>
+                        </a>
+                    @empty
+                        <div class="phase2-empty">No affected locations match the current filter.</div>
+                    @endforelse
+                </div>
+            </section>
+            <section class="phase2-panel"><header><h2>Healthy Overview</h2></header><div class="phase2-location-grid"><div class="phase2-location health-healthy"><div class="phase2-location-head"><strong>{{ $viewData['healthy']['locations'] }} healthy locations</strong><span class="phase2-badge phase2-badge-healthy">Healthy</span></div><div class="phase2-metrics"><span class="phase2-pill">{{ $viewData['healthy']['devices'] }} healthy devices</span></div></div></div></section>
+        @elseif($viewData['kind'] === 'locations')
+            @php($pager = $viewData['locations'])
+            <section class="phase2-panel">
+                <header><h2>Locations</h2><span>{{ $pager['total'] }} matching locations</span></header>
+                <div class="phase2-location-grid">
+                    @forelse($pager['items'] as $location)
+                        <a class="phase2-location health-{{ $location['health'] }}" href="{{ $dashboardLink(['view' => 'location', 'id' => $location['location_id'] ?? 0], ['page']) }}">
+                            <div class="phase2-location-head"><strong>{{ $location['name'] }}</strong><span class="phase2-badge phase2-badge-{{ $location['health'] }}">{{ ucfirst($location['health']) }}</span></div>
+                            <div class="phase2-metrics"><span class="phase2-pill">{{ $location['total'] }} total</span><span class="phase2-pill">{{ $location['up'] }} up</span><span class="phase2-pill">{{ $location['down'] }} down</span>@if($location['critical'] > 0)<span class="phase2-pill">{{ $location['critical'] }} critical</span>@endif @if($location['warning'] > 0)<span class="phase2-pill">{{ $location['warning'] }} warning</span>@endif @if($location['unknown'] > 0)<span class="phase2-pill">{{ $location['unknown'] }} unknown</span>@endif @if($location['maintenance'] > 0)<span class="phase2-pill">{{ $location['maintenance'] }} maintenance</span>@endif @if($location['temperature_max'] !== null)<span class="phase2-pill">Max temp {{ $formatMetric($location['temperature_max'], '°') }}</span>@endif @if($location['humidity_max'] !== null)<span class="phase2-pill">Max humidity {{ $formatMetric($location['humidity_max'], '%') }}</span>@endif @if($location['power_affected'] > 0)<span class="phase2-pill">{{ $location['power_affected'] }} UPS/PDU affected</span>@endif @if($location['services_affected'] > 0)<span class="phase2-pill">{{ $location['services_affected'] }} services affected</span>@endif @if($location['stale'] > 0)<span class="phase2-pill">{{ $location['stale'] }} stale</span>@endif @if($location['last_updated'])<span class="phase2-pill">Updated {{ $location['last_updated'] }}</span>@endif</div>
+                        </a>
+                    @empty
+                        <div class="phase2-empty">No authorized locations match these filters.</div>
+                    @endforelse
+                </div>
+                <div class="phase2-pager"><span>{{ $pager['from'] }}–{{ $pager['to'] }} of {{ $pager['total'] }}</span><span class="phase2-pager-links">@if($pager['page'] > 1)<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] - 1]) }}">Previous</a>@endif @if($pager['page'] < $pager['pages'])<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] + 1]) }}">Next</a>@endif</span></div>
+            </section>
+        @elseif($viewData['kind'] === 'devices')
+            @php($pager = $viewData['devices'])
+            <section class="phase2-panel"><header><h2>Devices</h2><span>{{ $pager['total'] }} matching devices</span></header><div class="phase2-table-wrap"><table class="phase2-list"><thead><tr><th class="col-status">Status</th><th class="col-name">Device</th><th>IP / Hostname</th><th class="col-category">Category</th><th>Location</th><th>Primary cause</th><th class="col-time">Uptime</th><th class="col-time">Freshness</th></tr></thead><tbody>
+                @forelse($pager['items'] as $device)
+                    <tr><td><span class="phase2-badge phase2-badge-{{ $device['health'] }}"><i class="fa fa-circle" aria-hidden="true"></i>{{ $stateLabel($device) }}</span></td><td><a class="phase2-device-name" href="{{ $dashboardLink(['view' => 'device', 'id' => $device['device_id']], ['page']) }}">{{ $device['name'] }}</a><div class="phase2-muted">{{ $device['hardware'] ?: $device['os'] }}</div></td><td>{{ $device['ip'] ?: 'IP unavailable' }}<div class="phase2-muted">{{ $device['hostname'] }}</div></td><td>{{ $device['category'] }}</td><td><a href="{{ $dashboardLink(['view' => 'location', 'id' => $device['location_id'] ?? 0], ['page']) }}">{{ $device['location'] }}</a></td><td>{{ $cause($device) }}@if($device['issue_count'] > 1)<div class="phase2-muted">+{{ $device['issue_count'] - 1 }} additional causes</div>@endif</td><td>{{ $device['uptime'] ?? 'Unavailable' }}</td><td>{{ $device['freshness']['label'] }}<div class="phase2-muted">{{ $device['last_polled'] ?? 'Last poll unavailable' }}</div></td></tr>
+                @empty<tr><td colspan="8" class="phase2-empty">No authorized devices match these filters.</td></tr>@endforelse
+                </tbody></table></div><div class="phase2-pager"><span>{{ $pager['from'] }}–{{ $pager['to'] }} of {{ $pager['total'] }}</span><span class="phase2-pager-links">@if($pager['page'] > 1)<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] - 1]) }}">Previous</a>@endif @if($pager['page'] < $pager['pages'])<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] + 1]) }}">Next</a>@endif</span></div></section>
+        @elseif($viewData['kind'] === 'location')
+            <nav class="phase2-breadcrumb" aria-label="Breadcrumb"><a href="{{ $dashboardLink(['view' => 'overview'], ['id','page']) }}">Overview</a><span>/</span><a href="{{ $dashboardLink(['view' => 'locations'], ['id','page']) }}">Locations</a><span>/</span><span>Location detail</span></nav>
+            @if(!$viewData['found'])
+                <div class="phase2-panel phase2-empty">This location is unavailable or outside your authorized device set.</div>
+            @else
+                @php($location = $viewData['location']) @php($pager = $viewData['devices'])
+                <section class="phase2-panel"><header><h2>{{ $location['name'] }}</h2><span class="phase2-badge phase2-badge-{{ $location['health'] }}">{{ ucfirst($location['health']) }}</span></header><div class="phase2-location-grid"><div class="phase2-metrics"><span class="phase2-pill">{{ $location['total'] }} devices</span><span class="phase2-pill">{{ $location['down'] }} down</span><span class="phase2-pill">{{ $location['services_affected'] }} affected services</span>@if($location['temperature_max'] !== null)<span class="phase2-pill">Max temp {{ $formatMetric($location['temperature_max'], '°') }}</span>@endif @if($location['humidity_max'] !== null)<span class="phase2-pill">Max humidity {{ $formatMetric($location['humidity_max'], '%') }}</span>@endif</div></div><div class="phase2-table-wrap"><table class="phase2-list"><thead><tr><th class="col-status">State</th><th class="col-name">Device</th><th>IP</th><th>Category</th><th>Primary cause</th><th>Freshness</th><th>Uptime</th></tr></thead><tbody>@forelse($pager['items'] as $device)<tr><td><span class="phase2-badge phase2-badge-{{ $device['health'] }}">{{ $stateLabel($device) }}</span></td><td><a class="phase2-device-name" href="{{ $dashboardLink(['view' => 'device', 'id' => $device['device_id']], ['page']) }}">{{ $device['name'] }}</a><div class="phase2-muted">{{ $device['hostname'] }}</div></td><td>{{ $device['ip'] ?: 'Unavailable' }}</td><td>{{ $device['category'] }}</td><td>{{ $cause($device) }}@if($device['issue_count'] > 1)<div class="phase2-muted">+{{ $device['issue_count'] - 1 }} more</div>@endif</td><td>{{ $device['freshness']['label'] }}</td><td>{{ $device['uptime'] ?? 'Unavailable' }}</td></tr>@empty<tr><td colspan="7" class="phase2-empty">No devices in this authorized location match the filters.</td></tr>@endforelse</tbody></table></div><div class="phase2-pager"><span>{{ $pager['from'] }}–{{ $pager['to'] }} of {{ $pager['total'] }}</span><span class="phase2-pager-links">@if($pager['page'] > 1)<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] - 1]) }}">Previous</a>@endif @if($pager['page'] < $pager['pages'])<a class="infra-button" href="{{ $dashboardLink(['page' => $pager['page'] + 1]) }}">Next</a>@endif</span></div></section>
+            @endif
+        @elseif($viewData['kind'] === 'device')
+            <nav class="phase2-breadcrumb" aria-label="Breadcrumb"><a href="{{ $dashboardLink(['view' => 'overview'], ['id','page']) }}">Overview</a><span>/</span><a href="{{ $dashboardLink(['view' => 'devices'], ['id','page']) }}">Devices</a><span>/</span><span>Device detail</span></nav>
+            @if(!$viewData['found'])
+                <div class="phase2-panel phase2-empty">This device is unavailable or outside your authorized device set.</div>
+            @else
+                @php($device = $viewData['device'])
+                <div class="phase2-detail"><section class="phase2-detail-block"><h2>{{ $device['name'] }}</h2><dl class="phase2-kv"><dt>Status</dt><dd><span class="phase2-badge phase2-badge-{{ $device['health'] }}">{{ $stateLabel($device) }}</span></dd><dt>Hostname</dt><dd>{{ $device['hostname'] }}</dd><dt>IP</dt><dd>{{ $device['ip'] ?: 'Unavailable' }}</dd><dt>Category</dt><dd>{{ $device['category'] }}</dd><dt>Classification</dt><dd>{{ $device['classification']['reason'] }} ({{ $device['classification']['confidence'] }})</dd><dt>OS</dt><dd>{{ $device['os'] ?: 'Unavailable' }}</dd><dt>Hardware</dt><dd>{{ $device['hardware'] ?: 'Unavailable' }}</dd><dt>Purpose</dt><dd>{{ $device['purpose'] ?: 'Unavailable' }}</dd><dt>Location</dt><dd><a href="{{ $dashboardLink(['view' => 'location', 'id' => $device['location_id'] ?? 0], ['page']) }}">{{ $device['location'] }}</a></dd><dt>Uptime</dt><dd>{{ $device['uptime'] ?? 'Unavailable' }}</dd>@if($device['availability'])<dt>Availability</dt><dd>{{ $device['availability']['percent'] }}% over {{ $device['availability']['window'] }}</dd>@endif @if($device['latency_ms'] !== null)<dt>Latency</dt><dd>{{ $device['latency_ms'] }} ms</dd>@endif <dt>Last polled</dt><dd>{{ $device['last_polled'] ?? 'Unavailable' }}</dd><dt>Freshness</dt><dd>{{ $device['freshness']['label'] }} — {{ $device['freshness']['reason'] }}</dd>@if($device['down_since'])<dt>Down since</dt><dd>{{ $device['down_since'] }} ({{ $device['primary_issue']['duration'] ?? 'duration unavailable' }})</dd>@endif @if($device['recovered_recently'])<dt>Recovery</dt><dd>{{ $device['recovered_at']->diffForHumans() }}</dd>@endif</dl><p><a class="infra-button" href="{{ $device['device_url'] }}">Open in LibreNMS</a></p></section><div><section class="phase2-detail-block"><h3>Operational issues</h3>@forelse($device['issues']->take(10) as $issue)<div class="phase2-issue phase2-issue-{{ $issue['severity'] }}"><strong>{{ $issue['title'] }}</strong><div>{{ $issue['description'] }}</div><div class="phase2-muted">{{ $issue['timestamp'] ?? 'Timestamp unavailable' }}</div></div>@empty<div class="phase2-empty">No current operational issues.</div>@endforelse</section>@if($device['telemetry']->isNotEmpty())<section class="phase2-detail-block"><h3>Metrics</h3><div class="phase2-metrics">@foreach($device['telemetry'] as $metric)<span class="phase2-pill"><strong>{{ $metric['label'] }}</strong> {{ $metric['value'] }} · {{ ucfirst($metric['state']) }}@if(isset($metric['freshness']['label'])) · {{ $metric['freshness']['label'] }}@endif</span>@endforeach</div></section>@endif @if($device['service_problems']->isNotEmpty() || $device['alerts']->isNotEmpty() || $device['recent_events']->isNotEmpty())<section class="phase2-detail-block"><h3>Services, alerts and recent events</h3>@foreach($device['service_problems']->take(3) as $service)<div class="phase2-issue"><strong>Service {{ $service['name'] }}</strong><div>{{ $service['message'] ?: $service['status_label'] }}</div><div class="phase2-muted">{{ $service['changed'] ?? 'Timestamp unavailable' }}</div></div>@endforeach @foreach($device['alerts']->take(3) as $alert)<div class="phase2-issue phase2-issue-{{ $alert['severity_class'] }}"><strong>Alert {{ $alert['name'] }}</strong><div class="phase2-muted">{{ $alert['timestamp'] ?? 'Timestamp unavailable' }}</div></div>@endforeach @foreach($device['recent_events']->take(3) as $event)<div class="phase2-issue"><strong>Event</strong><div>{{ $event['message'] ?: 'Event logged' }}</div><div class="phase2-muted">{{ $event['time'] ?? 'Timestamp unavailable' }}</div></div>@endforeach</section>@endif</div></div>
+            @endif
+        @endif
+    </main>
+
+    <div class="tv-clock" data-updated-at="{{ $generatedAt }}" data-updated-at-epoch="{{ strtotime($generatedAt) }}"></div>
+    <div class="tv-status-banner" data-critical="{{ $summary['critical_devices'] }}" data-warning="{{ $summary['warning_devices'] }}" data-down="{{ $summary['devices_down'] }}" data-total="{{ $summary['active_devices'] }}"></div>
+    @if($filters['tv'])
+    <div class="tv-clear-slide" data-dashboard-section="__tv_clear__"><div class="tv-clear-icon"><i class="fa fa-check-circle" aria-hidden="true"></i></div><div class="tv-clear-title"></div><div class="tv-clear-subtitle"></div></div>
+    <div class="tv-combined-slide" data-tv-combined-slide><header class="infra-section-header"><h2 class="infra-section-title"><i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i> Priority Attention — Full Fleet Rotation</h2><div class="infra-section-meta" data-tv-combined-meta></div></header><div class="tv-combined-grid" data-tv-combined-grid></div></div>
+    <div class="phase2-tv-source">
+        <section class="infra-section" data-dashboard-section="mdfServers"><header class="infra-section-header"><h2 class="infra-section-title">All Authorized Devices</h2><div class="infra-section-meta">{{ $summary['active_devices'] }} devices</div></header><div class="infra-section-body"><ul class="location-device-list">@foreach($allLocations as $location)@foreach($location['devices'] as $device)<li class="monitor-device device-row" data-health="{{ $device['health'] }}" data-problems="{{ implode(',', $device['problem_types']) }}"><div class="device-main"><i class="fa fa-circle {{ $device['status'] ? 'status-up' : 'status-down' }}" aria-hidden="true"></i><div class="device-name">{{ $device['name'] }}<div class="device-meta">{{ $location['name'] }} · {{ $device['category'] }} · {{ $cause($device) }}</div></div><span class="device-state">{{ $stateLabel($device) }}</span></div></li>@endforeach @endforeach</ul></div></section>
+    </div>
+    @endif
+
+    @if(false)
+
     <div
         class="tv-clock"
         data-updated-at="{{ $generatedAt }}"
@@ -2435,6 +2676,7 @@
             </div>
         </div>
     </section>
+    @endif
 </div>
 
 <script>
@@ -3059,9 +3301,10 @@ function initDashboard() {
         applyFilters();
     }
 
-    document.querySelector(
-        '[data-action="problems"]'
-    ).addEventListener('click', function () {
+    const legacyProblemsButton = document.querySelector('[data-action="problems"]');
+
+    if (legacyProblemsButton) {
+        legacyProblemsButton.addEventListener('click', function () {
         // Used to also force critical/warning/unknown to true — which
         // meant an admin whose Settings page only enables Critical
         // still saw Warning devices the instant they clicked this
@@ -3076,11 +3319,13 @@ function initDashboard() {
         state.healthy = false;
 
         persistAndApply();
-    });
+        });
+    }
 
-    document.querySelector(
-        '[data-action="all"]'
-    ).addEventListener('click', function () {
+    const legacyAllButton = document.querySelector('[data-action="all"]');
+
+    if (legacyAllButton) {
+        legacyAllButton.addEventListener('click', function () {
         Object.keys(defaults).forEach(function (key) {
             if (key === 'coverage' || key === 'summary' || key === 'priority' || numericSettings[key]) {
                 return;
@@ -3090,24 +3335,24 @@ function initDashboard() {
         });
 
         persistAndApply();
-    });
+        });
+    }
 
-    document.querySelector(
-        '[data-action="reset"]'
-    ).addEventListener('click', function () {
-        Object.assign(state, defaults);
-        persistAndApply();
-    });
+    const legacyResetButton = document.querySelector('[data-action="reset"]');
+
+    if (legacyResetButton) {
+        legacyResetButton.addEventListener('click', function () {
+            Object.assign(state, defaults);
+            persistAndApply();
+        });
+    }
 
     // --- TV Mode -----------------------------------------------------
 
+    // Phase 2 renders the compact all-device TV source only for an explicit
+    // `tv=1` request. A v1.1 localStorage flag must not switch a normal
+    // desktop response into TV mode when that source is intentionally absent.
     let tvMode = false;
-
-    try {
-        tvMode = window.localStorage.getItem(tvStorageKey) === '1';
-    } catch (error) {
-        tvMode = false;
-    }
 
     try {
         if (new URLSearchParams(window.location.search).get('tv') === '1') {
@@ -3130,6 +3375,13 @@ function initDashboard() {
     // `deviceMatches()`/`state` for exactly this reason; the
     // interactive view keeps using `state` unchanged.
     function tvDeviceMatches(device) {
+        // Phase 2's compact TV source is already the authorized fleet and is
+        // intentionally cheap to render. Keep every device in the rotation;
+        // sorting still places actionable Critical/Warning devices first.
+        if (device.closest('.phase2-tv-source')) {
+            return true;
+        }
+
         const health = device.dataset.health || 'healthy';
 
         if (!defaults[health]) {
@@ -3609,6 +3861,13 @@ function initDashboard() {
             ? 'Last updated: ' + updatedAt + ' (' + ageLabel + ')'
             : 'Last updated: unavailable';
 
+        const desktopConnection = document.querySelector('[data-phase2-connection]');
+
+        if (desktopConnection) {
+            desktopConnection.className = 'phase2-connection phase2-connection-' + dashboardConnectionState;
+            desktopConnection.innerHTML = '<i class="fa fa-circle" aria-hidden="true"></i> ' + connectionLabel;
+        }
+
         clock.textContent = connectionLabel + ' · ' + currentTime + ' · ' + updatedLabel;
     }
 
@@ -3832,6 +4091,14 @@ function initDashboard() {
 
     if (tvExitButton) {
         tvExitButton.addEventListener('click', function () {
+            const url = new URL(window.location.href);
+
+            if (url.searchParams.get('tv') === '1') {
+                url.searchParams.delete('tv');
+                window.location.assign(url.toString());
+                return;
+            }
+
             tvMode = false;
             applyTvMode();
         });

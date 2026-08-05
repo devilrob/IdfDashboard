@@ -6,6 +6,19 @@ namespace App\Plugins\IdfDashboard\Support;
 
 final class DeviceClassifier
 {
+    public const CATEGORIES = [
+        'Network',
+        'Server',
+        'Power',
+        'Wireless',
+        'Security',
+        'POS',
+        'Printer',
+        'Camera',
+        'Controller',
+        'Other',
+    ];
+
     /**
      * Precedence resolves conflicting signals deterministically. Specific
      * infrastructure identities precede broad LibreNMS types; uncertain
