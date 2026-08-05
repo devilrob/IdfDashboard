@@ -6,8 +6,10 @@ require_once dirname(__DIR__) . '/bin/update.php';
 
 $sourceRoot = dirname(__DIR__);
 $installedVersion = '1.0.3';
-$bridgeVersion = \App\Plugins\IdfDashboard\Support\Version::VERSION;
-$candidateVersion = '1.1.0';
+$bridgeVersion = '1.0.4';
+$candidateVersion = \App\Plugins\IdfDashboard\Support\Version::VERSION;
+$publishedBridgeZip = getenv('IDF_PUBLISHED_BRIDGE_ZIP');
+$publishedBridgeSha256 = getenv('IDF_PUBLISHED_BRIDGE_SHA256');
 $linuxUpgrades = in_array('--linux-upgrades', $argv, true);
 $assertions = 0;
 
@@ -128,8 +130,25 @@ $hydrateLegacyApplication = static function (string $destination, string $tag) u
 $copyBridgePackage = static function (string $destination, string $marker) use (
     $copyPackage,
     $hydrateLegacyApplication,
-    $bridgeVersion
+    $bridgeVersion,
+    $publishedBridgeZip
 ): void {
+    if (is_string($publishedBridgeZip) && $publishedBridgeZip !== '') {
+        if (! is_file($publishedBridgeZip) || ! mkdir($destination, 0750, true)) {
+            throw new RuntimeException('Unable to prepare the published bridge package.');
+        }
+
+        $zip = new ZipArchive();
+
+        if ($zip->open($publishedBridgeZip) !== true || ! $zip->extractTo($destination)) {
+            throw new RuntimeException('Unable to extract the published bridge package.');
+        }
+
+        $zip->close();
+
+        return;
+    }
+
     $copyPackage($destination, $marker, $bridgeVersion);
     $hydrateLegacyApplication($destination, 'v1.0.3');
 };
@@ -182,6 +201,16 @@ $testRoot = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
 mkdir($testRoot, 0700, true);
 
 try {
+    if (is_string($publishedBridgeZip) && $publishedBridgeZip !== '') {
+        $assert(is_file($publishedBridgeZip), 'published v1.0.4 bridge ZIP is available');
+        $assert(
+            is_string($publishedBridgeSha256)
+                && preg_match('/^[a-f0-9]{64}$/', $publishedBridgeSha256) === 1
+                && hash_equals($publishedBridgeSha256, (string) hash_file('sha256', $publishedBridgeZip)),
+            'published v1.0.4 bridge ZIP checksum matches the verified release'
+        );
+    }
+
     [$libreNms, $plugins, $active, $storage] = $createEnvironment($testRoot . DIRECTORY_SEPARATOR . 'migration', 'ORIGINAL');
     $insidePluginsRejected = false;
 

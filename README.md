@@ -19,6 +19,18 @@ Install the directory as `/opt/librenms/app/Plugins/IdfDashboard`, enable it in
 LibreNMS, and configure it from the plugin Settings page. Plugin settings remain
 in LibreNMS's database and are not stored in the release package.
 
+## Operational health model
+
+v1.1.0 centralizes severity, freshness and device classification so the same
+state and exact cause appear in summaries, cards and Priority Attention.
+Actionable issues include device outages, thresholded sensors, services and
+alerts; maintenance, recent recovery, unknown/stale telemetry and
+`No sensor installed` remain distinct. Device classification produces exactly
+one category and falls back to `Other` with its reason when evidence is weak.
+Desktop and TV views share these structures while TV limits content, preserves
+12 px minimum operational text and reports connection, refresh and last-update
+state without additional polling.
+
 ## Stable updates
 
 The web Settings page performs a cached, read-only check of stable semantic
@@ -83,7 +95,9 @@ these commands as root.
 
 After v1.0.4 is active, use its installed updater to validate and install
 v1.1.0. The bridge rejects packages that do not exactly match the closed file
-profile selected by the target version.
+profile selected by the target version. A clean v1.1.0 install is also valid;
+the bridge requirement applies to automatic upgrades from earlier `1.0.x`
+releases.
 
 `--dry-run` performs every download and validation step without activation.
 Backups default to the five newest matching directories and can be configured
@@ -111,7 +125,7 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.0.4`. GitHub Actions validates the tag/version match, runs PHP
+tag such as `v1.1.0`. GitHub Actions validates the tag/version match, runs PHP
 and JavaScript checks, builds the minimal plugin ZIP, generates `SHA256SUMS`,
 and publishes both assets to the stable GitHub release.
 

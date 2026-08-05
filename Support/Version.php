@@ -4,7 +4,7 @@ namespace App\Plugins\IdfDashboard\Support;
 
 final class Version
 {
-    public const VERSION = '1.0.4';
+    public const VERSION = '1.1.0';
 
     public const REPOSITORY = 'devilrob/IdfDashboard';
 

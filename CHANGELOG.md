@@ -2,6 +2,28 @@
 
 All notable changes follow semantic versioning.
 
+## [1.1.0] - 2026-08-05
+
+### Added
+
+- Centralized operational severity and freshness states reused by summaries,
+  device/location cards and Priority Attention.
+- Added deterministic single-category device classification with an explicit
+  reason and `Other` fallback.
+- Added structured, deduplicated issues with exact causes, current values,
+  units, thresholds, timestamps, age, device, location and LibreNMS links.
+- Added device outages and recent recovery, maintenance state, unknown/stale
+  telemetry and informational `No sensor installed` coverage.
+
+### Changed
+
+- Prioritized actionable device, sensor, service and alert causes consistently
+  in desktop and TV views, with bounded display and improved long-text layout.
+- Added TV connection, refresh and last-updated state without extra polling or
+  duplicate timers.
+- Require v1.0.4 to be installed first when upgrading automatically from an
+  earlier `1.0.x` release; clean v1.1.0 installations remain supported.
+
 ## [1.0.4] - 2026-08-05
 
 ### Security

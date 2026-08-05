@@ -49,7 +49,19 @@ jobs:
       - name: Run updater self-test
         run: php bin/update.php --self-test
 
+      - name: Verify published v1.0.4 updater bridge
+        run: |
+          mkdir -p "${{ runner.temp }}/idf-bridge"
+          curl -fL --retry 3 --output "${{ runner.temp }}/idf-bridge/IdfDashboard-v1.0.4.zip" \
+            https://github.com/devilrob/IdfDashboard/releases/download/v1.0.4/IdfDashboard-v1.0.4.zip
+          curl -fL --retry 3 --output "${{ runner.temp }}/idf-bridge/SHA256SUMS" \
+            https://github.com/devilrob/IdfDashboard/releases/download/v1.0.4/SHA256SUMS
+          (cd "${{ runner.temp }}/idf-bridge" && sha256sum -c SHA256SUMS)
+
       - name: Test isolated updater activation and rollback
+        env:
+          IDF_PUBLISHED_BRIDGE_SHA256: c48bac2556f86c1700e6f480a6e2c3fbadc68e3d33d37a3da0858f0659cef5b7
+          IDF_PUBLISHED_BRIDGE_ZIP: ${{ runner.temp }}/idf-bridge/IdfDashboard-v1.0.4.zip
         run: |
           if [[ "${{ matrix.php }}" == "8.4" ]]; then
             php tests/updater-integration.php --linux-upgrades
