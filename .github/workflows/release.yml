@@ -158,7 +158,116 @@ jobs:
 
       - name: Run plugin integration tests against LibreNMS 26.8
         working-directory: librenms
-        run: vendor/bin/phpunit tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php
+        env:
+          IDF_VISUAL_OUTPUT_DIR: ${{ runner.temp }}/idf-visual-fixtures
+        run: |
+          mkdir -p "$IDF_VISUAL_OUTPUT_DIR"
+          vendor/bin/phpunit tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php
+
+      - name: Upload rendered HTML fixtures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rendered-html-fixtures
+          path: ${{ runner.temp }}/idf-visual-fixtures
+          if-no-files-found: warn
+          retention-days: 14
+
+  performance:
+    name: Performance (${{ matrix.scale }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        scale:
+          - small
+          - medium
+          - large
+    services:
+      database:
+        image: mariadb:11.7
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_DATABASE: librenms_phpunit_78hunjuybybh
+          MYSQL_USER: librenms
+          MYSQL_PASSWORD: librenms
+        ports:
+          - 3306
+    steps:
+      - name: Check out plugin source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: plugin-source
+
+      - name: Check out supported LibreNMS 26.8
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: librenms/librenms
+          ref: 51344f722110350bb7301dde8b13bcf23ff65156
+          path: librenms
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+
+      - name: Configure LibreNMS test database
+        working-directory: librenms
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+        run: |
+          cat > .env <<EOF
+          APP_KEY=base64:vHI+YHgkyCDad31iPEErGSNEOWO21wNzV+zyENKQv04=
+          APP_URL=http://127.0.0.1:8000
+          APP_ENV=testing
+          APP_DEBUG=true
+          DB_DRIVER=mysql
+          DB_HOST=127.0.0.1
+          DB_PORT=$DB_PORT
+          DB_DATABASE=librenms_phpunit_78hunjuybybh
+          DB_USERNAME=librenms
+          DB_PASSWORD=librenms
+          DB_TEST_DRIVER=mysql
+          DB_TEST_HOST=127.0.0.1
+          DB_TEST_PORT=$DB_PORT
+          DB_TEST_DATABASE=librenms_phpunit_78hunjuybybh
+          DB_TEST_USERNAME=librenms
+          DB_TEST_PASSWORD=librenms
+          EOF
+
+      - name: Install LibreNMS dependencies
+        working-directory: librenms
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Install plugin and its integration test
+        run: |
+          mkdir -p librenms/app/Plugins/IdfDashboard/Support librenms/app/Plugins/IdfDashboard/resources/views
+          cp plugin-source/Menu.php plugin-source/Page.php plugin-source/Settings.php librenms/app/Plugins/IdfDashboard/
+          cp plugin-source/Support/*.php librenms/app/Plugins/IdfDashboard/Support/
+          cp plugin-source/resources/views/*.blade.php librenms/app/Plugins/IdfDashboard/resources/views/
+          mkdir -p librenms/tests/Feature/Plugins/IdfDashboard
+          cp plugin-source/tests/librenms/DeviceAccessTest.php librenms/tests/Feature/Plugins/IdfDashboard/
+
+      - name: Prepare and migrate LibreNMS test database
+        working-directory: librenms
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+        run: |
+          mysqladmin -h127.0.0.1 -P"$DB_PORT" --user=librenms --password=librenms ping --wait=10
+          mysql -h127.0.0.1 -P"$DB_PORT" --user=librenms --password=librenms -e 'ALTER DATABASE librenms_phpunit_78hunjuybybh CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'
+          sqlite3 database/testing.sqlite ""
+          php artisan migrate --force
+
+      - name: Run performance fixture at ${{ matrix.scale }} scale
+        working-directory: librenms
+        env:
+          IDF_PERFORMANCE_SCALE: ${{ matrix.scale }}
+        run: >-
+          vendor/bin/phpunit
+          --filter testRepresentativePerformanceScaleHasFixedQueryCount
+          tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php
 
   release:
     name: Publish verified package
@@ -166,6 +275,7 @@ jobs:
     needs:
       - validate
       - librenms-integration
+      - performance
     runs-on: ubuntu-latest
     permissions:
       contents: write
