@@ -637,19 +637,59 @@ class Page extends PageHook
             $filteredLocations,
             $priorityAttention
         );
+
+        /*
+         * The header summary (`$visibleSummary`) now consults the same
+         * centralized policy Priority Attention and TV Mode do — it
+         * previously counted from $filteredDevices, which reflects only
+         * the Phase 2 per-request interactive filter (a URL-scoped
+         * severity/category/problem dropdown, search, pagination), never
+         * default_severity_*. An admin disabling Unknown/Stale/
+         * Maintenance/Healthy in Settings had no effect on these header
+         * counters at all — a third, independent source of truth for
+         * "is this severity shown" alongside the two already fixed.
+         *
+         * Deliberately a *separate* collection from $filteredDevices/
+         * $filteredLocations, not a mutation of them: the Locations/
+         * Devices paginated list views and their own independent
+         * severity/category/problem dropdown filter are unaffected by
+         * this change, matching this phase's explicit "summary total
+         * interno / summary visible / summary TV" three-way distinction
+         * rather than collapsing them into one shared collection.
+         */
+        $policyVisibleDevices = $filteredDevices
+            ->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))
+            ->values();
+        $policyVisibleLocations = $this->buildLocationGroups($policyVisibleDevices);
+
         $visibleSummary = [
-            'critical_devices' => $filteredDevices->where('health', Severity::CRITICAL)->count(),
-            'warning_devices' => $filteredDevices->where('health', Severity::WARNING)->count(),
-            'devices_down' => $filteredDevices
+            'critical_devices' => $policyVisibleDevices->where('health', Severity::CRITICAL)->count(),
+            'warning_devices' => $policyVisibleDevices->where('health', Severity::WARNING)->count(),
+            'devices_down' => $policyVisibleDevices
                 ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
                 ->count(),
-            'service_problems' => $filteredDevices->sum('service_problem_count'),
-            'locations_affected' => $filteredLocations->where('issue_count', '>', 0)->count(),
-            'stale_sensor_devices' => $filteredDevices
+            'service_problems' => $policyVisibleDevices->sum('service_problem_count'),
+            'locations_affected' => $policyVisibleLocations->where('issue_count', '>', 0)->count(),
+            'stale_sensor_devices' => $policyVisibleDevices
                 ->filter(fn (array $device): bool => in_array('stale', $device['problem_types'], true))
                 ->count(),
-            'no_sensor_installed' => $filteredDevices->sum('no_sensor_count'),
-            'devices' => $filteredDevices->count(),
+            /*
+             * no_sensor_count is never part of a device's overall health
+             * (Severity::worst() explicitly skips NO_SENSOR — a device
+             * with nothing else wrong is 'healthy' and only reaches
+             * $policyVisibleDevices if the Healthy toggle allows it,
+             * which would make this counter always read 0 whenever
+             * Healthy is off, unrelated to the actual no_sensor
+             * setting). Counted from the request-filtered-but-not-
+             * severity-filtered set instead, gated only by
+             * default_severity_no_sensor's own toggle — Caso 8's exact
+             * requirement: "no aparece ... en su contador" when that
+             * one setting is off, independent of Healthy.
+             */
+            'no_sensor_installed' => $policy['no_sensor']
+                ? $filteredDevices->sum('no_sensor_count')
+                : 0,
+            'devices' => $policyVisibleDevices->count(),
         ];
         $locationOptions = $allLocations
             ->map(fn (array $location): array => [
