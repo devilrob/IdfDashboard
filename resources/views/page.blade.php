@@ -1797,17 +1797,12 @@
         .phase2-pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px; font-size: 12px; }
         .phase2-pager-links { display: flex; gap: 5px; }
         .phase2-empty { padding: 36px 16px; text-align: center; color: #687785; }
-        .phase2-tv-source { display: none; }
         .infra-dashboard .infra-refresh,
-        .phase2-desktop .priority-item > *,
-        .phase2-tv-source .device-name,
-        .phase2-tv-source .device-meta,
-        .phase2-tv-source .device-state { font-size: 12px; }
+        .phase2-desktop .priority-item > * { font-size: 12px; }
         .phase2-desktop .infra-button { min-height: 34px; font-size: 12px; }
         @media (max-width: 1200px) { .phase2-summary { grid-template-columns: repeat(4, 1fr); position: static; } .phase2-filters { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 760px) { .phase2-nav { position: static; overflow-x: auto; } .phase2-summary { grid-template-columns: repeat(2, 1fr); } .phase2-filters { grid-template-columns: 1fr; } .phase2-detail { grid-template-columns: 1fr; } .phase2-list { min-width: 850px; } .phase2-table-wrap { overflow-x: auto; } }
         body.tv-mode-active .phase2-nav, body.tv-mode-active .phase2-summary, body.tv-mode-active .phase2-desktop { display: none !important; }
-        body.tv-mode-active .phase2-tv-source { display: block; }
     </style>
 
     <nav class="phase2-nav phase2-desktop" aria-label="Dashboard views">
@@ -1932,9 +1927,6 @@
     @if($filters['tv'])
     <div class="tv-clear-slide" data-dashboard-section="__tv_clear__"><div class="tv-clear-icon"><i class="fa fa-check-circle" aria-hidden="true"></i></div><div class="tv-clear-title"></div><div class="tv-clear-subtitle"></div></div>
     <div class="tv-combined-slide" data-tv-combined-slide><header class="infra-section-header"><h2 class="infra-section-title"><i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i> Priority Attention — Full Fleet Rotation</h2><div class="infra-section-meta" data-tv-combined-meta></div></header><div class="tv-combined-grid" data-tv-combined-grid></div></div>
-    <div class="phase2-tv-source">
-        <section class="infra-section" data-dashboard-section="mdfServers"><header class="infra-section-header"><h2 class="infra-section-title">All Authorized Devices</h2><div class="infra-section-meta">{{ $summary['active_devices'] }} devices</div></header><div class="infra-section-body"><ul class="location-device-list">@foreach($allLocations as $location)@foreach($location['devices'] as $device)<li class="monitor-device device-row" data-health="{{ $device['health'] }}" data-problems="{{ implode(',', $device['problem_types']) }}"><div class="device-main"><i class="fa fa-circle {{ $device['status'] ? 'status-up' : 'status-down' }}" aria-hidden="true"></i><div class="device-name">{{ $device['name'] }}<div class="device-meta">{{ $location['name'] }} · {{ $device['category'] }} · {{ $cause($device) }}</div></div><span class="device-state">{{ $stateLabel($device) }}</span></div></li>@endforeach @endforeach</ul></div></section>
-    </div>
     @endif
 
     @if(false)
@@ -3375,13 +3367,6 @@ function initDashboard() {
     // `deviceMatches()`/`state` for exactly this reason; the
     // interactive view keeps using `state` unchanged.
     function tvDeviceMatches(device) {
-        // Phase 2's compact TV source is already the authorized fleet and is
-        // intentionally cheap to render. Keep every device in the rotation;
-        // sorting still places actionable Critical/Warning devices first.
-        if (device.closest('.phase2-tv-source')) {
-            return true;
-        }
-
         const health = device.dataset.health || 'healthy';
 
         if (!defaults[health]) {
