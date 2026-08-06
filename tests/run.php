@@ -567,4 +567,232 @@ $assert(
     'CI JavaScript actions use Node.js 24 runtimes'
 );
 
+// ---------------------------------------------------------------------
+// Phase 3: centralized severity/problem-type visibility policy, TV Mode
+// server-side filtering, checkbox-persistence regression coverage.
+// ---------------------------------------------------------------------
+
+// --- Section 7: unchecked-checkbox persistence must never silently
+// revert to a `true` default. --------------------------------------
+$assert(
+    Config::resolve(['default_severity_critical' => '0'])['default_severity_critical'] === false,
+    'checkbox regression: string "0" (unchecked, hidden-input value) resolves to false'
+);
+$assert(
+    Config::resolve(['default_severity_critical' => '1'])['default_severity_critical'] === true,
+    'checkbox regression: string "1" (checked) resolves to true'
+);
+$assert(
+    Config::resolve([])['default_severity_critical'] === true,
+    'checkbox regression: truly missing key falls back to the schema default (true for critical)'
+);
+$assert(
+    Config::resolve(['default_severity_healthy' => null])['default_severity_healthy'] === false,
+    'checkbox regression: explicit null falls back to the schema default (false for healthy)'
+);
+$assert(
+    Config::resolve(['default_severity_critical' => 'false'])['default_severity_critical'] === false,
+    'checkbox regression: literal string "false" resolves to false, not true'
+);
+$assert(
+    Config::resolve(['default_severity_critical' => false])['default_severity_critical'] === false,
+    'checkbox regression: PHP bool false resolves to false'
+);
+$assert(
+    Config::resolve(['default_severity_critical' => true])['default_severity_critical'] === true,
+    'checkbox regression: PHP bool true resolves to true'
+);
+
+// --- Section 2/13: Config::visibilityPolicy() is the single source of
+// truth; TV context can only ever be a subset of global context. -----
+$globalOffConfig = Config::resolve([
+    'default_severity_critical' => '1',
+    'default_severity_warning' => '1',
+    'default_severity_unknown' => '0',
+    'default_severity_stale' => '0',
+    'default_severity_maintenance' => '0',
+    'default_severity_healthy' => '0',
+    'default_severity_no_sensor' => '0',
+]);
+$globalPolicy = Config::visibilityPolicy($globalOffConfig, 'global');
+$tvPolicyNoRestrict = Config::visibilityPolicy($globalOffConfig, 'tv');
+$assert(
+    $globalPolicy['unknown'] === false
+        && $globalPolicy['stale'] === false
+        && $globalPolicy['maintenance'] === false
+        && $globalPolicy['healthy'] === false
+        && $globalPolicy['no_sensor'] === false,
+    'visibilityPolicy: globally-disabled severities resolve to false in global context'
+);
+$assert(
+    $tvPolicyNoRestrict === $globalPolicy,
+    'visibilityPolicy: TV context with no tv_hide_* set equals global context exactly (no silent extra restriction)'
+);
+
+$tvHideConfig = array_merge($globalOffConfig, [
+    'default_severity_critical' => '1',
+    'default_severity_healthy' => '1',
+    'tv_hide_healthy' => '1',
+]);
+$tvHidePolicy = Config::visibilityPolicy(Config::resolve($tvHideConfig), 'tv');
+$assert(
+    $tvHidePolicy['healthy'] === false && $tvHidePolicy['critical'] === true,
+    'visibilityPolicy: tv_hide_healthy restricts TV specifically while leaving Critical alone'
+);
+
+$attemptToReEnableConfig = Config::resolve([
+    'default_severity_critical' => '0',
+]);
+$reEnableAttemptPolicy = Config::visibilityPolicy($attemptToReEnableConfig, 'tv');
+$assert(
+    $reEnableAttemptPolicy['critical'] === false,
+    'visibilityPolicy: no tv_hide_* setting exists that can turn a globally-disabled Critical back on for TV'
+);
+
+// --- Sections 3/4/8/9: ProblemPolicy::deviceVisible() — the single
+// centralized decision Priority Attention and TV Mode's server-filtered
+// collections both consult. --------------------------------------------
+$criticalWarningOnlyPolicy = Config::visibilityPolicy(Config::resolve([
+    'default_severity_critical' => '1',
+    'default_severity_warning' => '1',
+    'default_severity_unknown' => '0',
+    'default_severity_stale' => '0',
+    'default_severity_maintenance' => '0',
+    'default_severity_healthy' => '0',
+    'default_severity_no_sensor' => '0',
+]), 'global');
+
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['device']], $criticalWarningOnlyPolicy) === true,
+    'Caso 1: Critical device is visible when Critical=ON'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'healthy', 'problem_types' => []], $criticalWarningOnlyPolicy) === false,
+    'Caso 1: Healthy device is excluded when Healthy=OFF — never shown "to fill a slide"'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'unknown', 'problem_types' => ['state']], $criticalWarningOnlyPolicy) === false,
+    'Caso 1: Unknown device is excluded when Unknown=OFF'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'maintenance', 'problem_types' => []], $criticalWarningOnlyPolicy) === false,
+    'Caso 1: Maintenance device is excluded when Maintenance=OFF (previously always tied to the Healthy toggle)'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'stale', 'problem_types' => []], $criticalWarningOnlyPolicy) === false,
+    'Caso 6: a device whose *worst state* is Stale is excluded when the Stale severity toggle is OFF'
+);
+
+// Caso 6: an old-but-still-critical reading must stay visible as
+// Critical — health is never coerced to 'stale' by staleness alone
+// (Severity::worst() already guarantees this; asserted again here at
+// the policy layer so the guarantee is visible from this test file).
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'stale']], $criticalWarningOnlyPolicy) === true,
+    'Caso 6: a Critical device remains visible via Critical=ON even though one of its problem_types is "stale"'
+);
+
+// Caso 8: No sensor installed — a device whose ONLY issue is a
+// no_sensor callout is healthy (no_sensor never becomes device
+// health), so it is governed by the Healthy/other toggle, never by
+// default_severity_no_sensor directly — that setting instead governs
+// the summary counter/callout visibility (Page.php consumes it there,
+// not inside deviceVisible()). Documented explicitly since it is the
+// one severity key that is not also a reachable device['health'] value.
+$assert(
+    array_key_exists('no_sensor', Config::FIELDS) === false
+        && array_key_exists('default_severity_no_sensor', Config::FIELDS),
+    'Caso 8: "No sensor installed" is a real setting key (default_severity_no_sensor), not a device health value'
+);
+
+// Problem-type gating (section 9): a device whose severity is enabled
+// but whose only present problem type is disabled must not be visible
+// via that type; it may still be visible via any other enabled type,
+// or via the "other" fallback when it has none.
+$mixedProblemPolicy = Config::visibilityPolicy(Config::resolve([
+    'default_severity_critical' => '1',
+    'default_problem_temperature' => '0',
+    'default_problem_battery' => '1',
+]), 'global');
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature']], $mixedProblemPolicy) === false,
+    'Section 9: a Critical device is not shown via a disabled problem type alone'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'battery']], $mixedProblemPolicy) === true,
+    'Section 9: the same device is shown once it also has an enabled problem type'
+);
+
+// The 'stale' collision: default_severity_stale (device-health
+// visibility) and default_problem_stale (does stale telemetry count as
+// a problem type at all) are two different settings sharing the word
+// "stale" — deviceVisible() must not conflate them.
+$staleCollisionPolicy = Config::visibilityPolicy(Config::resolve([
+    'default_severity_critical' => '1',
+    'default_severity_stale' => '0',
+    'default_problem_stale' => '1',
+]), 'global');
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['stale']], $staleCollisionPolicy) === true,
+    'stale collision: a Critical device with stale telemetry is visible via the problem-type toggle, independent of the severity toggle being off'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'stale', 'problem_types' => []], $staleCollisionPolicy) === false,
+    'stale collision: a device whose worst state IS Stale is still excluded when the severity toggle (not the problem-type one) is off'
+);
+
+// --- Section 2/6: single source of truth — no independent
+// re-derivation of the severity policy in Page.php, page.blade.php or
+// buildPriorityAttention(). ---------------------------------------------
+$pageSource = (string) file_get_contents($root . '/Page.php');
+$bladeSource = (string) file_get_contents($root . '/resources/views/page.blade.php');
+
+$assert(
+    str_contains($pageSource, 'ProblemPolicy::deviceVisible($device, $policy)')
+        && str_contains($pageSource, 'ProblemPolicy::deviceVisible($device, $tvPolicy)'),
+    'Page.php: Priority Attention and TV collections both consult the single centralized ProblemPolicy::deviceVisible() decision'
+);
+$assert(
+    str_contains($pageSource, "Config::visibilityPolicy(\$config, 'global')")
+        && str_contains($pageSource, "Config::visibilityPolicy(\$config, 'tv')"),
+    'Page.php: both policy contexts are built through Config::visibilityPolicy(), not hand-assembled inline'
+);
+$assert(
+    str_contains($bladeSource, 'Config::visibilityPolicy($config)'),
+    'page.blade.php: the JS `defaults` object is built from Config::visibilityPolicy(), not an independently hand-typed array — this is the exact class of drift that let TV Mode silently stop respecting Settings'
+);
+$assert(
+    ! preg_match('/\$tvDefaults\s*=\s*\[/', $bladeSource),
+    'page.blade.php: no independently hand-assembled $tvDefaults array remains'
+);
+$assert(
+    ! str_contains($bladeSource, 'phase2-tv-source'),
+    'page.blade.php: the removed .phase2-tv-source full-fleet, unfiltered TV rotation source does not exist'
+);
+
+// --- Section 5: TV Mode's own markup renders from the server-filtered
+// $tv[...] collections, not the unfiltered desktop collections. --------
+$assert(
+    str_contains($bladeSource, "\$filters['tv'] ? \$tv['mdfServers'] : \$mdf['servers']")
+        && str_contains($bladeSource, "\$filters['tv'] ? \$tv['idfLocations'] : \$locations")
+        && str_contains($bladeSource, "\$filters['tv'] ? \$tv['otherLocations'] : \$otherLocations"),
+    'page.blade.php: the shared MDF/IDF/Other Locations sections source from server-filtered $tv[...] collections in TV mode'
+);
+
+// --- Section 10: a defensive, worst-first, never-drops-Critical DOM
+// ceiling exists for TV Mode's flat device sections. --------------------
+$assert(
+    str_contains($pageSource, '$tvMdfServers->take($tvMaxDevices)')
+        && str_contains($pageSource, "\$tvPolicy['tvMaximumDevicesRendered']")
+        && array_key_exists('tv_maximum_devices_rendered', Config::FIELDS),
+    'Page.php: TV Mode device sections are bounded by a configurable, worst-first-sorted ceiling'
+);
+
+// --- Section 14: no TV-mode-scoped rule declares operational text
+// under 12px. -------------------------------------------------------
+$assert(
+    preg_match('/body\.tv-mode-active[^{]*\{\s*font-size:\s*(?:9|10|11)px/s', $bladeSource) === 0,
+    'page.blade.php: no body.tv-mode-active rule declares operational text under 12px'
+);
+
 exit($failures === 0 ? 0 : 1);
