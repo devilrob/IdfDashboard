@@ -978,6 +978,331 @@ class DeviceAccessTest extends TestCase
         );
     }
 
+    /**
+     * Casos A-F: real fixtures (one shared device set) exercised against
+     * six distinct Settings combinations, proving visibleSummary,
+     * priorityAttention and the tv.* collections stay consistent with
+     * each other and with the resolved policy — not four independent
+     * "is this severity shown" implementations that could drift apart.
+     * All devices live in one non-IDF/non-MDF location (so they land in
+     * $otherLocations/$tv['otherLocations']) except $healthyOnly, which
+     * gets its own dedicated all-healthy location for the Caso E
+     * "zero Healthy locations" assertion.
+     */
+    public function testCasosAToFRespectConfiguredSeverityPolicyAcrossSummaryPriorityAndTv(): void
+    {
+        $location = Location::factory()->create(['location' => 'Casos Fixture Main']);
+        $healthyOnlyLocation = Location::factory()->create(['location' => 'Casos Fixture Healthy Only']);
+
+        $critical = Device::factory()->create([
+            'display' => 'Caso Critical',
+            'hostname' => 'caso-critical.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($critical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient Temperature',
+            'sensor_current' => 90,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $warning = Device::factory()->create([
+            'display' => 'Caso Warning',
+            'hostname' => 'caso-warning.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($warning)->create([
+            'sensor_class' => 'humidity',
+            'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 75,
+            'sensor_limit' => 95,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $unknown = Device::factory()->create([
+            'display' => 'Caso Unknown',
+            'hostname' => 'caso-unknown.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        // A "state" sensor with no matching state_translations row: real
+        // LibreNMS 26.8 has no threshold columns for this class at all,
+        // so an untranslated value must resolve to Unknown, never a
+        // silent Healthy — see sensorState()'s own comment.
+        Sensor::factory()->for($unknown)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'System Status',
+            'sensor_current' => 9,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $maintenance = Device::factory()->create([
+            'display' => 'Caso Maintenance',
+            'hostname' => 'caso-maintenance.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 0,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $maintenanceSchedule = AlertSchedule::factory()->create([
+            'title' => 'Caso maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenanceSchedule->devices()->attach($maintenance->device_id);
+
+        // Role is derived from hostname/hardware/sysDescr containing the
+        // word "PDU" (see deviceRole()) — no explicit role column exists.
+        $noSensor = Device::factory()->create([
+            'display' => 'Caso PDU No Sensor',
+            'hostname' => 'caso-pdu-nosensor.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $stale = Device::factory()->create([
+            'display' => 'Caso PDU Stale',
+            'hostname' => 'caso-pdu-stale.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($stale)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'PDU Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now()->subDays(2),
+        ]);
+
+        $staleCritical = Device::factory()->create([
+            'display' => 'Caso PDU Stale Critical',
+            'hostname' => 'caso-pdu-stale-critical.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($staleCritical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'PDU Ambient Critical',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now()->subDays(2),
+        ]);
+
+        $healthy = Device::factory()->create([
+            'display' => 'Caso Healthy',
+            'hostname' => 'caso-healthy.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($healthy)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $healthyOnly = Device::factory()->create([
+            'display' => 'Caso Healthy Only',
+            'hostname' => 'caso-healthy-only.example.com',
+            'location_id' => $healthyOnlyLocation->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($healthyOnly)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        $run = function (array $settings, array $query = []) use ($user): array {
+            $request = Request::create('/plugin/IdfDashboard', 'GET', $query);
+            $request->setUserResolver(fn (): User => $user);
+
+            return (new Page())->data($settings, $request);
+        };
+
+        $otherLocationDevices = function (array $payload, bool $tv = true): \Illuminate\Support\Collection {
+            $source = $tv ? $payload['tv']['otherLocations'] : $payload['otherLocations'];
+
+            return collect($source)
+                ->flatMap(fn (array $group): mixed => $group['devices'])
+                ->keyBy('device_id');
+        };
+
+        // --- Caso A: Critical+Warning ON, everything else OFF ----------
+        $a = $run([
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(2, $a['visibleSummary']['critical_devices'], 'Caso A: critical (caso-critical + caso-pdu-stale-critical).');
+        $this->assertSame(1, $a['visibleSummary']['warning_devices']);
+        $this->assertSame(3, $a['visibleSummary']['devices'], 'Caso A: only critical/warning devices are visible.');
+        $visibleIdsA = collect($a['priorityAttention']['items'])->pluck('device_id')->all();
+        $this->assertEqualsCanonicalizing(
+            [$critical->device_id, $warning->device_id, $staleCritical->device_id],
+            $visibleIdsA,
+            'Caso A: Priority Attention shows exactly the critical/warning devices, nothing disabled.'
+        );
+        $tvDevicesA = $otherLocationDevices($a);
+        $this->assertEqualsCanonicalizing(
+            [$critical->device_id, $warning->device_id, $staleCritical->device_id],
+            $tvDevicesA->keys()->all(),
+            'Caso A: TV renders exactly the critical/warning devices.'
+        );
+        $this->assertTrue($tvDevicesA->every(fn (array $d): bool => in_array($d['health'], ['critical', 'warning'], true)));
+
+        // --- Caso B: Critical ON, Warning OFF ---------------------------
+        $b = $run([
+            'default_severity_warning' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(2, $b['visibleSummary']['critical_devices']);
+        $this->assertSame(0, $b['visibleSummary']['warning_devices']);
+        $this->assertSame(2, $b['visibleSummary']['devices']);
+        $tvDevicesB = $otherLocationDevices($b);
+        $this->assertEqualsCanonicalizing([$critical->device_id, $staleCritical->device_id], $tvDevicesB->keys()->all());
+        $this->assertTrue($tvDevicesB->every(fn (array $d): bool => $d['health'] === 'critical'));
+        $this->assertFalse(collect($b['priorityAttention']['items'])->contains('device_id', $warning->device_id));
+
+        // --- Caso C: Critical OFF, Warning ON ---------------------------
+        $c = $run([
+            'default_severity_critical' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(0, $c['visibleSummary']['critical_devices']);
+        $this->assertSame(1, $c['visibleSummary']['warning_devices']);
+        $this->assertSame(1, $c['visibleSummary']['devices']);
+        $tvDevicesC = $otherLocationDevices($c);
+        $this->assertEqualsCanonicalizing([$warning->device_id], $tvDevicesC->keys()->all());
+        $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $critical->device_id));
+        $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $staleCritical->device_id));
+
+        // --- Caso D: Healthy ON, everything else OFF --------------------
+        $d = $run([
+            'default_severity_critical' => '0',
+            'default_severity_warning' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_healthy' => '1',
+        ]);
+        $this->assertSame(0, $d['visibleSummary']['critical_devices']);
+        $this->assertSame(0, $d['visibleSummary']['warning_devices']);
+        // healthy, healthyOnly and noSensor (no_sensor never elevates
+        // health above healthy) are the only devices whose health is
+        // literally 'healthy'.
+        $this->assertSame(3, $d['visibleSummary']['devices'], 'Caso D: only the three Healthy-health devices are visible.');
+        $this->assertSame([], $d['priorityAttention']['items'], 'Caso D: Priority Attention is empty — Healthy devices have no actionable issue.');
+        $this->assertSame(0, $d['priorityAttention']['total']);
+        $tvDevicesD = $otherLocationDevices($d);
+        $this->assertEqualsCanonicalizing([$healthy->device_id, $noSensor->device_id], $tvDevicesD->keys()->all());
+        $this->assertTrue($tvDevicesD->every(fn (array $dv): bool => $dv['health'] === 'healthy'));
+        $tvIdfLocationsD = collect($d['tv']['idfLocations']);
+        $this->assertTrue($tvIdfLocationsD->isEmpty(), 'Caso D: fixture has no IDF-pattern locations.');
+
+        // --- Caso E: Problems only (per-viewer) + healthy locations OFF -
+        $eLocations = $run(
+            ['show_healthy_locations' => '0'],
+            ['view' => 'locations']
+        );
+        $locationNamesE = collect($eLocations['viewData']['locations']['items'] ?? [])->pluck('name')->all();
+        $this->assertNotContains(
+            'Casos Fixture Healthy Only',
+            $locationNamesE,
+            'Caso E: an all-Healthy location is hidden when show_healthy_locations is off.'
+        );
+        $eDevices = $run(
+            ['show_healthy_locations' => '0'],
+            ['view' => 'devices', 'problems_only' => '1', 'per_page' => 100]
+        );
+        $deviceNamesE = collect($eDevices['viewData']['devices']['items'] ?? [])->pluck('device_id')->all();
+        $this->assertNotContains($healthy->device_id, $deviceNamesE, 'Caso E: problems_only excludes the plain Healthy device.');
+        $this->assertNotContains($healthyOnly->device_id, $deviceNamesE, 'Caso E: problems_only excludes the dedicated healthy-only device.');
+        $this->assertNotContains($noSensor->device_id, $deviceNamesE, 'Caso E: problems_only excludes the no-sensor (healthy) device.');
+        $this->assertContains($critical->device_id, $deviceNamesE, 'Caso E: a genuinely unhealthy device remains visible.');
+
+        // --- Caso F: Stale (data quality) problem type OFF --------------
+        $f = $run(['default_problem_stale' => '0']);
+        $tvDevicesF = $otherLocationDevices($f);
+        $this->assertSame(
+            'healthy',
+            $tvDevicesF->get($stale->device_id)['health'],
+            'Caso F: a stale-but-otherwise-healthy PDU reading is hidden entirely (not shown as Stale, not elevated) when Stale is off.'
+        );
+        $this->assertSame(
+            'critical',
+            $tvDevicesF->get($staleCritical->device_id)['health'],
+            'Caso F: an old-but-critical reading still shows Critical even when Stale is off.'
+        );
+        $this->assertTrue(
+            $tvDevicesF->get($staleCritical->device_id)['issues']->contains(
+                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'temperature'
+            )
+        );
+        // Baseline: with default_problem_stale left on (the default), the
+        // same reading elevates the device to Stale, proving Caso F's
+        // "hidden" result above is a real effect of the setting, not the
+        // fixture always producing Healthy regardless.
+        $baseline = $run([]);
+        $tvDevicesBaseline = $otherLocationDevices($baseline);
+        $this->assertSame('stale', $tvDevicesBaseline->get($stale->device_id)['health']);
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
