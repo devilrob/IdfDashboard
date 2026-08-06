@@ -2,6 +2,61 @@
 
 All notable changes follow semantic versioning.
 
+## [1.2.0] - 2026-08-06
+
+### Added
+
+- Server-side navigation: `Overview` (unchanged, now default), paginated
+  `Locations` and `Devices` lists, and deep-linkable `location`/`device`
+  detail views, all built from `Support\DeviceAccess::query($user)` with no
+  separate authorization path.
+- Search, severity/category filters, and a whitelisted `sort`/`direction`
+  contract for the `Devices` list.
+- Defensive pagination (`page`/`per_page`, clamped, never errors on
+  out-of-range input) so `Devices`/`Locations`/`location` HTML stays bounded
+  regardless of fleet size.
+- New Settings group `Navigation & Lists`: `default_view`,
+  `devices_per_page`, `show_healthy_locations`, `maximum_priority_issues`,
+  `default_problems_only`.
+- `Support\DeviceClassifier::CATEGORIES` constant exposing the supported
+  device-classification categories.
+- Real LibreNMS 26.8 + MariaDB 11.7 integration test
+  (`tests/Feature/Plugins/IdfDashboard/DeviceAccessTest.php`) covering
+  admin/global-read/limited/no-access authorization, authorized vs.
+  unauthorized deep links, search, pagination isolation, maintenance
+  inheritance, and a representative small/medium/large performance fixture.
+- CI now runs that integration test and a dedicated small/medium/large
+  performance matrix (20/500, 200/6,000 and 1,000/30,000 devices/sensors)
+  against real LibreNMS + MariaDB on every pull request and on `main`; the
+  release job requires all of it to pass.
+
+### Changed
+
+- Deep links to an unauthorized or nonexistent device/location return no
+  data or metadata (`found: false`), never a generic error that could
+  imply existence.
+
+### Known limitations
+
+- `Overview` and `TV` intentionally render every authorized location (TV
+  rotation needs the full set to cycle through two devices per card at a
+  time), so their HTML/DOM size grows with total fleet size rather than
+  staying bounded like the paginated views. Measured at 1,000 devices /
+  30,000 sensors: `TV` reached 474,531 bytes / 6,168 DOM nodes, versus
+  131,007 bytes / 563 nodes for the paginated `Devices` view at the same
+  scale. Still well under the 1 MiB per-view ceiling and no query-count or
+  timing regression (query count stayed fixed at 40 across all three
+  scales), but a real characteristic worth tracking for very large
+  deployments.
+- Some operational text (`.priority-cause`, `.device-state`,
+  `.service-issue`) declares a 9–11px font-size in its base CSS rule,
+  outside any `@media` breakpoint, so it is not gated to narrow viewports
+  only. Confirmed by static analysis of real rendered HTML from the passing
+  integration test; not yet confirmed against a live rendered browser at the
+  documented viewports (1366×768, 1440×900, 1920×1080, 1024×768 tablet,
+  TV 1920×1080), which was not possible in the environment that prepared
+  this release.
+
 ## [1.1.0] - 2026-08-05
 
 ### Added

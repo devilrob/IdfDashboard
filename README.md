@@ -31,6 +31,32 @@ Desktop and TV views share these structures while TV limits content, preserves
 12 px minimum operational text and reports connection, refresh and last-update
 state without additional polling.
 
+## Navigation (v1.2.0)
+
+v1.2.0 adds server-side views on top of the same authorized-device model.
+Every view is built from `Support\DeviceAccess::query($user)`; nothing bypasses
+it, and an unauthorized or nonexistent `id` in a deep link returns no data or
+metadata rather than a generic error.
+
+- **Overview** — unchanged summary and Priority Attention, now the default
+  landing view.
+- **Locations** and **Devices** — paginated (`devices_per_page`, default 25),
+  searchable, filterable (severity/category), whitelisted-sort lists of every
+  authorized location or device.
+- **Location** and **Device** detail — deep-linkable single-item views
+  (`?view=location&id=…`, `?view=device&id=…`).
+- New Settings group **Navigation & Lists**: `default_view`,
+  `devices_per_page`, `show_healthy_locations`, `maximum_priority_issues`,
+  `default_problems_only`.
+
+Pagination keeps rendered HTML bounded regardless of fleet size: the paginated
+views stay near their base size at every measured scale (20/500 devices to
+1,000/30,000 sensors). `Overview` and `TV` intentionally render every
+authorized location so TV rotation has the full set to cycle through; at large
+fleet scale this makes their HTML/DOM larger than the paginated views, even
+though TV limits on-screen content to two devices per rotating card. See
+`CHANGELOG.md` for the exact measured numbers and other known limitations.
+
 ## Stable updates
 
 The web Settings page performs a cached, read-only check of stable semantic
@@ -125,9 +151,12 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.1.0`. GitHub Actions validates the tag/version match, runs PHP
-and JavaScript checks, builds the minimal plugin ZIP, generates `SHA256SUMS`,
-and publishes both assets to the stable GitHub release.
+tag such as `v1.2.0`. GitHub Actions validates the tag/version match, runs the
+PHP 8.2/8.3/8.4 standalone matrix, the real LibreNMS 26.8 + MariaDB integration
+test, and the small/medium/large performance matrix; the release job only
+publishes once all of those succeed. It then builds the minimal plugin ZIP,
+generates `SHA256SUMS`, and publishes both assets to the stable GitHub
+release.
 
 ## LibreNMS authorization integration test
 
