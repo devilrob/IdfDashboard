@@ -787,6 +787,38 @@ $assert(
         && array_key_exists('tv_maximum_devices_rendered', Config::FIELDS),
     'Page.php: TV Mode device sections are bounded by a configurable, worst-first-sorted ceiling'
 );
+// Behavioral resolution/clamping for tv_maximum_devices_rendered itself
+// (default/min/max/invalid-value normalization) is pure Config::resolve()
+// logic and fully testable without a real LibreNMS instance. The
+// remaining checklist items this doesn't cover — omittedDeviceCount
+// correctness, worst-first truncation order (Critical never dropped to
+// fit Healthy), and "Healthy only included if policy allows" — require
+// Page::data()'s full pipeline and live in
+// tests/librenms/DeviceAccessTest.php's dedicated TV-ceiling test.
+$assert(
+    Config::resolve([])['tv_maximum_devices_rendered'] === 200,
+    'Config::resolve: tv_maximum_devices_rendered defaults to 200 when unset'
+);
+$assert(
+    Config::resolve(['tv_maximum_devices_rendered' => '3'])['tv_maximum_devices_rendered'] === 10,
+    'Config::resolve: tv_maximum_devices_rendered below the safe minimum (10) is clamped up, never silently accepted or dropped'
+);
+$assert(
+    Config::resolve(['tv_maximum_devices_rendered' => '999999'])['tv_maximum_devices_rendered'] === 2000,
+    'Config::resolve: tv_maximum_devices_rendered above the defensive maximum (2000) is clamped down'
+);
+$assert(
+    Config::resolve(['tv_maximum_devices_rendered' => 'not-a-number'])['tv_maximum_devices_rendered'] === 200,
+    'Config::resolve: a non-numeric tv_maximum_devices_rendered falls back to the default, never to 0 or an unbounded value'
+);
+$assert(
+    Config::resolve(['tv_maximum_devices_rendered' => ''])['tv_maximum_devices_rendered'] === 200,
+    'Config::resolve: a blank tv_maximum_devices_rendered falls back to the default'
+);
+$assert(
+    Config::visibilityPolicy(Config::resolve(['tv_maximum_devices_rendered' => '50']), 'tv')['tvMaximumDevicesRendered'] === 50,
+    'Config::visibilityPolicy: tvMaximumDevicesRendered reflects the resolved (already-clamped) value, not the raw input'
+);
 
 // --- Section 14: no TV-mode-scoped rule declares operational text
 // under 12px. -------------------------------------------------------

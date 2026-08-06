@@ -1303,6 +1303,133 @@ class DeviceAccessTest extends TestCase
         $this->assertSame('stale', $tvDevicesBaseline->get($stale->device_id)['health']);
     }
 
+    /**
+     * The tv_maximum_devices_rendered ceiling only bounds the three flat
+     * MDF device sections (tv.mdfServers/mdfPower/mdfInfrastructure) —
+     * tv.idfLocations/otherLocations are location-grouped and are not
+     * subject to this cap. With 5 MDF Server-category devices (2
+     * Critical, 1 Warning, 2 Healthy) and a ceiling of 3, exactly the 2
+     * Critical + 1 Warning devices must survive (worst-first truncation
+     * — a Critical device can never be dropped to fit a Healthy one),
+     * omittedDeviceCount must report the 2 that didn't fit, and the
+     * ceiling itself must apply per section independently, not as one
+     * combined budget across all three MDF sections.
+     */
+    public function testTvMaximumDevicesRenderedTruncatesWorstFirstAndReportsOmittedCount(): void
+    {
+        $mdf = Location::factory()->create(['location' => 'MDF']);
+
+        $makeServer = function (string $hostname) use ($mdf): Device {
+            return Device::factory()->create([
+                'display' => $hostname,
+                'hostname' => $hostname,
+                'location_id' => $mdf->id,
+                'type' => 'server',
+                'status' => 1,
+                'disabled' => 0,
+                'ignore' => 0,
+            ]);
+        };
+
+        $critical1 = $makeServer('tv-ceiling-critical-1.example.com');
+        Sensor::factory()->for($critical1)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $critical2 = $makeServer('tv-ceiling-critical-2.example.com');
+        Sensor::factory()->for($critical2)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 96, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $warning = $makeServer('tv-ceiling-warning.example.com');
+        Sensor::factory()->for($warning)->create([
+            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $healthy1 = $makeServer('tv-ceiling-healthy-1.example.com');
+        Sensor::factory()->for($healthy1)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 20, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $healthy2 = $makeServer('tv-ceiling-healthy-2.example.com');
+        Sensor::factory()->for($healthy2)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 21, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        // default_severity_healthy is turned on so the two Healthy
+        // devices genuinely compete for a truncated slot — with it left
+        // at its default (off), they would never reach the pre-
+        // truncation collection at all, making the "never drops
+        // Critical to fit Healthy" assertion vacuous.
+        $payload = (new Page())->data([
+            'tv_maximum_devices_rendered' => '3',
+            'default_severity_healthy' => '1',
+        ], $request);
+
+        $this->assertSame(5, $payload['mdf']['server_count'], 'Desktop MDF Servers section remains the full, unfiltered/untruncated set.');
+        $this->assertCount(3, $payload['tv']['mdfServers'], 'TV MDF Servers is truncated to the configured ceiling.');
+        $this->assertSame(2, $payload['tv']['omittedDeviceCount'], 'Exactly the 2 devices that did not fit are reported, never silently dropped.');
+
+        $renderedHealths = collect($payload['tv']['mdfServers'])->pluck('health')->all();
+        $this->assertEqualsCanonicalizing(
+            ['critical', 'critical', 'warning'],
+            $renderedHealths,
+            'Worst-first truncation keeps both Critical devices and the Warning device; neither Healthy device displaces them.'
+        );
+        $this->assertFalse(
+            collect($payload['tv']['mdfServers'])->contains('device_id', $healthy1->device_id),
+            'A Critical device is never dropped from the rendered set to make room for a Healthy one.'
+        );
+        $this->assertFalse(collect($payload['tv']['mdfServers'])->contains('device_id', $healthy2->device_id));
+
+        // A default ceiling (200) comfortably fits all 5 — proves the
+        // truncation above is a real effect of the low configured
+        // ceiling, not something that always happens regardless.
+        $unbounded = (new Page())->data(['default_severity_healthy' => '1'], $request);
+        $this->assertCount(5, $unbounded['tv']['mdfServers']);
+        $this->assertSame(0, $unbounded['tv']['omittedDeviceCount']);
+
+        // The ceiling is per-section, not one shared budget: a second
+        // MDF Power device at the same low ceiling must not be affected
+        // by mdfServers already being full.
+        $power = Device::factory()->create([
+            'display' => 'TV Ceiling Power',
+            'hostname' => 'tv-ceiling-power.example.com',
+            'location_id' => $mdf->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($power)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        $withPower = (new Page())->data([
+            'tv_maximum_devices_rendered' => '3',
+            'default_severity_healthy' => '1',
+        ], $request);
+        $this->assertCount(3, $withPower['tv']['mdfServers'], 'mdfServers ceiling is unaffected by mdfPower having its own device.');
+        $this->assertCount(1, $withPower['tv']['mdfPower'], 'mdfPower has its own independent budget under the same ceiling.');
+        $this->assertSame(2, $withPower['tv']['omittedDeviceCount'], 'omittedDeviceCount sums across sections but mdfPower contributed zero (1 device, ceiling 3).');
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
