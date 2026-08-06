@@ -19,7 +19,7 @@
 
     .infra-refresh {
         color: #777;
-        font-size: 11px;
+        font-size: 12px;
         text-align: right;
     }
 
@@ -72,7 +72,7 @@
 
     .infra-visible-count {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         margin-left: 4px;
     }
 
@@ -216,7 +216,7 @@
 
     .priority-count {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
         text-transform: none;
     }
@@ -267,7 +267,7 @@
     }
 
     .priority-severity {
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
     }
 
@@ -290,7 +290,7 @@
     .priority-location,
     .priority-role {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         text-transform: uppercase;
@@ -306,7 +306,7 @@
     }
 
     .priority-cause {
-        font-size: 11px;
+        font-size: 12px;
         line-height: 1.35;
         overflow-wrap: anywhere;
         white-space: normal;
@@ -314,7 +314,7 @@
 
     .priority-since {
         color: #888;
-        font-size: 10px;
+        font-size: 12px;
         text-align: right;
         white-space: nowrap;
     }
@@ -375,13 +375,13 @@
 
     body.tv-mode-active .priority-cause {
         color: #e6ecf6;
-        font-size: 13px;
+        font-size: 14px;
     }
 
     body.tv-mode-active .priority-location,
     body.tv-mode-active .priority-role,
     body.tv-mode-active .priority-since {
-        font-size: 11px;
+        font-size: 12px;
     }
 
     .infra-section {
@@ -483,7 +483,7 @@
     .health-pill {
         border-radius: 12px;
         color: #fff;
-        font-size: 9px;
+        font-size: 12px;
         font-weight: 700;
         padding: 3px 7px;
         text-transform: uppercase;
@@ -514,7 +514,7 @@
     .location-counts {
         border-bottom: 1px solid #eee;
         color: #777;
-        font-size: 9px;
+        font-size: 12px;
         padding: 5px 8px;
     }
 
@@ -570,7 +570,7 @@
 
     .device-name a {
         display: block;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -579,14 +579,14 @@
 
     .device-meta {
         color: #888;
-        font-size: 9px;
+        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
 
     .device-state {
-        font-size: 9px;
+        font-size: 12px;
         font-weight: 700;
         text-transform: uppercase;
     }
@@ -625,7 +625,7 @@
         align-items: center;
         justify-content: space-between;
         gap: 7px;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
     }
 
@@ -638,7 +638,7 @@
 
     .device-card-meta {
         color: #777;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 3px;
     }
 
@@ -662,7 +662,7 @@
         background: #f3f5f6;
         border: 1px solid #dfe3e5;
         border-radius: 3px;
-        font-size: 9px;
+        font-size: 12px;
         padding: 3px 5px;
     }
 
@@ -778,13 +778,13 @@
     }
 
     .service-summary {
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 5px;
     }
 
     .service-issue {
         border-top: 1px solid #eee;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 5px;
         padding-top: 5px;
     }
@@ -804,7 +804,7 @@
 
     .recent-event-line {
         color: #888;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 4px;
     }
 
@@ -1250,7 +1250,7 @@
     }
 
     body.tv-mode-active .infra-section-meta {
-        font-size: 11px;
+        font-size: 12px;
     }
 
     body.tv-mode-active .location-grid,
@@ -1620,38 +1620,18 @@
      * whatever Settings currently says, matching how `state` already
      * self-corrects via `settingsVersion` — see loadPersistedState().
      */
-    $tvDefaults = [
-        'critical' => (bool) $config['default_severity_critical'],
-        'warning' => (bool) $config['default_severity_warning'],
-        'unknown' => (bool) $config['default_severity_unknown'],
-        'healthy' => (bool) $config['default_severity_healthy'],
-
-        'temperature' => (bool) $config['default_problem_temperature'],
-        'humidity' => (bool) $config['default_problem_humidity'],
-        'battery' => (bool) $config['default_problem_battery'],
-        'voltage' => (bool) $config['default_problem_voltage'],
-        'fan' => (bool) $config['default_problem_fan'],
-        'device' => (bool) $config['default_problem_device'],
-        'service' => (bool) $config['default_problem_service'],
-        'alert' => (bool) $config['default_problem_alert'],
-        'state' => (bool) $config['default_problem_state'],
-        'storage' => (bool) $config['default_problem_storage'],
-        'memory' => (bool) $config['default_problem_memory'],
-        'processor' => (bool) $config['default_problem_processor'],
-        'stale' => (bool) $config['default_problem_stale'],
-        'other' => (bool) $config['default_problem_other'],
-
-        'priority' => (bool) $config['default_section_priority'],
-        'coverage' => (bool) $config['default_section_coverage'],
-        'summary' => (bool) $config['default_section_summary'],
-        'mdfServers' => (bool) $config['default_section_mdfServers'],
-        'mdfPower' => (bool) $config['default_section_mdfPower'],
-        'mdfInfrastructure' => (bool) $config['default_section_mdfInfrastructure'],
-        'idf' => (bool) $config['default_section_idf'],
-        'otherLocations' => (bool) $config['default_section_otherLocations'],
-
-        'tvSlideSeconds' => (int) $config['tv_default_slide_seconds'],
-    ];
+    // Single source of truth (Support/Config::visibilityPolicy()) —
+    // previously this array was hand-typed here independently of the
+    // equivalent list Page.php now also needs for server-side TV
+    // filtering, which is exactly the kind of two-source drift that
+    // let TV Mode silently stop respecting Settings. 'global' context:
+    // this `defaults` object backs desktop's session-local `state`
+    // (which starts from it and can diverge per viewer) and TV Mode's
+    // own defense-in-depth re-check — the actual TV-specific
+    // `tv_hide_*` restriction enforcement happens server-side in
+    // Page.php's $tvPolicy, so a device this array still marks visible
+    // can never appear in TV's DOM if $tvPolicy already excluded it.
+    $tvDefaults = \App\Plugins\IdfDashboard\Support\Config::visibilityPolicy($config);
 
 @endphp
 
@@ -2327,6 +2307,28 @@
         No devices match the selected filters.
     </div>
 
+    @php
+        // TV Mode renders this shared section markup from the
+        // server-filtered $tv[...] collections (Config::visibilityPolicy()
+        // + ProblemPolicy::deviceVisible(), computed once in Page::data());
+        // the interactive desktop view keeps the full authorized set so
+        // its own state/deviceMatches() session-local filtering still has
+        // everything to filter from — see the comment on $tvVisible in
+        // Page.php for why these two are deliberately not the same set.
+        $sectionMdfServers = $filters['tv'] ? $tv['mdfServers'] : $mdf['servers'];
+        $sectionMdfServerCount = $filters['tv'] ? $tv['mdfServers']->count() : $mdf['server_count'];
+        $sectionMdfPower = $filters['tv'] ? $tv['mdfPower'] : $mdf['power'];
+        $sectionMdfPowerCount = $filters['tv'] ? $tv['mdfPower']->count() : $mdf['power_count'];
+        $sectionMdfInfrastructure = $filters['tv'] ? $tv['mdfInfrastructure'] : $mdf['infrastructure'];
+        $sectionMdfInfrastructureCount = $filters['tv'] ? $tv['mdfInfrastructure']->count() : $mdf['infrastructure_count'];
+        $sectionIdfLocations = $filters['tv'] ? $tv['idfLocations'] : $locations;
+        $sectionIdfLocationCount = $filters['tv'] ? $tv['idfLocations']->count() : $summary['idf_locations'];
+        $sectionIdfDeviceCount = $filters['tv'] ? $tv['idfLocations']->sum('total') : $summary['idf_devices'];
+        $sectionOtherLocations = $filters['tv'] ? $tv['otherLocations'] : $otherLocations;
+        $sectionOtherLocationCount = $filters['tv'] ? $tv['otherLocations']->count() : $summary['other_locations'];
+        $sectionOtherDeviceCount = $filters['tv'] ? $tv['otherLocations']->sum('total') : $summary['other_devices'];
+    @endphp
+
     <section
         class="infra-section"
         data-dashboard-section="mdfServers"
@@ -2338,13 +2340,13 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['server_count'] }} devices
+                {{ $sectionMdfServerCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['servers'] as $device)
+                @foreach($sectionMdfServers as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2406,13 +2408,13 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['power_count'] }} PDU/UPS devices
+                {{ $sectionMdfPowerCount }} PDU/UPS devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['power'] as $device)
+                @foreach($sectionMdfPower as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2454,14 +2456,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['infrastructure_count'] }}
+                {{ $sectionMdfInfrastructureCount }}
                 network, firewall, wireless and management devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['infrastructure'] as $device)
+                @foreach($sectionMdfInfrastructure as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2504,14 +2506,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $summary['idf_locations'] }} locations ·
-                {{ $summary['idf_devices'] }} devices
+                {{ $sectionIdfLocationCount }} locations ·
+                {{ $sectionIdfDeviceCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="location-grid">
-                @foreach($locations as $location)
+                @foreach($sectionIdfLocations as $location)
                     <section
                         class="location-card health-{{ $location['health'] }}"
                         data-location-card
@@ -2592,14 +2594,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $summary['other_locations'] }} locations ·
-                {{ $summary['other_devices'] }} devices
+                {{ $sectionOtherLocationCount }} locations ·
+                {{ $sectionOtherDeviceCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="location-grid">
-                @foreach($otherLocations as $location)
+                @foreach($sectionOtherLocations as $location)
                     <section
                         class="location-card health-{{ $location['health'] }}"
                         data-location-card
@@ -3009,12 +3011,20 @@ function initDashboard() {
             .filter(Boolean);
     }
 
+    // 'stale' is deliberately two different config keys under one JS
+    // object: state.stale/defaults.stale is the *severity* toggle (is a
+    // device whose worst state is Stale shown at all), while a device's
+    // own problem_types can independently contain the string 'stale'
+    // meaning "this device has some stale telemetry" (state.problem_stale
+    // / Support/Config::FIELDS' default_problem_stale) — same word, two
+    // policy questions. See Support/ProblemPolicy::deviceVisible()'s
+    // identical mapping on the PHP side.
+    function problemPolicyKey(problem) {
+        return problem === 'stale' ? 'problem_stale' : problem;
+    }
+
     function deviceMatches(device) {
         const health = device.dataset.health || 'healthy';
-
-        if (health === 'maintenance') {
-            return Boolean(state.healthy);
-        }
 
         if (!state[health]) {
             return false;
@@ -3031,7 +3041,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(state[problem]);
+            return Boolean(state[problemPolicyKey(problem)]);
         });
     }
 
@@ -3077,7 +3087,7 @@ function initDashboard() {
             return Boolean(state[filterKey]);
         }
 
-        if (isStale && metricState === 'healthy' && !state.stale) {
+        if (isStale && metricState === 'healthy' && !state.problem_stale) {
             return false;
         }
 
@@ -3384,7 +3394,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(defaults[problem]);
+            return Boolean(defaults[problemPolicyKey(problem)]);
         });
     }
 

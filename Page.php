@@ -179,6 +179,17 @@ class Page extends PageHook
         ];
 
         /*
+         * The single centralized visibility decision (Support/
+         * ProblemPolicy::deviceVisible()) both Priority Attention and
+         * TV Mode's server-filtered collections now consult, instead of
+         * severity display policy living only in Blade-embedded
+         * JavaScript. `$tvPolicy` additionally intersects the `tv_hide_*`
+         * restrictions and can only ever be a subset of `$policy`.
+         */
+        $policy = Config::visibilityPolicy($config, 'global');
+        $tvPolicy = Config::visibilityPolicy($config, 'tv');
+
+        /*
          * Load every active LibreNMS device authorized by the core
          * Device::hasAccess() scope. No authorized location or device
          * type is silently excluded; every downstream table is then
@@ -456,6 +467,51 @@ class Page extends PageHook
         $otherLocations = $this->buildLocationGroups($otherDevices);
 
         /*
+         * TV Mode's own collections, filtered server-side through the
+         * exact same $tvPolicy every other TV consumer (Priority
+         * Attention, future views) uses — the browser never receives a
+         * Healthy/disabled-severity device's markup for TV at all
+         * (bounding TV's DOM/HTML size), and TV's JS-side
+         * tvDeviceMatches() check on top of this is now pure defense in
+         * depth against a stale client-side settings cache, not the
+         * only enforcement point. Desktop's own $idfLocations/
+         * $otherLocations/$mdfServers/etc. above are deliberately left
+         * as the full authorized set — desktop's "Problems only"/"View
+         * all" toggle is a genuine per-viewer *session* override (see
+         * settings.blade.php's own header text), which only makes sense
+         * against an unfiltered base collection.
+         */
+        $tvVisible = fn (array $device): bool => ProblemPolicy::deviceVisible($device, $tvPolicy);
+
+        $tvIdfDevices = $idfDevices->filter($tvVisible)->values();
+        $tvIdfLocations = $this->buildLocationGroups($tvIdfDevices);
+
+        $tvOtherDevices = $otherDevices->filter($tvVisible)->values();
+        $tvOtherLocations = $this->buildLocationGroups($tvOtherDevices);
+
+        $tvMdfServers = $this->sortDevices($mdfServers->filter($tvVisible)->values());
+        $tvMdfPower = $this->sortDevices($mdfPower->filter($tvVisible)->values());
+        $tvMdfInfrastructure = $this->sortDevices($mdfInfrastructure->filter($tvVisible)->values());
+
+        /*
+         * Defensive DOM-size ceiling: even after severity filtering, a
+         * very large fleet with everything enabled could still exceed
+         * what a TV screen should ever render into the page at once.
+         * Truncation always happens worst-severity-first (sortDevices()
+         * / buildLocationGroups() already order that way), so a
+         * Critical/Warning device is never pushed out by a
+         * lower-severity one that fits — the omitted remainder is
+         * reported as a count, never silently dropped from the fleet.
+         */
+        $tvMaxDevices = max(1, $tvPolicy['tvMaximumDevicesRendered']);
+        $tvOmittedDeviceCount = max(0, $tvMdfServers->count() - $tvMaxDevices)
+            + max(0, $tvMdfPower->count() - $tvMaxDevices)
+            + max(0, $tvMdfInfrastructure->count() - $tvMaxDevices);
+        $tvMdfServers = $tvMdfServers->take($tvMaxDevices)->values();
+        $tvMdfPower = $tvMdfPower->take($tvMaxDevices)->values();
+        $tvMdfInfrastructure = $tvMdfInfrastructure->take($tvMaxDevices)->values();
+
+        /*
          * Real monitoring-coverage audit.
          *
          * This intentionally replaces the previous "coverage" metric,
@@ -550,8 +606,17 @@ class Page extends PageHook
             ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
             ->count();
 
+        /*
+         * Priority Attention now consults the same centralized policy
+         * TV Mode does — previously it filtered purely on each issue's
+         * fixed Severity::metadata()['actionable'] flag, so disabling
+         * "Needs Review" (Unknown) in Settings had no effect here even
+         * though it correctly hid those devices from TV: two different
+         * sources of truth for the same "is this severity shown"
+         * question, exactly what a single policy is meant to prevent.
+         */
         $priorityAttention = $this->buildPriorityAttention(
-            $devices,
+            $devices->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))->values(),
             (int) $config['maximum_priority_issues']
         );
         $allLocations = $this->buildLocationGroups($devices);
@@ -617,6 +682,23 @@ class Page extends PageHook
 
                 'infrastructure' => $mdfInfrastructure,
                 'infrastructure_count' => $mdfInfrastructure->count(),
+            ],
+
+            /*
+             * TV Mode's own, already-Settings-filtered collections (see
+             * $tvVisible above). TV Mode must render from these, never
+             * from the unfiltered 'locations'/'otherLocations'/'mdf'
+             * keys above — that unfiltered path is what let TV silently
+             * show devices outside the configured severity policy.
+             */
+            'tv' => [
+                'idfLocations' => $tvIdfLocations,
+                'otherLocations' => $tvOtherLocations,
+                'mdfServers' => $tvMdfServers,
+                'mdfPower' => $tvMdfPower,
+                'mdfInfrastructure' => $tvMdfInfrastructure,
+                'omittedDeviceCount' => $tvOmittedDeviceCount,
+                'policy' => $tvPolicy,
             ],
 
             'summary' => [

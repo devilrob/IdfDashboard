@@ -41,6 +41,12 @@ class Config
             'group' => 'timing',
             'help' => 'Default time each TV Mode slide stays on screen before rotating to the next one.',
         ],
+        'tv_maximum_devices_rendered' => [
+            'type' => 'int', 'default' => 200, 'min' => 10, 'max' => 2000,
+            'label' => 'TV Mode maximum devices rendered (defensive ceiling)',
+            'group' => 'timing',
+            'help' => 'A defensive cap on how many already-Settings-filtered, worst-severity-first devices TV Mode renders into the page at all. Never drops a Critical/Warning device ahead of a lower-severity one that fits; the remainder past this ceiling is reported as a count, never silently dropped.',
+        ],
 
         // --- Thresholds ---------------------------------------------
         'battery_critical_percent' => [
@@ -128,7 +134,15 @@ class Config
         'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
         'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],
         'default_severity_unknown' => ['type' => 'bool', 'default' => true, 'label' => 'Needs Review', 'group' => 'severity', 'help' => 'A state sensor whose current value has no known translation — never confirmed healthy, never guessed at as a real problem either.'],
+        'default_severity_stale' => ['type' => 'bool', 'default' => true, 'label' => 'Stale (data quality)', 'group' => 'severity', 'help' => 'A device whose worst state is a stale-but-otherwise-healthy curated power reading (see "Stale data" under Problem Types for whether stale evidence counts toward severity at all).'],
+        'default_severity_maintenance' => ['type' => 'bool', 'default' => true, 'label' => 'Maintenance', 'group' => 'severity', 'help' => 'A device currently in a LibreNMS-scheduled maintenance window with no other active issue.'],
         'default_severity_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Healthy', 'group' => 'severity', 'help' => ''],
+        'default_severity_no_sensor' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'No sensor installed',
+            'group' => 'severity',
+            'help' => 'Controls only the "No sensor installed" counter/callouts, not device severity — a device with no curated sensor is never Critical/Warning by itself.',
+        ],
 
         // --- Default Problem types shown on load -----------------------
         'default_problem_temperature' => ['type' => 'bool', 'default' => true, 'label' => 'Temperature', 'group' => 'problem', 'help' => ''],
@@ -160,6 +174,17 @@ class Config
         'default_section_mdfInfrastructure' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Infrastructure', 'group' => 'section', 'help' => ''],
         'default_section_idf' => ['type' => 'bool', 'default' => true, 'label' => 'IDF Locations', 'group' => 'section', 'help' => ''],
         'default_section_otherLocations' => ['type' => 'bool', 'default' => true, 'label' => 'Other Locations', 'group' => 'section', 'help' => ''],
+
+        // --- TV Mode additional restrictions -----------------------------
+        // These can only ever remove something the global severity policy
+        // above already allows; there is deliberately no TV setting that
+        // can re-enable a severity the global policy has turned off. See
+        // Config::visibilityPolicy()'s "$globallyEnabled &&" intersection.
+        'tv_hide_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Healthy in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
+        'tv_hide_unknown' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Needs Review in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
+        'tv_hide_stale' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Stale in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
+        'tv_hide_maintenance' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Maintenance in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
+        'tv_hide_no_sensor' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide "No sensor installed" in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
     ];
 
     /**
@@ -207,6 +232,78 @@ class Config
         }
 
         return $resolved;
+    }
+
+    /**
+     * The single source of truth for "is this severity/problem-type/section
+     * shown at all" — built once here from resolved config instead of being
+     * assembled independently in Page.php (server-side collections) and
+     * page.blade.php (the JS `defaults`/`$tvDefaults` object), which is
+     * exactly the kind of two-source drift that let TV Mode silently start
+     * ignoring the Settings-configured severity policy: a bug fixed
+     * (removing an unrelated markup block that had accidentally hijacked
+     * TV's own rotation-source selector) without yet centralizing the
+     * *decision* itself, which is what this method now does.
+     *
+     * `$context === 'tv'` additionally intersects the global policy with
+     * the `tv_hide_*` restriction settings. That intersection can only ever
+     * turn a globally-enabled severity OFF for TV specifically — there is
+     * no code path here that can turn a globally-disabled severity back ON
+     * for TV, by construction (`$enabled && ! $hide`, never `$hide` alone).
+     *
+     * @return array<string, bool|int>
+     */
+    public static function visibilityPolicy(array $config, string $context = 'global'): array
+    {
+        $policy = [
+            'critical' => (bool) $config['default_severity_critical'],
+            'warning' => (bool) $config['default_severity_warning'],
+            'unknown' => (bool) $config['default_severity_unknown'],
+            'stale' => (bool) $config['default_severity_stale'],
+            'maintenance' => (bool) $config['default_severity_maintenance'],
+            'healthy' => (bool) $config['default_severity_healthy'],
+            'no_sensor' => (bool) $config['default_severity_no_sensor'],
+
+            'temperature' => (bool) $config['default_problem_temperature'],
+            'humidity' => (bool) $config['default_problem_humidity'],
+            'battery' => (bool) $config['default_problem_battery'],
+            'voltage' => (bool) $config['default_problem_voltage'],
+            'fan' => (bool) $config['default_problem_fan'],
+            'device' => (bool) $config['default_problem_device'],
+            'service' => (bool) $config['default_problem_service'],
+            'alert' => (bool) $config['default_problem_alert'],
+            'state' => (bool) $config['default_problem_state'],
+            'storage' => (bool) $config['default_problem_storage'],
+            'memory' => (bool) $config['default_problem_memory'],
+            'processor' => (bool) $config['default_problem_processor'],
+            'problem_stale' => (bool) $config['default_problem_stale'],
+            'other' => (bool) $config['default_problem_other'],
+
+            'priority' => (bool) $config['default_section_priority'],
+            'coverage' => (bool) $config['default_section_coverage'],
+            'summary' => (bool) $config['default_section_summary'],
+            'mdfServers' => (bool) $config['default_section_mdfServers'],
+            'mdfPower' => (bool) $config['default_section_mdfPower'],
+            'mdfInfrastructure' => (bool) $config['default_section_mdfInfrastructure'],
+            'idf' => (bool) $config['default_section_idf'],
+            'otherLocations' => (bool) $config['default_section_otherLocations'],
+
+            'tvSlideSeconds' => (int) $config['tv_default_slide_seconds'],
+            'tvMaximumDevicesRendered' => (int) $config['tv_maximum_devices_rendered'],
+        ];
+
+        if ($context === 'tv') {
+            // Deliberately no tv_hide_critical/tv_hide_warning: an
+            // unattended NOC wall display must never be configurable to
+            // hide the two severities its entire purpose is to surface.
+            $policy['unknown'] = $policy['unknown'] && ! (bool) $config['tv_hide_unknown'];
+            $policy['stale'] = $policy['stale'] && ! (bool) $config['tv_hide_stale'];
+            $policy['maintenance'] = $policy['maintenance'] && ! (bool) $config['tv_hide_maintenance'];
+            $policy['healthy'] = $policy['healthy'] && ! (bool) $config['tv_hide_healthy'];
+            $policy['no_sensor'] = $policy['no_sensor'] && ! (bool) $config['tv_hide_no_sensor'];
+        }
+
+        return $policy;
     }
 
     /**
