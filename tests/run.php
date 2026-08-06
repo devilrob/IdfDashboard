@@ -820,6 +820,42 @@ $assert(
     'Config::visibilityPolicy: tvMaximumDevicesRendered reflects the resolved (already-clamped) value, not the raw input'
 );
 
+// ---------------------------------------------------------------------
+// Fase 3A step 12 security checklist. Access-boundary behavior itself
+// (limited user sees only authorized devices, a user with no devices
+// gets an empty set, Settings stays behind plugin.admin) is already
+// exercised end to end against a real LibreNMS instance in
+// tests/librenms/DeviceAccessTest.php (testLimitedUserSeesOnly
+// AuthorizedDeviceAndLocation, testUserWithoutDevicePermissionGets
+// AnEmptyDeviceSet, testLibreNmsControllerStillProtectsPluginSettings).
+// This plugin registers no route of its own (LibreNMS's plugin hook
+// system provides /plugin/{name} generically) and has no migration/
+// schema of its own (every table it reads is existing LibreNMS core
+// schema, read-only) — the assertions below lock in that this session's
+// (and any future) change did not introduce either.
+// ---------------------------------------------------------------------
+$assert(
+    ! preg_match('/\bRoute::/', $pageSource . $menuSource . $settingsSource . $deviceAccessSource),
+    'Security: no plugin file registers a Laravel route of its own — LibreNMS\'s plugin hook system is the only entry point'
+);
+$assert(
+    ! preg_match('/\bSchema::(create|table|drop)\b/', $pageSource . $menuSource . $settingsSource . $deviceAccessSource),
+    'Security: no plugin file creates/alters/drops a database table — every table read is existing LibreNMS core schema, read-only'
+);
+$assert(
+    ! is_dir($root . '/database/migrations'),
+    'Security: this plugin has no migrations directory of its own'
+);
+$assert(
+    ! preg_match('/@json\(\s*\$(?:devices|payload|otherLocations|locations|mdf)\b/', $bladeSource),
+    'page.blade.php: no bulk unfiltered device/location collection is embedded into the page as a client-side JSON blob — TV Mode\'s filtering is server-side, not a client-side hide of fully-loaded data'
+);
+$assert(
+    ! preg_match('/\bwindow\.\w*[Dd]evices\s*=/', $bladeSource)
+        && ! preg_match('/data-(?:all-)?devices\s*=/', $bladeSource),
+    'page.blade.php: no window-scoped variable or data attribute carries a bulk device dump'
+);
+
 // --- Section 14: no TV-mode-scoped rule declares operational text
 // under 12px. -------------------------------------------------------
 $assert(
