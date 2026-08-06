@@ -795,4 +795,163 @@ $assert(
     'page.blade.php: no body.tv-mode-active rule declares operational text under 12px'
 );
 
+// ---------------------------------------------------------------------
+// $visibleSummary now consults the same centralized policy — no second
+// independent implementation of "is this severity shown" in the header
+// counters. Page::data() cannot be instantiated/unit-tested directly in
+// this environment (it requires the full Composer-autoloaded Laravel/
+// LibreNMS class hierarchy — Illuminate\Support\Collection,
+// App\Plugins\Hooks\PageHook, App\Models\User, etc. — which are only
+// available inside a real LibreNMS install with `composer install` run;
+// neither exists in this sandbox, confirmed directly rather than
+// assumed). What IS verified here, honestly: (a) the exact source shape
+// proving $visibleSummary is built from $policyVisibleDevices via
+// ProblemPolicy::deviceVisible($device, $policy) — the identical
+// function/policy pair Priority Attention and TV already use, not a
+// fourth re-derivation, and (b) the underlying shared decision function
+// itself against every combination this section's matrix names, which
+// is the actual logic $visibleSummary's filter now runs per device. The
+// real LibreNMS/MariaDB CI integration job is the only place the full
+// aggregate counts can be exercised end to end; that gap is disclosed,
+// not silently worked around.
+// ---------------------------------------------------------------------
+$assert(
+    str_contains($pageSource, 'ProblemPolicy::deviceVisible($device, $policy)')
+        && str_contains($pageSource, '$policyVisibleDevices = $filteredDevices')
+        && str_contains($pageSource, "'critical_devices' => \$policyVisibleDevices->where('health', Severity::CRITICAL)->count()"),
+    'Page.php: $visibleSummary (header counters) is built from the same ProblemPolicy::deviceVisible($device, $policy) decision as Priority Attention and TV, not a fourth independent filter'
+);
+$assert(
+    ! preg_match("/'critical_devices'\s*=>\s*\\\$filteredDevices->where/", $pageSource),
+    'Page.php: the header counters no longer count directly from the policy-unaware $filteredDevices collection'
+);
+
+$summaryPolicy = fn (array $overrides): array => Config::visibilityPolicy(Config::resolve(array_merge([
+    'default_severity_critical' => '1',
+    'default_severity_warning' => '1',
+    'default_severity_unknown' => '1',
+    'default_severity_stale' => '1',
+    'default_severity_maintenance' => '1',
+    'default_severity_healthy' => '0',
+    'default_severity_no_sensor' => '1',
+], $overrides)), 'global');
+
+// Critical + Warning only
+$p = $summaryPolicy([
+    'default_severity_unknown' => '0', 'default_severity_stale' => '0',
+    'default_severity_maintenance' => '0', 'default_severity_no_sensor' => '0',
+]);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['device']], $p) === true
+        && ProblemPolicy::deviceVisible(['health' => 'warning', 'problem_types' => ['temperature']], $p) === true
+        && ProblemPolicy::deviceVisible(['health' => 'unknown', 'problem_types' => ['state']], $p) === false
+        && ProblemPolicy::deviceVisible(['health' => 'healthy', 'problem_types' => []], $p) === false
+        && ProblemPolicy::deviceVisible(['health' => 'stale', 'problem_types' => []], $p) === false
+        && ProblemPolicy::deviceVisible(['health' => 'maintenance', 'problem_types' => []], $p) === false,
+    'Summary Caso: Critical + Warning only counts exactly Critical/Warning, nothing else'
+);
+
+// Critical only
+$p = $summaryPolicy(['default_severity_warning' => '0']);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => []], $p) === true
+        && ProblemPolicy::deviceVisible(['health' => 'warning', 'problem_types' => []], $p) === false,
+    'Summary Caso: Critical solamente'
+);
+
+// Warning only
+$p = $summaryPolicy(['default_severity_critical' => '0']);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'warning', 'problem_types' => []], $p) === true
+        && ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => []], $p) === false,
+    'Summary Caso: Warning solamente'
+);
+
+// Healthy only
+$p = $summaryPolicy([
+    'default_severity_critical' => '0', 'default_severity_warning' => '0',
+    'default_severity_unknown' => '0', 'default_severity_stale' => '0',
+    'default_severity_maintenance' => '0', 'default_severity_healthy' => '1',
+]);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'healthy', 'problem_types' => []], $p) === true
+        && ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => []], $p) === false,
+    'Summary Caso: Healthy solamente — Priority Attention would still be empty (it only ever holds actionable issues, which a Healthy device never has)'
+);
+
+// Unknown deshabilitado (independent of Critical/Warning staying on)
+$p = $summaryPolicy(['default_severity_unknown' => '0']);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'unknown', 'problem_types' => []], $p) === false
+        && ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => []], $p) === true,
+    'Summary Caso: Unknown deshabilitado no afecta Critical/Warning'
+);
+
+// Stale deshabilitado
+$p = $summaryPolicy(['default_severity_stale' => '0']);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'stale', 'problem_types' => []], $p) === false,
+    'Summary Caso: Stale deshabilitado'
+);
+
+// Maintenance deshabilitado
+$p = $summaryPolicy(['default_severity_maintenance' => '0']);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'maintenance', 'problem_types' => []], $p) === false,
+    'Summary Caso: Maintenance deshabilitado'
+);
+
+// No sensor deshabilitado — the summary counter itself (Page.php's
+// $policy['no_sensor'] ? ... : 0 branch), not deviceVisible(), is what
+// enforces this; asserted at the source-shape level since no_sensor is
+// never a device['health'] value deviceVisible() could gate on.
+$assert(
+    str_contains($pageSource, "\$policy['no_sensor']\n                ? \$filteredDevices->sum('no_sensor_count')\n                : 0"),
+    'Summary Caso: No sensor installed — the counter itself is gated by default_severity_no_sensor, independent of the Healthy toggle'
+);
+
+// Tipo de problema deshabilitado + dispositivo con múltiples causas
+// donde solo una está habilitada — same deviceVisible() the summary
+// now uses, exercised with the exact multi-cause shape this section
+// names explicitly.
+$p = $summaryPolicy([]);
+$mixed = Config::visibilityPolicy(Config::resolve([
+    'default_severity_critical' => '1',
+    'default_problem_temperature' => '0',
+    'default_problem_battery' => '0',
+    'default_problem_service' => '1',
+]), 'global');
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'battery']], $mixed) === false,
+    'Summary Caso: a device whose only two causes are both disabled problem types is not counted'
+);
+$assert(
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'battery', 'service']], $mixed) === true,
+    'Summary Caso: the same device is counted once one of its three causes (service) is an enabled problem type'
+);
+
+// --- Section 4/12: every Config::FIELDS group must actually render in
+// settings.blade.php — a field with a 'group' key not present in that
+// template's hardcoded $groupLabels list is persisted/resolved
+// correctly but invisible and unconfigurable from the admin UI. This
+// exact gap existed for the new 'tv_restrict' group (five tv_hide_*
+// settings) until settings.blade.php's $groupLabels was updated;
+// asserted generically here so any future group gets the same check
+// without needing its own one-off test. -----------------------------
+$settingsBladeSource = (string) file_get_contents($root . '/resources/views/settings.blade.php');
+preg_match('/\$groupLabels\s*=\s*\[(.*?)\];/s', $settingsBladeSource, $groupLabelsMatch);
+$renderedGroups = [];
+preg_match_all("/'([a-zA-Z0-9_]+)'\s*=>/", $groupLabelsMatch[1] ?? '', $groupLabelMatches);
+$renderedGroups = $groupLabelMatches[1] ?? [];
+$definedGroups = array_keys(Config::grouped());
+$missingFromForm = array_values(array_diff($definedGroups, $renderedGroups));
+$assert(
+    $missingFromForm === [],
+    'settings.blade.php: every Config::FIELDS group renders in the admin form (missing: ' . implode(', ', $missingFromForm) . ')'
+);
+$assert(
+    in_array('tv_restrict', $renderedGroups, true),
+    'settings.blade.php: the five new tv_hide_* TV-restriction settings are configurable from the Settings page, not silently persisted-but-invisible'
+);
+
 exit($failures === 0 ? 0 : 1);
