@@ -857,6 +857,18 @@ $assert(
     'Config::resolve: a blank tv_maximum_devices_rendered falls back to the default'
 );
 $assert(
+    Config::resolve(['tv_maximum_devices_rendered' => null])['tv_maximum_devices_rendered'] === 200,
+    'Config::resolve: an explicit PHP null tv_maximum_devices_rendered falls back to the default, same as a missing key'
+);
+$assert(
+    Config::resolve(['tv_maximum_devices_rendered' => '-5'])['tv_maximum_devices_rendered'] === 10,
+    'Config::resolve: a negative tv_maximum_devices_rendered is clamped up to the safe minimum (10), never accepted as-is or coerced to 0'
+);
+$assert(
+    Config::resolve([])['tv_maximum_devices_rendered'] === Config::FIELDS['tv_maximum_devices_rendered']['default'],
+    "Config::resolve: legacy-missing (no tv_maximum_devices_rendered key at all, e.g. settings saved before this field existed) resolves to the field's own declared default, not an undefined/error state"
+);
+$assert(
     Config::visibilityPolicy(Config::resolve(['tv_maximum_devices_rendered' => '50']), 'tv')['tvMaximumDevicesRendered'] === 50,
     'Config::visibilityPolicy: tvMaximumDevicesRendered reflects the resolved (already-clamped) value, not the raw input'
 );
