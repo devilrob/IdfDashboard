@@ -1202,6 +1202,21 @@ class DeviceAccessTest extends TestCase
                 ->keyBy('device_id');
         };
 
+        // $run() with no explicit 'view' query defaults to
+        // default_view ('overview'), so every $a/$b/$c/$d payload
+        // below already carries a real, live viewData['kind']
+        // === 'overview'. This closure surfaces its inline Priority
+        // Attention panel's device IDs (page.blade.php's
+        // main#phase2-content, distinct from the persistent
+        // .priority-panel banner the top-level 'priorityAttention'
+        // key drives) so both can be asserted identical — proving
+        // the Overview view's own on-page panel respects the exact
+        // same severity policy the banner/visibleSummary already do,
+        // not a fourth independent answer to "is this severity shown".
+        $overviewPriorityIds = fn (array $payload): array => collect($payload['viewData']['priority']['items'])
+            ->pluck('device_id')
+            ->all();
+
         // --- Caso A: Critical+Warning ON, everything else OFF ----------
         $a = $run([
             'default_severity_unknown' => '0',
@@ -1225,6 +1240,11 @@ class DeviceAccessTest extends TestCase
             'Caso A: TV renders exactly the critical/warning devices.'
         );
         $this->assertTrue($tvDevicesA->every(fn (array $d): bool => in_array($d['health'], ['critical', 'warning'], true)));
+        $this->assertEqualsCanonicalizing(
+            $visibleIdsA,
+            $overviewPriorityIds($a),
+            'Caso A: the Overview view\'s own inline Priority Attention panel shows exactly the same devices as the persistent banner.'
+        );
 
         // --- Caso B: Critical ON, Warning OFF ---------------------------
         $b = $run([
@@ -1241,6 +1261,21 @@ class DeviceAccessTest extends TestCase
         $this->assertEqualsCanonicalizing([$critical->device_id, $staleCritical->device_id], $tvDevicesB->keys()->all());
         $this->assertTrue($tvDevicesB->every(fn (array $d): bool => $d['health'] === 'critical'));
         $this->assertFalse(collect($b['priorityAttention']['items'])->contains('device_id', $warning->device_id));
+        // The specific regression this guards: before the Overview
+        // view's inline panel consulted ProblemPolicy::deviceVisible(),
+        // it was built from Phase 2's search/category/problem filter
+        // only, so a Warning device stayed visible here even with
+        // Warning explicitly off in Settings, disagreeing with the
+        // persistent banner and visibleSummary on the very same page.
+        $this->assertFalse(
+            in_array($warning->device_id, $overviewPriorityIds($b), true),
+            'Caso B: the Overview view\'s inline Priority Attention panel must not show a device whose severity is off in Settings.'
+        );
+        $this->assertEqualsCanonicalizing(
+            collect($b['priorityAttention']['items'])->pluck('device_id')->all(),
+            $overviewPriorityIds($b),
+            'Caso B: the Overview view\'s inline panel matches the persistent banner exactly.'
+        );
 
         // --- Caso C: Critical OFF, Warning ON ---------------------------
         $c = $run([
@@ -1257,6 +1292,11 @@ class DeviceAccessTest extends TestCase
         $this->assertEqualsCanonicalizing([$warning->device_id], $tvDevicesC->keys()->all());
         $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $critical->device_id));
         $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $staleCritical->device_id));
+        $this->assertFalse(
+            in_array($critical->device_id, $overviewPriorityIds($c), true),
+            'Caso C: the Overview view\'s inline panel must not show a Critical device while Critical is off in Settings.'
+        );
+        $this->assertEqualsCanonicalizing([$warning->device_id], $overviewPriorityIds($c), 'Caso C: the Overview view\'s inline panel shows exactly the visible Warning device.');
 
         // --- Caso D: Healthy ON, everything else OFF --------------------
         $d = $run([
@@ -1275,6 +1315,14 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(3, $d['visibleSummary']['devices'], 'Caso D: only the three Healthy-health devices are visible.');
         $this->assertSame([], $d['priorityAttention']['items'], 'Caso D: Priority Attention is empty — Healthy devices have no actionable issue.');
         $this->assertSame(0, $d['priorityAttention']['total']);
+        $this->assertSame([], $overviewPriorityIds($d), 'Caso D: the Overview view\'s inline panel is also empty — no actionable issue exists to disagree about.');
+        $this->assertSame([], $d['viewData']['critical_locations'], 'Caso D: no location has an open issue once Critical/Warning/Unknown/Stale/Maintenance are all off.');
+        // healthy['devices']/['locations'] are deliberately NOT policy-
+        // filtered (see the buildViewData() comment) — this reads 3
+        // regardless of which severities are toggled, the same
+        // informational-count design as visibleSummary's
+        // no_sensor_installed.
+        $this->assertSame(3, $d['viewData']['healthy']['devices'], 'Caso D: the Healthy Overview panel counts all three Healthy-classified devices in the fixture, independent of severity policy.');
         $tvDevicesD = $otherLocationDevices($d);
         $this->assertEqualsCanonicalizing([$healthy->device_id, $healthyOnly->device_id, $noSensor->device_id], $tvDevicesD->keys()->all());
         $this->assertTrue($tvDevicesD->every(fn (array $dv): bool => $dv['health'] === 'healthy'));

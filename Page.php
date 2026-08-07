@@ -635,7 +635,8 @@ class Page extends PageHook
             $filteredDevices,
             $allLocations,
             $filteredLocations,
-            $priorityAttention
+            $priorityAttention,
+            $policy
         );
 
         /*
@@ -940,7 +941,8 @@ class Page extends PageHook
         Collection $filteredDevices,
         Collection $allLocations,
         Collection $filteredLocations,
-        array $priorityAttention
+        array $priorityAttention,
+        array $policy
     ): array {
         $view = $filters['view'];
 
@@ -993,11 +995,37 @@ class Page extends PageHook
             ];
         }
 
+        /*
+         * The Overview view's own inline Priority Attention / Critical
+         * Locations panels (rendered directly in page.blade.php's
+         * `main#phase2-content`, distinct from the always-visible
+         * `.priority-panel` banner further down the page) were still
+         * built from $filteredDevices/$filteredLocations — Phase 2's
+         * interactive search/category/problem filter only, never
+         * ProblemPolicy::deviceVisible(). That made this the third
+         * independent "is this severity shown" answer alongside the
+         * two already fixed for the top-level $priorityAttention (see
+         * its own comment above) and $visibleSummary below: an admin
+         * disabling Unknown/Stale/Maintenance in Settings correctly
+         * emptied the persistent banner and header counters, but this
+         * inline panel — directly beneath that banner, on the exact
+         * same page — kept showing the same devices regardless, since
+         * Overview has no severity dropdown of its own for a viewer to
+         * have deliberately opted back into seeing them (unlike the
+         * Devices/Locations list views, which intentionally stay
+         * policy-independent so a viewer can explicitly browse past
+         * the default policy — see the $visibleSummary comment below).
+         */
+        $policyVisibleOverviewDevices = $filteredDevices
+            ->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))
+            ->values();
+        $policyVisibleOverviewLocations = $this->buildLocationGroups($policyVisibleOverviewDevices);
+
         $visiblePriority = $this->buildPriorityAttention(
-            $filteredDevices,
+            $policyVisibleOverviewDevices,
             max(1, count($priorityAttention['items']))
         );
-        $problemLocations = $filteredLocations
+        $problemLocations = $policyVisibleOverviewLocations
             ->where('issue_count', '>', 0)
             ->take(8)
             ->values();
@@ -1006,6 +1034,20 @@ class Page extends PageHook
             'kind' => 'overview',
             'priority' => $visiblePriority,
             'critical_locations' => $problemLocations,
+            /*
+             * Deliberately NOT filtered through the same policy pass as
+             * priority/critical_locations above: this panel answers "how
+             * much of the fleet is fine", the same category of question
+             * as $visibleSummary's no_sensor_installed counter (see its
+             * comment) — an informational count that stays meaningful
+             * even when the Healthy severity toggle is hiding individual
+             * Healthy device *cards* elsewhere on the dashboard. Applying
+             * deviceVisible() here would make this panel read exactly
+             * "0 healthy locations, 0 healthy devices" any time an admin
+             * turns Healthy off — the default policy — misleadingly
+             * implying nothing in the fleet is healthy, rather than "we
+             * chose not to list them individually".
+             */
             'healthy' => [
                 'devices' => $filteredDevices->where('health', Severity::HEALTHY)->count(),
                 'locations' => $filteredLocations->where('health', Severity::HEALTHY)->count(),
