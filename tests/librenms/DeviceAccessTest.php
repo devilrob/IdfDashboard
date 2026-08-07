@@ -215,11 +215,11 @@ class DeviceAccessTest extends TestCase
         $user->devicesOwned()->attach([$allowed->device_id, ...$additional->pluck('device_id')->all()]);
         Permissions::invalidateCache();
 
-        $payloadFor = static function (array $query) use ($user): array {
+        $payloadFor = static function (array $query, array $settings = []) use ($user): array {
             $request = Request::create('/plugin/IdfDashboard', 'GET', $query);
             $request->setUserResolver(fn (): User => $user);
 
-            return (new Page())->data([], $request);
+            return (new Page())->data($settings, $request);
         };
 
         $allowedDevice = $payloadFor(['view' => 'device', 'id' => $allowed->device_id]);
@@ -244,7 +244,17 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(0, $searchPayload['visibleSummary']['devices']);
         $this->assertStringNotContainsString('secret-phase2.example.com', json_encode($searchPayload, JSON_THROW_ON_ERROR));
 
-        $pageTwo = $payloadFor(['view' => 'devices', 'page' => 2, 'per_page' => 25]);
+        // default_severity_healthy is turned on for this call only:
+        // $allowed and all 27 $additional devices are plain-healthy
+        // with no sensors/issues, and visibleSummary (unlike
+        // viewData.devices.total, which is an access-filtered raw
+        // device list unaffected by display policy) is policy-aware —
+        // under the default (Healthy hidden) policy it correctly
+        // reports 0, not 28. This assertion predates that
+        // visibleSummary policy-awareness fix and would otherwise be
+        // asserting stale, pre-fix behavior rather than genuinely
+        // exercising pagination.
+        $pageTwo = $payloadFor(['view' => 'devices', 'page' => 2, 'per_page' => 25], ['default_severity_healthy' => '1']);
         $this->assertSame(28, $pageTwo['viewData']['devices']['total']);
         $this->assertSame(28, $pageTwo['visibleSummary']['devices']);
         $this->assertSame(2, $pageTwo['viewData']['devices']['page']);
@@ -1250,7 +1260,7 @@ class DeviceAccessTest extends TestCase
         $this->assertSame([], $d['priorityAttention']['items'], 'Caso D: Priority Attention is empty — Healthy devices have no actionable issue.');
         $this->assertSame(0, $d['priorityAttention']['total']);
         $tvDevicesD = $otherLocationDevices($d);
-        $this->assertEqualsCanonicalizing([$healthy->device_id, $noSensor->device_id], $tvDevicesD->keys()->all());
+        $this->assertEqualsCanonicalizing([$healthy->device_id, $healthyOnly->device_id, $noSensor->device_id], $tvDevicesD->keys()->all());
         $this->assertTrue($tvDevicesD->every(fn (array $dv): bool => $dv['health'] === 'healthy'));
         $tvIdfLocationsD = collect($d['tv']['idfLocations']);
         $this->assertTrue($tvIdfLocationsD->isEmpty(), 'Caso D: fixture has no IDF-pattern locations.');
@@ -1307,13 +1317,23 @@ class DeviceAccessTest extends TestCase
      * The tv_maximum_devices_rendered ceiling only bounds the three flat
      * MDF device sections (tv.mdfServers/mdfPower/mdfInfrastructure) —
      * tv.idfLocations/otherLocations are location-grouped and are not
-     * subject to this cap. With 5 MDF Server-category devices (2
-     * Critical, 1 Warning, 2 Healthy) and a ceiling of 3, exactly the 2
-     * Critical + 1 Warning devices must survive (worst-first truncation
-     * — a Critical device can never be dropped to fit a Healthy one),
-     * omittedDeviceCount must report the 2 that didn't fit, and the
-     * ceiling itself must apply per section independently, not as one
-     * combined budget across all three MDF sections.
+     * subject to this cap. Config::FIELDS clamps this setting to a
+     * minimum of 10 (proven separately by tests/run.php's pure-config
+     * assertions), so any fixture meant to exercise real truncation
+     * must configure a ceiling of at least 10 and supply more than 10
+     * eligible devices — an earlier version of this test configured a
+     * ceiling of 3, which Config::resolve() silently clamped back up
+     * to 10, and with only 5 fixture devices nothing was ever actually
+     * truncated (caught only once this test ran for real in CI).
+     *
+     * With 7 MDF Server-category devices Critical, 3 Warning, and 2
+     * Healthy (12 total, ceiling 10), exactly the 7 Critical + 3
+     * Warning devices must survive (worst-first truncation — a
+     * Critical/Warning device can never be dropped to fit a Healthy
+     * one), omittedDeviceCount must report the 2 Healthy devices that
+     * didn't fit, and the ceiling itself must apply per section
+     * independently, not as one combined budget across all three MDF
+     * sections.
      */
     public function testTvMaximumDevicesRenderedTruncatesWorstFirstAndReportsOmittedCount(): void
     {
@@ -1331,26 +1351,27 @@ class DeviceAccessTest extends TestCase
             ]);
         };
 
-        $critical1 = $makeServer('tv-ceiling-critical-1.example.com');
-        Sensor::factory()->for($critical1)->create([
-            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
-            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
-            'sensor_alert' => 1, 'lastupdate' => now(),
-        ]);
+        $criticalIds = [];
+        for ($i = 1; $i <= 7; $i++) {
+            $critical = $makeServer("tv-ceiling-critical-{$i}.example.com");
+            Sensor::factory()->for($critical)->create([
+                'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+                'sensor_current' => 90 + $i, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+                'sensor_alert' => 1, 'lastupdate' => now(),
+            ]);
+            $criticalIds[] = $critical->device_id;
+        }
 
-        $critical2 = $makeServer('tv-ceiling-critical-2.example.com');
-        Sensor::factory()->for($critical2)->create([
-            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
-            'sensor_current' => 96, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
-            'sensor_alert' => 1, 'lastupdate' => now(),
-        ]);
-
-        $warning = $makeServer('tv-ceiling-warning.example.com');
-        Sensor::factory()->for($warning)->create([
-            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient',
-            'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
-            'sensor_alert' => 1, 'lastupdate' => now(),
-        ]);
+        $warningIds = [];
+        for ($i = 1; $i <= 3; $i++) {
+            $warning = $makeServer("tv-ceiling-warning-{$i}.example.com");
+            Sensor::factory()->for($warning)->create([
+                'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient',
+                'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
+                'sensor_alert' => 1, 'lastupdate' => now(),
+            ]);
+            $warningIds[] = $warning->device_id;
+        }
 
         $healthy1 = $makeServer('tv-ceiling-healthy-1.example.com');
         Sensor::factory()->for($healthy1)->create([
@@ -1375,38 +1396,38 @@ class DeviceAccessTest extends TestCase
         // devices genuinely compete for a truncated slot — with it left
         // at its default (off), they would never reach the pre-
         // truncation collection at all, making the "never drops
-        // Critical to fit Healthy" assertion vacuous.
+        // Critical/Warning to fit Healthy" assertion vacuous.
         $payload = (new Page())->data([
-            'tv_maximum_devices_rendered' => '3',
+            'tv_maximum_devices_rendered' => '10',
             'default_severity_healthy' => '1',
         ], $request);
 
-        $this->assertSame(5, $payload['mdf']['server_count'], 'Desktop MDF Servers section remains the full, unfiltered/untruncated set.');
-        $this->assertCount(3, $payload['tv']['mdfServers'], 'TV MDF Servers is truncated to the configured ceiling.');
+        $this->assertSame(12, $payload['mdf']['server_count'], 'Desktop MDF Servers section remains the full, unfiltered/untruncated set.');
+        $this->assertCount(10, $payload['tv']['mdfServers'], 'TV MDF Servers is truncated to the configured ceiling.');
         $this->assertSame(2, $payload['tv']['omittedDeviceCount'], 'Exactly the 2 devices that did not fit are reported, never silently dropped.');
 
         $renderedHealths = collect($payload['tv']['mdfServers'])->pluck('health')->all();
         $this->assertEqualsCanonicalizing(
-            ['critical', 'critical', 'warning'],
+            [...array_fill(0, 7, 'critical'), ...array_fill(0, 3, 'warning')],
             $renderedHealths,
-            'Worst-first truncation keeps both Critical devices and the Warning device; neither Healthy device displaces them.'
+            'Worst-first truncation keeps all 7 Critical devices and all 3 Warning devices; neither Healthy device displaces them.'
         );
         $this->assertFalse(
             collect($payload['tv']['mdfServers'])->contains('device_id', $healthy1->device_id),
-            'A Critical device is never dropped from the rendered set to make room for a Healthy one.'
+            'A Critical/Warning device is never dropped from the rendered set to make room for a Healthy one.'
         );
         $this->assertFalse(collect($payload['tv']['mdfServers'])->contains('device_id', $healthy2->device_id));
 
-        // A default ceiling (200) comfortably fits all 5 — proves the
+        // A default ceiling (200) comfortably fits all 12 — proves the
         // truncation above is a real effect of the low configured
         // ceiling, not something that always happens regardless.
         $unbounded = (new Page())->data(['default_severity_healthy' => '1'], $request);
-        $this->assertCount(5, $unbounded['tv']['mdfServers']);
+        $this->assertCount(12, $unbounded['tv']['mdfServers']);
         $this->assertSame(0, $unbounded['tv']['omittedDeviceCount']);
 
         // The ceiling is per-section, not one shared budget: a second
-        // MDF Power device at the same low ceiling must not be affected
-        // by mdfServers already being full.
+        // MDF Power device at the same low ceiling must not be starved
+        // by mdfServers already having fully consumed its own budget.
         $power = Device::factory()->create([
             'display' => 'TV Ceiling Power',
             'hostname' => 'tv-ceiling-power.example.com',
@@ -1422,12 +1443,12 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1, 'lastupdate' => now(),
         ]);
         $withPower = (new Page())->data([
-            'tv_maximum_devices_rendered' => '3',
+            'tv_maximum_devices_rendered' => '10',
             'default_severity_healthy' => '1',
         ], $request);
-        $this->assertCount(3, $withPower['tv']['mdfServers'], 'mdfServers ceiling is unaffected by mdfPower having its own device.');
-        $this->assertCount(1, $withPower['tv']['mdfPower'], 'mdfPower has its own independent budget under the same ceiling.');
-        $this->assertSame(2, $withPower['tv']['omittedDeviceCount'], 'omittedDeviceCount sums across sections but mdfPower contributed zero (1 device, ceiling 3).');
+        $this->assertCount(10, $withPower['tv']['mdfServers'], 'mdfServers ceiling is unaffected by mdfPower having its own device.');
+        $this->assertCount(1, $withPower['tv']['mdfPower'], 'mdfPower has its own independent budget under the same ceiling — it is not starved by mdfServers already being full.');
+        $this->assertSame(2, $withPower['tv']['omittedDeviceCount'], 'omittedDeviceCount sums across sections but mdfPower contributed zero (1 device, ceiling 10).');
     }
 
     private function writeVisualFixture(string $name, string $html): void
