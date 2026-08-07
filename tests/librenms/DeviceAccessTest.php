@@ -1689,6 +1689,16 @@ class DeviceAccessTest extends TestCase
                 $payload
             )->render();
 
+            // The only fixture in this file that actually exercises the
+            // restored MDF Servers/Power/Infrastructure/IDF/Other Locations
+            // split (via real, differently-classified location fixtures)
+            // — the other three writeVisualFixture() callers in this class
+            // use a single generic location, so none of them shows this
+            // specific grid. Persisted for manual/CI-artifact visual review
+            // alongside the programmatic marker-order/section-boundary
+            // assertions below.
+            $this->writeVisualFixture("swallow-guard-$viewLabel.html", $html);
+
             $this->assertStringNotContainsString(
                 '@__raw_block_',
                 $html,
