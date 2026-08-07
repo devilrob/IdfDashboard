@@ -2,6 +2,82 @@
 
 All notable changes follow semantic versioning.
 
+## [1.3.0] - 2026-08-07
+
+### Fixed
+
+- **P1 regression**: TV Mode stopped respecting the Critical/Warning-only
+  severity policy configured in Settings, showing Healthy/informational
+  devices it should have excluded. `default_severity_*` were previously read
+  only by client-side JavaScript; every server-computed collection (location
+  groups, Priority Attention, header summary counters) was built from the
+  full authorized device set and filtered after the fact with CSS, not
+  server-side. `Page.php` now builds real server-side pre-filtered
+  collections through one centralized decision,
+  `Support\ProblemPolicy::deviceVisible()`, backed by
+  `Support\Config::visibilityPolicy()`.
+- Desktop's Overview inline Priority Attention / Critical Locations panels,
+  and the header summary counters (`$visibleSummary`), were each
+  independently re-deriving visibility from the Phase 2 interactive filter
+  only, never the org-wide severity policy — both now consume the same
+  centralized decision as TV Mode and the persistent Priority Attention
+  banner.
+- TV Mode's client-side-only toggle button (the classic desktop grid's own
+  "TV Mode" control, distinct from the `?tv=1` navigation link) bypassed the
+  five `tv_hide_*` TV-only restrictions entirely, since its shared
+  `tvDeviceMatches()` function read from the global-context policy object.
+  It now reads a separate TV-context policy object
+  (`data-idf-tv-only-defaults`) carrying `tv_hide_*`, while the desktop
+  classic grid's own default filter deliberately continues to use the
+  global-context object so a TV-only restriction can never leak into
+  desktop's default browsing experience.
+- Real Blade compiler swallow-content bug: `storePhpBlocks()`'s
+  `(?<!@)@php(.*?)@endphp` extraction regex does not match across newlines,
+  so a second `@php ... @endphp` pair later in the same document could
+  silently swallow every static HTML/Blade directive between two `@php`
+  blocks. Restructured `page.blade.php` so no swallowable gap exists between
+  its two `@php` blocks, and added a permanent regression test that
+  recompiles the real template and asserts the previously-swallowed section
+  survives, in order, in both the plain and `?tv=1` renders.
+
+### Added
+
+- Three severity settings that had no equivalent before:
+  `default_severity_stale`, `default_severity_maintenance`,
+  `default_severity_no_sensor` (Maintenance previously followed the Healthy
+  toggle unconditionally).
+- Five `tv_hide_*` settings that can only ever further restrict TV Mode —
+  structurally impossible to re-enable a globally-disabled severity for TV
+  specifically.
+- `tv_maximum_devices_rendered` — a defensive, worst-first-sorted TV
+  rendering ceiling (default 200, clamped to 10–2000) with an explicit
+  omitted-device count, never a silent drop.
+
+### Changed
+
+- Operational text CSS (`.priority-cause`, `.device-state`, `.metric`,
+  `.service-issue`, etc.) now guarantees a 12px floor everywhere, not only
+  inside narrow-viewport `@media` breakpoints; TV's `.priority-cause`
+  specifically renders at 14px. Resolves the 9–11px known limitation
+  disclosed in 1.2.0.
+- TV Mode's HTML/DOM size is now measurably smaller than the full-fleet
+  Overview view at every scale, since it is built from real server-side
+  pre-filtered collections instead of the full authorized set hidden with
+  CSS. Measured on this release's own CI (small/medium/large =
+  20/200/1,000 devices): HTML bytes reduced 24% / 68% / 84%; DOM nodes
+  reduced 50% / 79% / 86%, versus the Overview view at the same scale.
+  Resolves the unbounded-TV-size known limitation disclosed in 1.2.0.
+
+### Known limitations
+
+- The six semantic TV slides (Environment/Power, Network, Servers, IDF,
+  Other Locations, Overview as discrete rotating full-screen slides with
+  independent pacing) discussed in planning are **not** part of this
+  release. TV Mode continues to rotate through the same MDF Servers/Power/
+  Infrastructure/IDF/Other Locations section grid as prior versions, now
+  correctly severity-policy-filtered and size-bounded. Deferred to a future
+  release.
+
 ## [1.2.0] - 2026-08-06
 
 ### Added

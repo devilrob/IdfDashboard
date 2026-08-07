@@ -27,11 +27,21 @@ Actionable issues include device outages, thresholded sensors, services and
 alerts; maintenance, recent recovery, unknown/stale telemetry and
 `No sensor installed` remain distinct. Device classification produces exactly
 one category and falls back to `Other` with its reason when evidence is weak.
-Desktop and TV views share these structures while TV limits content, preserves
-12 px minimum operational text and reports connection, refresh and last-update
-state without additional polling.
+Desktop and TV views share these structures and reports connection, refresh
+and last-update state without additional polling.
 
-## Navigation (v1.2.0)
+v1.3.0 makes the configured severity policy (`default_severity_*`,
+`default_problem_*`) a real server-side filter, consumed identically by
+Priority Attention, the header summary counters and TV Mode's own
+server-filtered collections — not a client-side-only CSS toggle. Five
+`tv_hide_*` settings can further restrict TV Mode specifically (never the
+other way around), and `tv_maximum_devices_rendered` bounds TV's per-section
+rendering with a worst-first-sorted, explicitly-reported omitted-device
+count. TV Mode now measurably renders less HTML/DOM than the full-fleet
+Overview view at scale (see `CHANGELOG.md`), and operational text
+guarantees a 12 px floor everywhere, not only inside TV-specific rules.
+
+## Navigation (v1.2.0+)
 
 v1.2.0 adds server-side views on top of the same authorized-device model.
 Every view is built from `Support\DeviceAccess::query($user)`; nothing bypasses
@@ -151,7 +161,7 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.2.0`. GitHub Actions validates the tag/version match, runs the
+tag such as `v1.3.0`. GitHub Actions validates the tag/version match, runs the
 PHP 8.2/8.3/8.4 standalone matrix, the real LibreNMS 26.8 + MariaDB integration
 test, and the small/medium/large performance matrix; the release job only
 publishes once all of those succeed. It then builds the minimal plugin ZIP,
