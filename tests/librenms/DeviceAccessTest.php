@@ -1234,6 +1234,8 @@ class DeviceAccessTest extends TestCase
             $visibleIdsA,
             'Caso A: Priority Attention shows exactly the critical/warning devices, nothing disabled.'
         );
+        $this->assertFalse(in_array($unknown->device_id, $visibleIdsA, true), 'Caso A: Unknown is off — the Unknown-classified device must not appear in Priority Attention.');
+        $this->assertFalse(in_array($maintenance->device_id, $visibleIdsA, true), 'Caso A: Maintenance is off — the maintenance-window device must not appear in Priority Attention.');
         $tvDevicesA = $otherLocationDevices($a);
         $this->assertEqualsCanonicalizing(
             [$critical->device_id, $warning->device_id, $staleCritical->device_id],
@@ -1383,6 +1385,22 @@ class DeviceAccessTest extends TestCase
                 fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'temperature'
             )
         );
+        // Priority Attention (both the persistent banner and the
+        // Overview view's own inline panel) must agree with TV here:
+        // buildPriorityAttention() only ever surfaces a device with an
+        // actionable issue, and $stale's Stale-classified issue is
+        // disabled at the source (default_problem_stale), so it has no
+        // actionable issue left at all — not merely a hidden severity.
+        $this->assertFalse(
+            collect($f['priorityAttention']['items'])->contains('device_id', $stale->device_id),
+            'Caso F: Stale is off, so the stale-but-otherwise-healthy device has no actionable issue and is absent from Priority Attention.'
+        );
+        $this->assertTrue(
+            collect($f['priorityAttention']['items'])->contains('device_id', $staleCritical->device_id),
+            'Caso F: the genuinely Critical device remains in Priority Attention even with Stale off — its Critical issue is a separate reading, not the disabled Stale one.'
+        );
+        $this->assertFalse(in_array($stale->device_id, $overviewPriorityIds($f), true), 'Caso F: the Overview inline panel agrees.');
+        $this->assertTrue(in_array($staleCritical->device_id, $overviewPriorityIds($f), true), 'Caso F: the Overview inline panel agrees.');
         // Baseline: with default_problem_stale left on (the default), the
         // same reading elevates the device to Stale, proving Caso F's
         // "hidden" result above is a real effect of the setting, not the
