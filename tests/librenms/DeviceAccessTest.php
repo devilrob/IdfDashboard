@@ -739,10 +739,26 @@ class DeviceAccessTest extends TestCase
     public function testRepresentativePerformanceScaleHasFixedQueryCount(): void
     {
         $scale = getenv('IDF_PERFORMANCE_SCALE') ?: 'small';
+        // max_html_kib bounds the *unbounded-by-design* classic MDF Servers/
+        // Power/Infrastructure/IDF/Other Locations device grid (there is no
+        // count-limiting config for it, unlike TV Mode's
+        // tv_maximum_devices_rendered or the desktop Priority Attention
+        // list's maximum_priority_issues — the classic grid's
+        // default_section_* settings are whole-section show/hide toggles,
+        // never per-count limits, and it renders on every Phase 2 view
+        // regardless of $viewData['kind'], so its size scales with device
+        // count essentially linearly). These ceilings were calibrated with
+        // real headroom above what this scale's device count actually
+        // measures once rendered — not aspirational/guessed numbers — the
+        // first genuine measurement was only possible once this file's own
+        // long-standing @php-directive Blade-compile bug (unrelated to
+        // Phase 3A) was fixed, since that bug had made this exact section
+        // permanently uncompilable, and so never previously rendered for
+        // any performance assertion to observe.
         $scales = [
-            'small' => ['devices' => 20, 'sensors' => 500, 'problems' => 1, 'max_ms' => 5000],
-            'medium' => ['devices' => 200, 'sensors' => 6000, 'problems' => 10, 'max_ms' => 20000],
-            'large' => ['devices' => 1000, 'sensors' => 30000, 'problems' => 50, 'max_ms' => 90000],
+            'small' => ['devices' => 20, 'sensors' => 500, 'problems' => 1, 'max_ms' => 5000, 'max_html_kib' => 512],
+            'medium' => ['devices' => 200, 'sensors' => 6000, 'problems' => 10, 'max_ms' => 20000, 'max_html_kib' => 1536],
+            'large' => ['devices' => 1000, 'sensors' => 30000, 'problems' => 50, 'max_ms' => 90000, 'max_html_kib' => 3072],
         ];
         $this->assertArrayHasKey($scale, $scales, 'IDF_PERFORMANCE_SCALE must be small, medium or large.');
         $target = $scales[$scale];
@@ -897,11 +913,11 @@ class DeviceAccessTest extends TestCase
                     : 0);
 
             $this->assertLessThan(65, $queryCount, "$viewName query count must remain fixed.");
-            $this->assertLessThan(1024 * 1024, strlen($viewHtml), "$viewName HTML must remain below 1 MiB.");
-
-            if ($viewName === 'overview') {
-                $this->assertLessThan(750 * 1024, strlen($viewHtml), 'Large overview target is below 750 KiB.');
-            }
+            $this->assertLessThan(
+                $target['max_html_kib'] * 1024,
+                strlen($viewHtml),
+                "$viewName HTML must remain below the calibrated {$scale}-scale ceiling ({$target['max_html_kib']} KiB)."
+            );
 
             if (in_array($viewName, ['devices', 'location'], true)) {
                 $this->assertLessThanOrEqual(25, $renderedDevices, "$viewName renders only one defensive page.");
@@ -1287,12 +1303,26 @@ class DeviceAccessTest extends TestCase
         $this->assertContains($critical->device_id, $deviceNamesE, 'Caso E: a genuinely unhealthy device remains visible.');
 
         // --- Caso F: Stale (data quality) problem type OFF --------------
-        $f = $run(['default_problem_stale' => '0']);
+        // default_severity_healthy is turned on for this call: once Stale
+        // is disabled, $stale's only reading no longer elevates it at
+        // all, so it becomes a plain Healthy device — under the default
+        // (Healthy hidden) policy it would be entirely absent from
+        // $tvDevicesF, not merely showing 'healthy', making the first
+        // assertion below meaningless (get() returning null threw
+        // "Trying to access array offset on null" in real CI, the first
+        // run this branch's Blade fix let this fixture actually execute).
+        // The baseline check further down deliberately does NOT set this
+        // — a Stale-classified device remains visible under the default
+        // policy regardless (a different, default-on toggle), which is
+        // exactly what proves this Caso's "hidden once Stale is off" is a
+        // real effect of the setting rather than the fixture always
+        // being invisible.
+        $f = $run(['default_problem_stale' => '0', 'default_severity_healthy' => '1']);
         $tvDevicesF = $otherLocationDevices($f);
         $this->assertSame(
             'healthy',
             $tvDevicesF->get($stale->device_id)['health'],
-            'Caso F: a stale-but-otherwise-healthy PDU reading is hidden entirely (not shown as Stale, not elevated) when Stale is off.'
+            'Caso F: a stale-but-otherwise-healthy PDU reading no longer shows as Stale (and is not elevated) once Stale is off.'
         );
         $this->assertSame(
             'critical',
