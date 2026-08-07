@@ -1741,10 +1741,20 @@ class DeviceAccessTest extends TestCase
             // render, both to confirm it renders correctly there and
             // to confirm the plain render correctly does NOT include
             // TV-only markup.
+            // The bare attribute name alone is not a safe marker here: the
+            // embedded <script> block's client-side TV-toggle handling
+            // calls document.querySelector('[data-tv-combined-slide]')
+            // unconditionally (so it can gracefully no-op when the
+            // element is absent), and that JS source text is present in
+            // every render regardless of $filters['tv']. The real,
+            // TV-gated signal is whether the actual DOM element — its
+            // full opening tag — was rendered.
+            $combinedSlideTag = '<div class="tv-combined-slide" data-tv-combined-slide>';
+
             if ($viewLabel === 'tv') {
-                $this->assertStringContainsString('data-tv-combined-slide', $html, 'TV render must include the TV combined-fleet slide.');
+                $this->assertStringContainsString($combinedSlideTag, $html, 'TV render must include the TV combined-fleet slide element.');
             } else {
-                $this->assertStringNotContainsString('data-tv-combined-slide', $html, 'Plain overview render must not include TV-only markup.');
+                $this->assertStringNotContainsString($combinedSlideTag, $html, 'Plain overview render must not include the TV-only combined-fleet slide element.');
             }
 
             // The actual fixture devices themselves must also survive
