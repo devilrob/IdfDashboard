@@ -1909,56 +1909,45 @@
     <div class="tv-combined-slide" data-tv-combined-slide><header class="infra-section-header"><h2 class="infra-section-title"><i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i> Priority Attention — Full Fleet Rotation</h2><div class="infra-section-meta" data-tv-combined-meta></div></header><div class="tv-combined-grid" data-tv-combined-grid></div></div>
     @endif
 
-    @if(false)
+    {{--
+        This is the real MDF Servers/Power/Infrastructure/IDF/Other
+        Locations device-grid markup — the section TV Mode's own JS
+        rotation (tvBuildCombinedSlides(), data-dashboard-section
+        selectors) scans for slides, and desktop's "classic" dashboard
+        view relies on. It lives outside the $viewData['kind'] switch
+        above (Locations/Devices/Location/Device get their own,
+        separate paginated markup there) because both desktop and TV
+        Mode need it present regardless of which Phase 2 view is
+        active; the $filters['tv'] ternaries inside the @php block
+        below already make it TV-aware on their own, so it needs no
+        outer view-kind guard.
 
-    <div
-        class="tv-clock"
-        data-updated-at="{{ $generatedAt }}"
-        data-updated-at-epoch="{{ strtotime($generatedAt) }}"
-    ></div>
-
-    <div
-        class="tv-status-banner"
-        data-critical="{{ $summary['critical_devices'] }}"
-        data-warning="{{ $summary['warning_devices'] }}"
-        data-down="{{ $summary['devices_down'] }}"
-        data-total="{{ $summary['active_devices'] }}"
-    ></div>
-
-    <div class="tv-clear-slide" data-dashboard-section="__tv_clear__">
-        <div class="tv-clear-icon">
-            <i class="fa fa-check-circle" aria-hidden="true"></i>
-        </div>
-        <div class="tv-clear-title"></div>
-        <div class="tv-clear-subtitle"></div>
-    </div>
+        commit 5b44ff8 ("feat: add paginated operational dashboard
+        views") wrapped this whole section in a literal `@if(false)`
+        while that Phase 2 work was in progress and never removed the
+        guard before merging — the entire section (including the
+        $sectionMdfServerCount/etc. @php block two dozen lines below)
+        was therefore permanently dead: real CI caught this via
+        "Undefined variable $sectionMdfServerCount" (the assignment
+        never ran) once a real Blade render was finally exercised for
+        the first time against this branch. No duplicate/replacement
+        implementation exists anywhere else in this file — this is the
+        one real copy, now restored to unconditional rendering to
+        match its unguarded siblings (tv-clock/tv-status-banner) just
+        above.
+    --}}
 
     {{--
-        TV Mode's combined "everything that matches, worst first"
-        slide — populated in JS (tvBuildCombinedSlides()) with clones
-        of whichever devices/location cards from MDF Servers/Power/
-        Infrastructure/IDF/Other Locations currently match Settings'
-        criteria, sorted Critical-first, shown on one static screen
-        with no rotation whenever it all fits, paginated only when
-        there's more than fits. Empty by default; never touched
-        outside TV Mode. `infra-section-header` reused deliberately
-        (not a new class) so tvEstimateChunkSize()'s existing chrome-
-        height measurement (which looks for that exact selector)
-        works for this slide too, without needing its own special
-        case.
+        The tv-clock / tv-status-banner / tv-clear-slide / tv-combined-slide
+        elements that used to be duplicated here (an artifact of commit
+        5b44ff8's in-progress edit) were removed — the real, single copies
+        of all four already render unconditionally/TV-gated just above
+        (see lines ~1905-1909), before this @if(false)-wrapped section
+        used to begin. Duplicating them here would have produced two
+        DOM nodes per selector, which the TV rotation JS
+        (document.querySelector('[data-tv-combined-slide]'), etc.) is
+        not written to expect.
     --}}
-    <div class="tv-combined-slide" data-tv-combined-slide>
-        <header class="infra-section-header">
-            <h2 class="infra-section-title">
-                <i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i>
-                All Issues — Worst First
-            </h2>
-
-            <div class="infra-section-meta" data-tv-combined-meta></div>
-        </header>
-
-        <div class="tv-combined-grid" data-tv-combined-grid></div>
-    </div>
 
     {{--
         Minimal, operational-only toolbar — Severity/Problem/Section
@@ -2670,7 +2659,6 @@
             </div>
         </div>
     </section>
-    @endif
 </div>
 
 <script>
