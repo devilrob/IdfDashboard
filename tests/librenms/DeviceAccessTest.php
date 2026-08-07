@@ -1226,6 +1226,7 @@ class DeviceAccessTest extends TestCase
         ]);
         $this->assertSame(2, $a['visibleSummary']['critical_devices'], 'Caso A: critical (caso-critical + caso-pdu-stale-critical).');
         $this->assertSame(1, $a['visibleSummary']['warning_devices']);
+        $this->assertSame(0, $a['visibleSummary']['unknown_devices'], 'Caso A: Unknown is off — the desktop summary-panel\'s "Needs review" card must read 0, not the raw fleet count.');
         $this->assertSame(3, $a['visibleSummary']['devices'], 'Caso A: only critical/warning devices are visible.');
         $visibleIdsA = collect($a['priorityAttention']['items'])->pluck('device_id')->all();
         $this->assertEqualsCanonicalizing(
@@ -1389,6 +1390,12 @@ class DeviceAccessTest extends TestCase
         $baseline = $run([]);
         $tvDevicesBaseline = $otherLocationDevices($baseline);
         $this->assertSame('stale', $tvDevicesBaseline->get($stale->device_id)['health']);
+        // Unknown is on by default (Config::visibilityPolicy()'s
+        // 'unknown' => true), so the desktop summary-panel's "Needs
+        // review" card must count the real Unknown-classified device
+        // here, not silently read 0 the way it would if the panel were
+        // still wired to a policy-unaware source.
+        $this->assertSame(1, $baseline['visibleSummary']['unknown_devices'], 'Baseline: Unknown is on by default, so the one Unknown-classified fixture device is counted.');
     }
 
     /**

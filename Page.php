@@ -666,6 +666,7 @@ class Page extends PageHook
         $visibleSummary = [
             'critical_devices' => $policyVisibleDevices->where('health', Severity::CRITICAL)->count(),
             'warning_devices' => $policyVisibleDevices->where('health', Severity::WARNING)->count(),
+            'unknown_devices' => $policyVisibleDevices->where('health', Severity::UNKNOWN)->count(),
             'devices_down' => $policyVisibleDevices
                 ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
                 ->count(),

@@ -2223,6 +2223,25 @@
         </div>
     </div>
 
+    {{--
+        This panel is desktop-only — .summary-panel is force-hidden by
+        `body.tv-mode-active .summary-panel { display: none !important }`
+        and TV's own slide-rotation JS (tvShowSlide()) never adds
+        tv-active-slide to it, so it never appears during TV Mode
+        rotation regardless of its data-dashboard-section attribute.
+
+        Its six severity/problem-derived cards (Devices down, Critical,
+        Warning, Needs review, Service issues, Stale power sensors, No
+        sensor installed) now read from $visibleSummary, the same
+        centralized severity-policy source the header bar above and TV
+        Mode already use — this panel used to read the raw, policy-
+        unaware $summary block, so a desktop viewer could see two
+        different counts for the same "Critical devices" concept on one
+        page depending only on which panel they looked at. Devices up
+        and Active alerts stay on $summary deliberately: operational
+        status and the underlying LibreNMS alert count are not
+        themselves severities the default_severity_* policy governs.
+    --}}
     <div
         class="summary-panel"
         data-dashboard-section="summary"
@@ -2236,36 +2255,36 @@
 
         <div class="summary-card">
             <div class="summary-label">Devices down</div>
-            <div class="summary-value {{ $summary['devices_down'] > 0 ? 'status-down' : 'status-up' }}">
-                {{ $summary['devices_down'] }}
+            <div class="summary-value {{ $visibleSummary['devices_down'] > 0 ? 'status-down' : 'status-up' }}">
+                {{ $visibleSummary['devices_down'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Critical devices</div>
             <div class="summary-value text-danger">
-                {{ $summary['critical_devices'] }}
+                {{ $visibleSummary['critical_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Warning devices</div>
             <div class="summary-value text-warning">
-                {{ $summary['warning_devices'] }}
+                {{ $visibleSummary['warning_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Needs review</div>
             <div class="summary-value text-info">
-                {{ $summary['unknown_devices'] }}
+                {{ $visibleSummary['unknown_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Service issues</div>
-            <div class="summary-value {{ $summary['service_problems'] > 0 ? 'text-danger' : 'status-up' }}">
-                {{ $summary['service_problems'] }}
+            <div class="summary-value {{ $visibleSummary['service_problems'] > 0 ? 'text-danger' : 'status-up' }}">
+                {{ $visibleSummary['service_problems'] }}
             </div>
         </div>
 
@@ -2278,15 +2297,15 @@
 
         <div class="summary-card">
             <div class="summary-label">Stale power sensors</div>
-            <div class="summary-value {{ $summary['stale_sensor_devices'] > 0 ? 'text-warning' : 'status-up' }}">
-                {{ $summary['stale_sensor_devices'] }}
+            <div class="summary-value {{ $visibleSummary['stale_sensor_devices'] > 0 ? 'text-warning' : 'status-up' }}">
+                {{ $visibleSummary['stale_sensor_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">No sensor installed</div>
             <div class="summary-value text-muted">
-                {{ $summary['no_sensor_installed'] }}
+                {{ $visibleSummary['no_sensor_installed'] }}
             </div>
         </div>
     </div>
