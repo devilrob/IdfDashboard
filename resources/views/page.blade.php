@@ -1626,18 +1626,39 @@
     // filtering, which is exactly the kind of two-source drift that
     // let TV Mode silently stop respecting Settings. 'global' context:
     // this `defaults` object backs desktop's session-local `state`
-    // (which starts from it and can diverge per viewer) and TV Mode's
-    // own defense-in-depth re-check — the actual TV-specific
-    // `tv_hide_*` restriction enforcement happens server-side in
-    // Page.php's $tvPolicy, so a device this array still marks visible
-    // can never appear in TV's DOM if $tvPolicy already excluded it.
+    // (which starts from it and can diverge per viewer), so it must
+    // never carry the TV-only `tv_hide_*` restrictions — a viewer's
+    // default classic-grid filter should reflect the global severity
+    // policy, not a wall-display-specific one.
     $tvDefaults = \App\Plugins\IdfDashboard\Support\Config::visibilityPolicy($config);
+
+    /*
+     * $tv['policy'] (this request's already-computed $tvPolicy — 'tv'
+     * context, WITH tv_hide_* intersected) is exposed separately for
+     * tvDeviceMatches()'s own re-check. TV Mode has two entry points:
+     * the real ?tv=1 navigation (`data-enter-tv`), where the server
+     * has already restricted $sectionMdfServers/etc. to $tvPolicy
+     * before this markup ever reaches the browser — so this re-check
+     * is a harmless, redundant defense-in-depth pass there — and the
+     * classic grid's own client-side-only rotation toggle
+     * (`data-action="tv"`, no navigation, no server re-render), whose
+     * underlying markup is the FULL, un-tv-filtered classic grid.
+     * Re-checking against the 'global'-only $tvDefaults there would
+     * silently let a tv_hide_*-restricted severity (e.g. Stale, with
+     * default_severity_stale on but tv_hide_stale on) rotate onto
+     * screen — real fleet content reaching a "TV Mode" presentation
+     * without ever having been server-filtered by the TV-specific
+     * policy. tvDeviceMatches() must use this stricter object, never
+     * $tvDefaults, so both entry points enforce the same policy.
+     */
+    $tvOnlyDefaults = $tv['policy'];
 
 @endphp
 
 <div
     class="infra-dashboard"
     data-idf-defaults="{{ json_encode($tvDefaults) }}"
+    data-idf-tv-only-defaults="{{ json_encode($tvOnlyDefaults) }}"
     data-idf-settings-version="{{ $settingsVersion }}"
     data-idf-refresh-seconds="{{ $refreshSeconds }}"
     data-idf-animations-enabled="{{ $config['animations_enabled'] ? '1' : '0' }}"
@@ -2807,6 +2828,21 @@ function initDashboard() {
         ? JSON.parse(dashboardEl.dataset.idfDefaults)
         : {};
 
+    // The TV-context policy (Page.php's $tvPolicy, exposed as
+    // $tv['policy']) — the same 'global' object above with tv_hide_*
+    // additionally intersected in. tvDeviceMatches() must use this,
+    // never `defaults`: the classic grid's own client-side-only "TV
+    // Mode" toggle (`data-action="tv"`, no page navigation) renders
+    // from the un-tv-filtered classic grid, so this client-side
+    // re-check is the ONLY place tv_hide_* is enforced on that path —
+    // falling back to `defaults` here is intentional only if this
+    // attribute is somehow missing (e.g. an older cached fragment),
+    // matching the server's own fail-open-to-global behavior for a
+    // policy field it cannot resolve.
+    const tvOnlyDefaults = dashboardEl && dashboardEl.dataset.idfTvOnlyDefaults
+        ? JSON.parse(dashboardEl.dataset.idfTvOnlyDefaults)
+        : defaults;
+
     const parsedRefreshSeconds = dashboardEl
         ? Number.parseInt(dashboardEl.dataset.idfRefreshSeconds, 10)
         : NaN;
@@ -3406,14 +3442,16 @@ function initDashboard() {
     // what Settings actually says. Reported directly: "solo quiero que
     // salga los devices que tiene los criterios puesto en setting" —
     // an unattended wall display must show exactly the Settings-
-    // configured criteria (`defaults`), never a stray local override.
-    // `tvDeviceMatches()`/`defaults` below are TV Mode's own copy of
-    // `deviceMatches()`/`state` for exactly this reason; the
-    // interactive view keeps using `state` unchanged.
+    // configured criteria (`tvOnlyDefaults`, not the interactive
+    // `state`), never a stray local override. `tvDeviceMatches()`
+    // deliberately reads `tvOnlyDefaults` (tv_hide_* included), not
+    // the plain `defaults` the desktop `state` starts from — see the
+    // comment on `tvOnlyDefaults`'s own definition above for why both
+    // TV Mode entry points need the stricter object here specifically.
     function tvDeviceMatches(device) {
         const health = device.dataset.health || 'healthy';
 
-        if (!defaults[health]) {
+        if (!tvOnlyDefaults[health]) {
             return false;
         }
 
@@ -3424,11 +3462,11 @@ function initDashboard() {
         const problems = parseProblems(device);
 
         if (problems.length === 0) {
-            return Boolean(defaults.other);
+            return Boolean(tvOnlyDefaults.other);
         }
 
         return problems.some(function (problem) {
-            return Boolean(defaults[problemPolicyKey(problem)]);
+            return Boolean(tvOnlyDefaults[problemPolicyKey(problem)]);
         });
     }
 

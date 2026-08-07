@@ -779,6 +779,47 @@ $assert(
     'page.blade.php: the shared MDF/IDF/Other Locations sections source from server-filtered $tv[...] collections in TV mode'
 );
 
+// --- Section 6: TV Mode has two entry points — the real ?tv=1
+// navigation (server-filtered markup, defaults re-check is a harmless
+// no-op) and the classic grid's own client-side-only rotation toggle
+// (`data-action="tv"`, no navigation, renders from the un-tv-filtered
+// classic grid). tvDeviceMatches() is the ONLY enforcement point for
+// tv_hide_* on that second path, so it must consult the TV-context
+// policy ($tv['policy'], WITH tv_hide_* intersected), never the
+// 'global'-only $tvDefaults the desktop `state` starts from — using
+// the global object there would let a tv_hide_*-restricted severity
+// rotate onto an unattended screen via that entry point. -------------
+$assert(
+    str_contains($bladeSource, "\$tvOnlyDefaults = \$tv['policy']"),
+    "page.blade.php: \$tvOnlyDefaults is Page.php's already-computed \$tv['policy'] (TV context), not an independently hand-assembled array"
+);
+$assert(
+    str_contains($bladeSource, 'data-idf-tv-only-defaults="{{ json_encode($tvOnlyDefaults) }}"'),
+    'page.blade.php: the TV-context policy is exposed to JS via its own data attribute, separate from the global-context data-idf-defaults'
+);
+$assert(
+    str_contains($bladeSource, 'const tvOnlyDefaults = dashboardEl && dashboardEl.dataset.idfTvOnlyDefaults'),
+    'page.blade.php: the JS side reads the TV-context policy from data-idf-tv-only-defaults'
+);
+preg_match('/function tvDeviceMatches\(device\) \{.*?\n    \}/s', $bladeSource, $tvDeviceMatchesMatch);
+$tvDeviceMatchesBody = $tvDeviceMatchesMatch[0] ?? '';
+$assert(
+    $tvDeviceMatchesBody !== '' && ! str_contains($tvDeviceMatchesBody, 'defaults[')
+        && str_contains($tvDeviceMatchesBody, 'tvOnlyDefaults['),
+    'page.blade.php: tvDeviceMatches() reads exclusively from tvOnlyDefaults (TV-context, tv_hide_* included), never the global-only defaults object — the exact regression that would let tv_hide_* be silently bypassed via the classic grid\'s client-side-only TV Mode toggle'
+);
+// loadPersistedState()/state (the desktop classic-grid interactive
+// filter) must stay on the global-context `defaults` — tv_hide_* is a
+// wall-display-specific restriction and must never leak into what a
+// viewer sees by default when just browsing the classic grid.
+preg_match('/function loadPersistedState\(\) \{.*?\n    \}/s', $bladeSource, $loadPersistedStateMatch);
+$loadPersistedStateBody = $loadPersistedStateMatch[0] ?? '';
+$assert(
+    $loadPersistedStateBody !== '' && str_contains($loadPersistedStateBody, 'defaults[key]')
+        && ! str_contains($loadPersistedStateBody, 'tvOnlyDefaults'),
+    'page.blade.php: loadPersistedState() (the desktop classic-grid filter) stays on the global-context defaults object — tv_hide_* must not leak into the desktop\'s default interactive filter state'
+);
+
 // --- Section 10: a defensive, worst-first, never-drops-Critical DOM
 // ceiling exists for TV Mode's flat device sections. --------------------
 $assert(
