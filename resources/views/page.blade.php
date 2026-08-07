@@ -2296,27 +2296,54 @@
         No devices match the selected filters.
     </div>
 
-    @php
-        // TV Mode renders this shared section markup from the
-        // server-filtered $tv[...] collections (Config::visibilityPolicy()
-        // + ProblemPolicy::deviceVisible(), computed once in Page::data());
-        // the interactive desktop view keeps the full authorized set so
-        // its own state/deviceMatches() session-local filtering still has
-        // everything to filter from — see the comment on $tvVisible in
-        // Page.php for why these two are deliberately not the same set.
-        $sectionMdfServers = $filters['tv'] ? $tv['mdfServers'] : $mdf['servers'];
-        $sectionMdfServerCount = $filters['tv'] ? $tv['mdfServers']->count() : $mdf['server_count'];
-        $sectionMdfPower = $filters['tv'] ? $tv['mdfPower'] : $mdf['power'];
-        $sectionMdfPowerCount = $filters['tv'] ? $tv['mdfPower']->count() : $mdf['power_count'];
-        $sectionMdfInfrastructure = $filters['tv'] ? $tv['mdfInfrastructure'] : $mdf['infrastructure'];
-        $sectionMdfInfrastructureCount = $filters['tv'] ? $tv['mdfInfrastructure']->count() : $mdf['infrastructure_count'];
-        $sectionIdfLocations = $filters['tv'] ? $tv['idfLocations'] : $locations;
-        $sectionIdfLocationCount = $filters['tv'] ? $tv['idfLocations']->count() : $summary['idf_locations'];
-        $sectionIdfDeviceCount = $filters['tv'] ? $tv['idfLocations']->sum('total') : $summary['idf_devices'];
-        $sectionOtherLocations = $filters['tv'] ? $tv['otherLocations'] : $otherLocations;
-        $sectionOtherLocationCount = $filters['tv'] ? $tv['otherLocations']->count() : $summary['other_locations'];
-        $sectionOtherDeviceCount = $filters['tv'] ? $tv['otherLocations']->sum('total') : $summary['other_devices'];
-    @endphp
+    {{--
+        TV Mode renders this shared section markup from the
+        server-filtered $tv[...] collections (Config::visibilityPolicy()
+        + ProblemPolicy::deviceVisible(), computed once in Page::data());
+        the interactive desktop view keeps the full authorized set so
+        its own state/deviceMatches() session-local filtering still has
+        everything to filter from — see the comment on $tvVisible in
+        Page.php for why these two are deliberately not the same set.
+
+        Root-cause note (deliberately paraphrased below, avoiding the
+        literal directive spellings, since BladeCompiler's own raw-PHP-
+        block extraction runs BEFORE comment stripping and would
+        otherwise treat this very explanation as more of the same bug it
+        describes): this section is written as 12 individual inline
+        "run this one php expression" statements rather than one bare-
+        keyword-then-matching-close-tag block. Blade's compiler locates
+        that closing tag with a regex that does not distinguish an
+        inline, self-terminating statement from the start of a real
+        block — so an EARLIER inline statement with no close tag of its
+        own (several exist a little above this comment, in the Phase 2
+        view-switch content) will happily treat ANY later real block's
+        close tag, anywhere else in the file, as its own — silently
+        swallowing every line of markup in between into one opaque,
+        never-compiled placeholder. This block's own close tag used to
+        be exactly that later, wrongly-claimed tag. Confirmed directly
+        against Laravel's real Blade compiler, on both this file's
+        current content and the original pre-Phase-3A revision (proving
+        this predates and is unrelated to any Phase 3 change): the
+        resulting compiled output is invalid PHP ("unexpected token
+        class" / "unexpected end of file, expecting elseif or else or
+        endif" — matching the exact class of error real CI reported
+        here). Rewriting every statement in this block to the same
+        self-terminating inline form used above removes the only
+        remaining close tag anywhere after those earlier statements,
+        so there is nothing left for that regex to wrongly match.
+    --}}
+    @php($sectionMdfServers = $filters['tv'] ? $tv['mdfServers'] : $mdf['servers'])
+    @php($sectionMdfServerCount = $filters['tv'] ? $tv['mdfServers']->count() : $mdf['server_count'])
+    @php($sectionMdfPower = $filters['tv'] ? $tv['mdfPower'] : $mdf['power'])
+    @php($sectionMdfPowerCount = $filters['tv'] ? $tv['mdfPower']->count() : $mdf['power_count'])
+    @php($sectionMdfInfrastructure = $filters['tv'] ? $tv['mdfInfrastructure'] : $mdf['infrastructure'])
+    @php($sectionMdfInfrastructureCount = $filters['tv'] ? $tv['mdfInfrastructure']->count() : $mdf['infrastructure_count'])
+    @php($sectionIdfLocations = $filters['tv'] ? $tv['idfLocations'] : $locations)
+    @php($sectionIdfLocationCount = $filters['tv'] ? $tv['idfLocations']->count() : $summary['idf_locations'])
+    @php($sectionIdfDeviceCount = $filters['tv'] ? $tv['idfLocations']->sum('total') : $summary['idf_devices'])
+    @php($sectionOtherLocations = $filters['tv'] ? $tv['otherLocations'] : $otherLocations)
+    @php($sectionOtherLocationCount = $filters['tv'] ? $tv['otherLocations']->count() : $summary['other_locations'])
+    @php($sectionOtherDeviceCount = $filters['tv'] ? $tv['otherLocations']->sum('total') : $summary['other_devices'])
 
     <section
         class="infra-section"
