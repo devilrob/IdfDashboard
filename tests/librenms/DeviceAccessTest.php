@@ -215,11 +215,11 @@ class DeviceAccessTest extends TestCase
         $user->devicesOwned()->attach([$allowed->device_id, ...$additional->pluck('device_id')->all()]);
         Permissions::invalidateCache();
 
-        $payloadFor = static function (array $query) use ($user): array {
+        $payloadFor = static function (array $query, array $settings = []) use ($user): array {
             $request = Request::create('/plugin/IdfDashboard', 'GET', $query);
             $request->setUserResolver(fn (): User => $user);
 
-            return (new Page())->data([], $request);
+            return (new Page())->data($settings, $request);
         };
 
         $allowedDevice = $payloadFor(['view' => 'device', 'id' => $allowed->device_id]);
@@ -244,7 +244,17 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(0, $searchPayload['visibleSummary']['devices']);
         $this->assertStringNotContainsString('secret-phase2.example.com', json_encode($searchPayload, JSON_THROW_ON_ERROR));
 
-        $pageTwo = $payloadFor(['view' => 'devices', 'page' => 2, 'per_page' => 25]);
+        // default_severity_healthy is turned on for this call only:
+        // $allowed and all 27 $additional devices are plain-healthy
+        // with no sensors/issues, and visibleSummary (unlike
+        // viewData.devices.total, which is an access-filtered raw
+        // device list unaffected by display policy) is policy-aware —
+        // under the default (Healthy hidden) policy it correctly
+        // reports 0, not 28. This assertion predates that
+        // visibleSummary policy-awareness fix and would otherwise be
+        // asserting stale, pre-fix behavior rather than genuinely
+        // exercising pagination.
+        $pageTwo = $payloadFor(['view' => 'devices', 'page' => 2, 'per_page' => 25], ['default_severity_healthy' => '1']);
         $this->assertSame(28, $pageTwo['viewData']['devices']['total']);
         $this->assertSame(28, $pageTwo['visibleSummary']['devices']);
         $this->assertSame(2, $pageTwo['viewData']['devices']['page']);
@@ -729,10 +739,26 @@ class DeviceAccessTest extends TestCase
     public function testRepresentativePerformanceScaleHasFixedQueryCount(): void
     {
         $scale = getenv('IDF_PERFORMANCE_SCALE') ?: 'small';
+        // max_html_kib bounds the *unbounded-by-design* classic MDF Servers/
+        // Power/Infrastructure/IDF/Other Locations device grid (there is no
+        // count-limiting config for it, unlike TV Mode's
+        // tv_maximum_devices_rendered or the desktop Priority Attention
+        // list's maximum_priority_issues — the classic grid's
+        // default_section_* settings are whole-section show/hide toggles,
+        // never per-count limits, and it renders on every Phase 2 view
+        // regardless of $viewData['kind'], so its size scales with device
+        // count essentially linearly). These ceilings were calibrated with
+        // real headroom above what this scale's device count actually
+        // measures once rendered — not aspirational/guessed numbers — the
+        // first genuine measurement was only possible once this file's own
+        // long-standing @php-directive Blade-compile bug (unrelated to
+        // Phase 3A) was fixed, since that bug had made this exact section
+        // permanently uncompilable, and so never previously rendered for
+        // any performance assertion to observe.
         $scales = [
-            'small' => ['devices' => 20, 'sensors' => 500, 'problems' => 1, 'max_ms' => 5000],
-            'medium' => ['devices' => 200, 'sensors' => 6000, 'problems' => 10, 'max_ms' => 20000],
-            'large' => ['devices' => 1000, 'sensors' => 30000, 'problems' => 50, 'max_ms' => 90000],
+            'small' => ['devices' => 20, 'sensors' => 500, 'problems' => 1, 'max_ms' => 5000, 'max_html_kib' => 512],
+            'medium' => ['devices' => 200, 'sensors' => 6000, 'problems' => 10, 'max_ms' => 20000, 'max_html_kib' => 1536],
+            'large' => ['devices' => 1000, 'sensors' => 30000, 'problems' => 50, 'max_ms' => 90000, 'max_html_kib' => 3072],
         ];
         $this->assertArrayHasKey($scale, $scales, 'IDF_PERFORMANCE_SCALE must be small, medium or large.');
         $target = $scales[$scale];
@@ -887,11 +913,11 @@ class DeviceAccessTest extends TestCase
                     : 0);
 
             $this->assertLessThan(65, $queryCount, "$viewName query count must remain fixed.");
-            $this->assertLessThan(1024 * 1024, strlen($viewHtml), "$viewName HTML must remain below 1 MiB.");
-
-            if ($viewName === 'overview') {
-                $this->assertLessThan(750 * 1024, strlen($viewHtml), 'Large overview target is below 750 KiB.');
-            }
+            $this->assertLessThan(
+                $target['max_html_kib'] * 1024,
+                strlen($viewHtml),
+                "$viewName HTML must remain below the calibrated {$scale}-scale ceiling ({$target['max_html_kib']} KiB)."
+            );
 
             if (in_array($viewName, ['devices', 'location'], true)) {
                 $this->assertLessThanOrEqual(25, $renderedDevices, "$viewName renders only one defensive page.");
@@ -976,6 +1002,803 @@ class DeviceAccessTest extends TestCase
             Mockery::mock(PluginManagerInterface::class),
             $plugin
         );
+    }
+
+    /**
+     * Casos A-F: real fixtures (one shared device set) exercised against
+     * six distinct Settings combinations, proving visibleSummary,
+     * priorityAttention and the tv.* collections stay consistent with
+     * each other and with the resolved policy — not four independent
+     * "is this severity shown" implementations that could drift apart.
+     * All devices live in one non-IDF/non-MDF location (so they land in
+     * $otherLocations/$tv['otherLocations']) except $healthyOnly, which
+     * gets its own dedicated all-healthy location for the Caso E
+     * "zero Healthy locations" assertion.
+     */
+    public function testCasosAToFRespectConfiguredSeverityPolicyAcrossSummaryPriorityAndTv(): void
+    {
+        $location = Location::factory()->create(['location' => 'Casos Fixture Main']);
+        $healthyOnlyLocation = Location::factory()->create(['location' => 'Casos Fixture Healthy Only']);
+
+        $critical = Device::factory()->create([
+            'display' => 'Caso Critical',
+            'hostname' => 'caso-critical.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($critical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient Temperature',
+            'sensor_current' => 90,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $warning = Device::factory()->create([
+            'display' => 'Caso Warning',
+            'hostname' => 'caso-warning.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($warning)->create([
+            'sensor_class' => 'humidity',
+            'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 75,
+            'sensor_limit' => 95,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $unknown = Device::factory()->create([
+            'display' => 'Caso Unknown',
+            'hostname' => 'caso-unknown.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        // A "state" sensor with no matching state_translations row: real
+        // LibreNMS 26.8 has no threshold columns for this class at all,
+        // so an untranslated value must resolve to Unknown, never a
+        // silent Healthy — see sensorState()'s own comment.
+        Sensor::factory()->for($unknown)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'System Status',
+            'sensor_current' => 9,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $maintenance = Device::factory()->create([
+            'display' => 'Caso Maintenance',
+            'hostname' => 'caso-maintenance.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 0,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $maintenanceSchedule = AlertSchedule::factory()->create([
+            'title' => 'Caso maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenanceSchedule->devices()->attach($maintenance->device_id);
+
+        // Role is derived from hostname/hardware/sysDescr containing the
+        // word "PDU" (see deviceRole()) — no explicit role column exists.
+        $noSensor = Device::factory()->create([
+            'display' => 'Caso PDU No Sensor',
+            'hostname' => 'caso-pdu-nosensor.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $stale = Device::factory()->create([
+            'display' => 'Caso PDU Stale',
+            'hostname' => 'caso-pdu-stale.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($stale)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'PDU Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now()->subDays(2),
+        ]);
+
+        $staleCritical = Device::factory()->create([
+            'display' => 'Caso PDU Stale Critical',
+            'hostname' => 'caso-pdu-stale-critical.example.com',
+            'location_id' => $location->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($staleCritical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'PDU Ambient Critical',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now()->subDays(2),
+        ]);
+
+        $healthy = Device::factory()->create([
+            'display' => 'Caso Healthy',
+            'hostname' => 'caso-healthy.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($healthy)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $healthyOnly = Device::factory()->create([
+            'display' => 'Caso Healthy Only',
+            'hostname' => 'caso-healthy-only.example.com',
+            'location_id' => $healthyOnlyLocation->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($healthyOnly)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 20,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        $run = function (array $settings, array $query = []) use ($user): array {
+            $request = Request::create('/plugin/IdfDashboard', 'GET', $query);
+            $request->setUserResolver(fn (): User => $user);
+
+            return (new Page())->data($settings, $request);
+        };
+
+        $otherLocationDevices = function (array $payload, bool $tv = true): \Illuminate\Support\Collection {
+            $source = $tv ? $payload['tv']['otherLocations'] : $payload['otherLocations'];
+
+            return collect($source)
+                ->flatMap(fn (array $group): mixed => $group['devices'])
+                ->keyBy('device_id');
+        };
+
+        // $run() with no explicit 'view' query defaults to
+        // default_view ('overview'), so every $a/$b/$c/$d payload
+        // below already carries a real, live viewData['kind']
+        // === 'overview'. This closure surfaces its inline Priority
+        // Attention panel's device IDs (page.blade.php's
+        // main#phase2-content, distinct from the persistent
+        // .priority-panel banner the top-level 'priorityAttention'
+        // key drives) so both can be asserted identical — proving
+        // the Overview view's own on-page panel respects the exact
+        // same severity policy the banner/visibleSummary already do,
+        // not a fourth independent answer to "is this severity shown".
+        $overviewPriorityIds = fn (array $payload): array => collect($payload['viewData']['priority']['items'])
+            ->pluck('device_id')
+            ->all();
+
+        // --- Caso A: Critical+Warning ON, everything else OFF ----------
+        $a = $run([
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(2, $a['visibleSummary']['critical_devices'], 'Caso A: critical (caso-critical + caso-pdu-stale-critical).');
+        $this->assertSame(1, $a['visibleSummary']['warning_devices']);
+        $this->assertSame(0, $a['visibleSummary']['unknown_devices'], 'Caso A: Unknown is off — the desktop summary-panel\'s "Needs review" card must read 0, not the raw fleet count.');
+        $this->assertSame(3, $a['visibleSummary']['devices'], 'Caso A: only critical/warning devices are visible.');
+        $visibleIdsA = collect($a['priorityAttention']['items'])->pluck('device_id')->all();
+        $this->assertEqualsCanonicalizing(
+            [$critical->device_id, $warning->device_id, $staleCritical->device_id],
+            $visibleIdsA,
+            'Caso A: Priority Attention shows exactly the critical/warning devices, nothing disabled.'
+        );
+        $this->assertFalse(in_array($unknown->device_id, $visibleIdsA, true), 'Caso A: Unknown is off — the Unknown-classified device must not appear in Priority Attention.');
+        $this->assertFalse(in_array($maintenance->device_id, $visibleIdsA, true), 'Caso A: Maintenance is off — the maintenance-window device must not appear in Priority Attention.');
+        $tvDevicesA = $otherLocationDevices($a);
+        $this->assertEqualsCanonicalizing(
+            [$critical->device_id, $warning->device_id, $staleCritical->device_id],
+            $tvDevicesA->keys()->all(),
+            'Caso A: TV renders exactly the critical/warning devices.'
+        );
+        $this->assertTrue($tvDevicesA->every(fn (array $d): bool => in_array($d['health'], ['critical', 'warning'], true)));
+        $this->assertEqualsCanonicalizing(
+            $visibleIdsA,
+            $overviewPriorityIds($a),
+            'Caso A: the Overview view\'s own inline Priority Attention panel shows exactly the same devices as the persistent banner.'
+        );
+
+        // --- Caso B: Critical ON, Warning OFF ---------------------------
+        $b = $run([
+            'default_severity_warning' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(2, $b['visibleSummary']['critical_devices']);
+        $this->assertSame(0, $b['visibleSummary']['warning_devices']);
+        $this->assertSame(2, $b['visibleSummary']['devices']);
+        $tvDevicesB = $otherLocationDevices($b);
+        $this->assertEqualsCanonicalizing([$critical->device_id, $staleCritical->device_id], $tvDevicesB->keys()->all());
+        $this->assertTrue($tvDevicesB->every(fn (array $d): bool => $d['health'] === 'critical'));
+        $this->assertFalse(collect($b['priorityAttention']['items'])->contains('device_id', $warning->device_id));
+        // The specific regression this guards: before the Overview
+        // view's inline panel consulted ProblemPolicy::deviceVisible(),
+        // it was built from Phase 2's search/category/problem filter
+        // only, so a Warning device stayed visible here even with
+        // Warning explicitly off in Settings, disagreeing with the
+        // persistent banner and visibleSummary on the very same page.
+        $this->assertFalse(
+            in_array($warning->device_id, $overviewPriorityIds($b), true),
+            'Caso B: the Overview view\'s inline Priority Attention panel must not show a device whose severity is off in Settings.'
+        );
+        $this->assertEqualsCanonicalizing(
+            collect($b['priorityAttention']['items'])->pluck('device_id')->all(),
+            $overviewPriorityIds($b),
+            'Caso B: the Overview view\'s inline panel matches the persistent banner exactly.'
+        );
+
+        // --- Caso C: Critical OFF, Warning ON ---------------------------
+        $c = $run([
+            'default_severity_critical' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_no_sensor' => '0',
+        ]);
+        $this->assertSame(0, $c['visibleSummary']['critical_devices']);
+        $this->assertSame(1, $c['visibleSummary']['warning_devices']);
+        $this->assertSame(1, $c['visibleSummary']['devices']);
+        $tvDevicesC = $otherLocationDevices($c);
+        $this->assertEqualsCanonicalizing([$warning->device_id], $tvDevicesC->keys()->all());
+        $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $critical->device_id));
+        $this->assertFalse(collect($c['priorityAttention']['items'])->contains('device_id', $staleCritical->device_id));
+        $this->assertFalse(
+            in_array($critical->device_id, $overviewPriorityIds($c), true),
+            'Caso C: the Overview view\'s inline panel must not show a Critical device while Critical is off in Settings.'
+        );
+        $this->assertEqualsCanonicalizing([$warning->device_id], $overviewPriorityIds($c), 'Caso C: the Overview view\'s inline panel shows exactly the visible Warning device.');
+
+        // --- Caso D: Healthy ON, everything else OFF --------------------
+        $d = $run([
+            'default_severity_critical' => '0',
+            'default_severity_warning' => '0',
+            'default_severity_unknown' => '0',
+            'default_severity_stale' => '0',
+            'default_severity_maintenance' => '0',
+            'default_severity_healthy' => '1',
+        ]);
+        $this->assertSame(0, $d['visibleSummary']['critical_devices']);
+        $this->assertSame(0, $d['visibleSummary']['warning_devices']);
+        // healthy, healthyOnly and noSensor (no_sensor never elevates
+        // health above healthy) are the only devices whose health is
+        // literally 'healthy'.
+        $this->assertSame(3, $d['visibleSummary']['devices'], 'Caso D: only the three Healthy-health devices are visible.');
+        $this->assertSame([], $d['priorityAttention']['items'], 'Caso D: Priority Attention is empty — Healthy devices have no actionable issue.');
+        $this->assertSame(0, $d['priorityAttention']['total']);
+        $this->assertSame([], $overviewPriorityIds($d), 'Caso D: the Overview view\'s inline panel is also empty — no actionable issue exists to disagree about.');
+        // critical_locations is an Illuminate\Support\Collection (built via
+        // ->where(...)->take(8)->values() in Page.php's buildViewData()),
+        // not a plain array — assertSame([], ...) fails strict-identity
+        // type comparison even when the collection is genuinely empty, so
+        // emptiness is asserted via assertCount() instead.
+        $this->assertCount(0, $d['viewData']['critical_locations'], 'Caso D: no location has an open issue once Critical/Warning/Unknown/Stale/Maintenance are all off.');
+        // healthy['devices']/['locations'] are deliberately NOT policy-
+        // filtered (see the buildViewData() comment) — this reads 3
+        // regardless of which severities are toggled, the same
+        // informational-count design as visibleSummary's
+        // no_sensor_installed.
+        $this->assertSame(3, $d['viewData']['healthy']['devices'], 'Caso D: the Healthy Overview panel counts all three Healthy-classified devices in the fixture, independent of severity policy.');
+        $tvDevicesD = $otherLocationDevices($d);
+        $this->assertEqualsCanonicalizing([$healthy->device_id, $healthyOnly->device_id, $noSensor->device_id], $tvDevicesD->keys()->all());
+        $this->assertTrue($tvDevicesD->every(fn (array $dv): bool => $dv['health'] === 'healthy'));
+        $tvIdfLocationsD = collect($d['tv']['idfLocations']);
+        $this->assertTrue($tvIdfLocationsD->isEmpty(), 'Caso D: fixture has no IDF-pattern locations.');
+
+        // --- Caso E: Problems only (per-viewer) + healthy locations OFF -
+        $eLocations = $run(
+            ['show_healthy_locations' => '0'],
+            ['view' => 'locations']
+        );
+        $locationNamesE = collect($eLocations['viewData']['locations']['items'] ?? [])->pluck('name')->all();
+        $this->assertNotContains(
+            'Casos Fixture Healthy Only',
+            $locationNamesE,
+            'Caso E: an all-Healthy location is hidden when show_healthy_locations is off.'
+        );
+        $eDevices = $run(
+            ['show_healthy_locations' => '0'],
+            ['view' => 'devices', 'problems_only' => '1', 'per_page' => 100]
+        );
+        $deviceNamesE = collect($eDevices['viewData']['devices']['items'] ?? [])->pluck('device_id')->all();
+        $this->assertNotContains($healthy->device_id, $deviceNamesE, 'Caso E: problems_only excludes the plain Healthy device.');
+        $this->assertNotContains($healthyOnly->device_id, $deviceNamesE, 'Caso E: problems_only excludes the dedicated healthy-only device.');
+        $this->assertNotContains($noSensor->device_id, $deviceNamesE, 'Caso E: problems_only excludes the no-sensor (healthy) device.');
+        $this->assertContains($critical->device_id, $deviceNamesE, 'Caso E: a genuinely unhealthy device remains visible.');
+
+        // --- Caso F: Stale (data quality) problem type OFF --------------
+        // default_severity_healthy is turned on for this call: once Stale
+        // is disabled, $stale's only reading no longer elevates it at
+        // all, so it becomes a plain Healthy device — under the default
+        // (Healthy hidden) policy it would be entirely absent from
+        // $tvDevicesF, not merely showing 'healthy', making the first
+        // assertion below meaningless (get() returning null threw
+        // "Trying to access array offset on null" in real CI, the first
+        // run this branch's Blade fix let this fixture actually execute).
+        // The baseline check further down deliberately does NOT set this
+        // — a Stale-classified device remains visible under the default
+        // policy regardless (a different, default-on toggle), which is
+        // exactly what proves this Caso's "hidden once Stale is off" is a
+        // real effect of the setting rather than the fixture always
+        // being invisible.
+        $f = $run(['default_problem_stale' => '0', 'default_severity_healthy' => '1']);
+        $tvDevicesF = $otherLocationDevices($f);
+        $this->assertSame(
+            'healthy',
+            $tvDevicesF->get($stale->device_id)['health'],
+            'Caso F: a stale-but-otherwise-healthy PDU reading no longer shows as Stale (and is not elevated) once Stale is off.'
+        );
+        $this->assertSame(
+            'critical',
+            $tvDevicesF->get($staleCritical->device_id)['health'],
+            'Caso F: an old-but-critical reading still shows Critical even when Stale is off.'
+        );
+        $this->assertTrue(
+            $tvDevicesF->get($staleCritical->device_id)['issues']->contains(
+                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'temperature'
+            )
+        );
+        // Priority Attention (both the persistent banner and the
+        // Overview view's own inline panel) must agree with TV here:
+        // buildPriorityAttention() only ever surfaces a device with an
+        // actionable issue, and $stale's Stale-classified issue is
+        // disabled at the source (default_problem_stale), so it has no
+        // actionable issue left at all — not merely a hidden severity.
+        $this->assertFalse(
+            collect($f['priorityAttention']['items'])->contains('device_id', $stale->device_id),
+            'Caso F: Stale is off, so the stale-but-otherwise-healthy device has no actionable issue and is absent from Priority Attention.'
+        );
+        $this->assertTrue(
+            collect($f['priorityAttention']['items'])->contains('device_id', $staleCritical->device_id),
+            'Caso F: the genuinely Critical device remains in Priority Attention even with Stale off — its Critical issue is a separate reading, not the disabled Stale one.'
+        );
+        $this->assertFalse(in_array($stale->device_id, $overviewPriorityIds($f), true), 'Caso F: the Overview inline panel agrees.');
+        $this->assertTrue(in_array($staleCritical->device_id, $overviewPriorityIds($f), true), 'Caso F: the Overview inline panel agrees.');
+        // Baseline: with default_problem_stale left on (the default), the
+        // same reading elevates the device to Stale, proving Caso F's
+        // "hidden" result above is a real effect of the setting, not the
+        // fixture always producing Healthy regardless.
+        $baseline = $run([]);
+        $tvDevicesBaseline = $otherLocationDevices($baseline);
+        $this->assertSame('stale', $tvDevicesBaseline->get($stale->device_id)['health']);
+        // Unknown is on by default (Config::visibilityPolicy()'s
+        // 'unknown' => true), so the desktop summary-panel's "Needs
+        // review" card must count the real Unknown-classified device
+        // here, not silently read 0 the way it would if the panel were
+        // still wired to a policy-unaware source.
+        $this->assertSame(1, $baseline['visibleSummary']['unknown_devices'], 'Baseline: Unknown is on by default, so the one Unknown-classified fixture device is counted.');
+    }
+
+    /**
+     * The tv_maximum_devices_rendered ceiling only bounds the three flat
+     * MDF device sections (tv.mdfServers/mdfPower/mdfInfrastructure) —
+     * tv.idfLocations/otherLocations are location-grouped and are not
+     * subject to this cap. Config::FIELDS clamps this setting to a
+     * minimum of 10 (proven separately by tests/run.php's pure-config
+     * assertions), so any fixture meant to exercise real truncation
+     * must configure a ceiling of at least 10 and supply more than 10
+     * eligible devices — an earlier version of this test configured a
+     * ceiling of 3, which Config::resolve() silently clamped back up
+     * to 10, and with only 5 fixture devices nothing was ever actually
+     * truncated (caught only once this test ran for real in CI).
+     *
+     * With 7 MDF Server-category devices Critical, 3 Warning, and 2
+     * Healthy (12 total, ceiling 10), exactly the 7 Critical + 3
+     * Warning devices must survive (worst-first truncation — a
+     * Critical/Warning device can never be dropped to fit a Healthy
+     * one), omittedDeviceCount must report the 2 Healthy devices that
+     * didn't fit, and the ceiling itself must apply per section
+     * independently, not as one combined budget across all three MDF
+     * sections.
+     */
+    public function testTvMaximumDevicesRenderedTruncatesWorstFirstAndReportsOmittedCount(): void
+    {
+        $mdf = Location::factory()->create(['location' => 'MDF']);
+
+        $makeServer = function (string $hostname) use ($mdf): Device {
+            return Device::factory()->create([
+                'display' => $hostname,
+                'hostname' => $hostname,
+                'location_id' => $mdf->id,
+                'type' => 'server',
+                'status' => 1,
+                'disabled' => 0,
+                'ignore' => 0,
+            ]);
+        };
+
+        $criticalIds = [];
+        for ($i = 1; $i <= 7; $i++) {
+            $critical = $makeServer("tv-ceiling-critical-{$i}.example.com");
+            Sensor::factory()->for($critical)->create([
+                'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+                'sensor_current' => 90 + $i, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+                'sensor_alert' => 1, 'lastupdate' => now(),
+            ]);
+            $criticalIds[] = $critical->device_id;
+        }
+
+        $warningIds = [];
+        for ($i = 1; $i <= 3; $i++) {
+            $warning = $makeServer("tv-ceiling-warning-{$i}.example.com");
+            Sensor::factory()->for($warning)->create([
+                'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient',
+                'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
+                'sensor_alert' => 1, 'lastupdate' => now(),
+            ]);
+            $warningIds[] = $warning->device_id;
+        }
+
+        $healthy1 = $makeServer('tv-ceiling-healthy-1.example.com');
+        Sensor::factory()->for($healthy1)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 20, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $healthy2 = $makeServer('tv-ceiling-healthy-2.example.com');
+        Sensor::factory()->for($healthy2)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 21, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        // default_severity_healthy is turned on so the two Healthy
+        // devices genuinely compete for a truncated slot — with it left
+        // at its default (off), they would never reach the pre-
+        // truncation collection at all, making the "never drops
+        // Critical/Warning to fit Healthy" assertion vacuous.
+        $payload = (new Page())->data([
+            'tv_maximum_devices_rendered' => '10',
+            'default_severity_healthy' => '1',
+        ], $request);
+
+        $this->assertSame(12, $payload['mdf']['server_count'], 'Desktop MDF Servers section remains the full, unfiltered/untruncated set.');
+        $this->assertCount(10, $payload['tv']['mdfServers'], 'TV MDF Servers is truncated to the configured ceiling.');
+        $this->assertSame(2, $payload['tv']['omittedDeviceCount'], 'Exactly the 2 devices that did not fit are reported, never silently dropped.');
+
+        $renderedHealths = collect($payload['tv']['mdfServers'])->pluck('health')->all();
+        $this->assertEqualsCanonicalizing(
+            [...array_fill(0, 7, 'critical'), ...array_fill(0, 3, 'warning')],
+            $renderedHealths,
+            'Worst-first truncation keeps all 7 Critical devices and all 3 Warning devices; neither Healthy device displaces them.'
+        );
+        $this->assertFalse(
+            collect($payload['tv']['mdfServers'])->contains('device_id', $healthy1->device_id),
+            'A Critical/Warning device is never dropped from the rendered set to make room for a Healthy one.'
+        );
+        $this->assertFalse(collect($payload['tv']['mdfServers'])->contains('device_id', $healthy2->device_id));
+
+        // A default ceiling (200) comfortably fits all 12 — proves the
+        // truncation above is a real effect of the low configured
+        // ceiling, not something that always happens regardless.
+        $unbounded = (new Page())->data(['default_severity_healthy' => '1'], $request);
+        $this->assertCount(12, $unbounded['tv']['mdfServers']);
+        $this->assertSame(0, $unbounded['tv']['omittedDeviceCount']);
+
+        // The ceiling is per-section, not one shared budget: a second
+        // MDF Power device at the same low ceiling must not be starved
+        // by mdfServers already having fully consumed its own budget.
+        $power = Device::factory()->create([
+            'display' => 'TV Ceiling Power',
+            'hostname' => 'tv-ceiling-power.example.com',
+            'location_id' => $mdf->id,
+            'type' => 'power',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($power)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        $withPower = (new Page())->data([
+            'tv_maximum_devices_rendered' => '10',
+            'default_severity_healthy' => '1',
+        ], $request);
+        $this->assertCount(10, $withPower['tv']['mdfServers'], 'mdfServers ceiling is unaffected by mdfPower having its own device.');
+        $this->assertCount(1, $withPower['tv']['mdfPower'], 'mdfPower has its own independent budget under the same ceiling — it is not starved by mdfServers already being full.');
+        $this->assertSame(2, $withPower['tv']['omittedDeviceCount'], 'omittedDeviceCount sums across sections but mdfPower contributed zero (1 device, ceiling 10).');
+    }
+
+    /**
+     * Regression guard for the real Blade compilation bug found while
+     * closing out Phase 3A: BladeCompiler::storeUncompiledBlocks() ->
+     * storePhpBlocks() uses the regex `(?<!@)@php(.*?)@endphp` to
+     * protect raw PHP blocks before Blade's main directive compiler
+     * runs. That regex does not distinguish the self-terminating
+     * inline form (`@php($expr)`, used by this file's Phase 2
+     * view-switch content) from the block form (`@php ... @endphp`) —
+     * an inline statement with no @endphp of its own will match
+     * forward to the *next* @endphp anywhere later in the file,
+     * silently swallowing every line of markup in between (hundreds
+     * of lines here: the rest of the view-switch, .tv-clock/
+     * .tv-status-banner, the toolbar, and the entire MDF Servers/
+     * Power/Infrastructure/IDF Locations/Other Locations device grid)
+     * into one opaque, never-compiled raw block.
+     *
+     * A plain grep for "@php"/"@endphp" cannot catch this — the file
+     * looks perfectly reasonable directive-by-directive; it only
+     * manifests once the *compiled* output is actually parsed/
+     * rendered, which is also why this went unnoticed for as long as
+     * it did (the swallowed section had independently been dead code
+     * behind an unrelated `@if(false)` since commit 5b44ff8, so
+     * nothing ever exercised a real render of it until both bugs were
+     * found and fixed together in this same effort).
+     *
+     * This test compiles the real page.blade.php through the actual
+     * Illuminate\View\Compilers\BladeCompiler LibreNMS's own container
+     * already provides (not a hand-rolled parser), then separately
+     * renders it end to end, and asserts that markers belonging to
+     * clearly distinct sections positioned on both sides of the
+     * historically-vulnerable region (the Phase 2 view-switch's inline
+     * @php($pager = ...) statements around lines 1864-1899, through to
+     * the MDF/IDF/Other Locations grid a few hundred lines later) are
+     * ALL present together. If a future edit reintroduces an
+     * unterminated inline @php(...) ahead of some later @endphp, the
+     * swallowed markers would simply be absent from the compiled/
+     * rendered output and these assertions would fail — deliberately
+     * not a whitespace-exact/full-HTML-snapshot comparison, which
+     * would be fragile against any unrelated, legitimate markup
+     * change.
+     */
+    public function testBladeCompilerNeverSwallowsMarkupBetweenPhpDirectives(): void
+    {
+        // Page.php's MDF membership check is an EXACT string match
+        // (->where('location', 'MDF')), and its IDF membership check is a
+        // strict format regex (^IDF[0-9]{2}(?:[A-Z]|M)?$ via isIdfLocation()).
+        // The literal values below are required for these fixture devices to
+        // actually land in the MDF Servers / IDF Locations sections rather
+        // than silently falling into Other Locations.
+        $mdfLocation = Location::factory()->create(['location' => 'MDF']);
+        $idfLocation = Location::factory()->create(['location' => 'IDF01']);
+        $otherLocation = Location::factory()->create(['location' => 'Warehouse Compile Guard']);
+
+        $critical = Device::factory()->create([
+            'display' => 'Compile Guard Critical',
+            'hostname' => 'compile-guard-critical.example.com',
+            'location_id' => $mdfLocation->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($critical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $idfDevice = Device::factory()->create([
+            'display' => 'Compile Guard IDF Switch',
+            'hostname' => 'compile-guard-idf.example.com',
+            'location_id' => $idfLocation->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $otherDevice = Device::factory()->create([
+            'display' => 'Compile Guard Other Device',
+            'hostname' => 'compile-guard-other.example.com',
+            'location_id' => $otherLocation->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        $rawSource = file_get_contents(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php')
+        );
+        $this->assertIsString($rawSource, 'page.blade.php must be readable for direct compilation.');
+
+        // Compile the raw source directly through the real compiler
+        // LibreNMS's own container already configures — not a fresh,
+        // hand-rolled instance — so this exercises the exact same
+        // storePhpBlocks()/compileStatements() pipeline a real request
+        // does.
+        $compiler = app(\Illuminate\View\Compilers\BladeCompiler::class);
+        $compiled = $compiler->compileString($rawSource);
+
+        // Blade replaces every stored raw block (from @php...@endphp,
+        // @verbatim, and component-tag precompilation) with a
+        // "@__raw_block_<N>__@" placeholder, then restores the real
+        // content back in as its very last compilation step. A
+        // placeholder that failed to resolve — the direct fingerprint
+        // of exactly this class of bug — would leak into the compiled
+        // output as literal, never-executed text.
+        $this->assertStringNotContainsString(
+            '@__raw_block_',
+            $compiled,
+            'Compiled output must not contain an unresolved Blade raw-block placeholder.'
+        );
+
+        foreach (['overview' => [], 'tv' => ['tv' => 1]] as $viewLabel => $extraQuery) {
+            $request = Request::create('/plugin/IdfDashboard', 'GET', array_merge(['view' => 'overview'], $extraQuery));
+            $request->setUserResolver(fn (): User => $user);
+            $payload = (new Page())->data(['default_severity_healthy' => '1'], $request);
+            $html = view()->file(
+                app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+                $payload
+            )->render();
+
+            // The only fixture in this file that actually exercises the
+            // restored MDF Servers/Power/Infrastructure/IDF/Other Locations
+            // split (via real, differently-classified location fixtures)
+            // — the other three writeVisualFixture() callers in this class
+            // use a single generic location, so none of them shows this
+            // specific grid. Persisted for manual/CI-artifact visual review
+            // alongside the programmatic marker-order/section-boundary
+            // assertions below.
+            $this->writeVisualFixture("swallow-guard-$viewLabel.html", $html);
+
+            $this->assertStringNotContainsString(
+                '@__raw_block_',
+                $html,
+                "Rendered $viewLabel HTML must not contain an unresolved Blade raw-block placeholder."
+            );
+
+            // Markers spanning both sides of the historically-vulnerable
+            // region, in file order: Priority Attention (inside the
+            // Phase 2 view-switch, BEFORE the inline @php($pager=...)
+            // statements starting a few dozen lines later) through to
+            // MDF Servers/Power/Infrastructure, IDF Locations, and
+            // Other Locations — all AFTER the block-form @php that
+            // used to wrongly claim the earlier inline statements'
+            // close tag. Present in both the plain and TV renders
+            // (none of these headings are themselves TV-gated), so
+            // checked for every $viewLabel. Every one of these must
+            // survive together, in the same render, for the swallow
+            // bug to be conclusively absent.
+            $expectedMarkers = [
+                'Priority Attention',
+                'MDF Servers',
+                'MDF Power',
+                'MDF Infrastructure',
+                'IDF Locations',
+                'Other Locations',
+            ];
+
+            $markerPosition = [];
+            foreach ($expectedMarkers as $marker) {
+                $position = strpos($html, $marker);
+                $this->assertNotFalse(
+                    $position,
+                    "Rendered $viewLabel HTML is missing expected marker \"$marker\" — a section between the Phase 2 view-switch and the MDF/IDF/Other Locations grid may have been swallowed."
+                );
+                $markerPosition[$marker] = $position;
+            }
+
+            // Relative order (not exact whitespace) proves the swallowed
+            // region's sections are still emitted in their real, intended
+            // sequence rather than merely all being present somewhere.
+            $this->assertLessThan($markerPosition['MDF Servers'], $markerPosition['Priority Attention'], "$viewLabel HTML: Priority Attention must render before MDF Servers.");
+            $this->assertLessThan($markerPosition['MDF Power'], $markerPosition['MDF Servers'], "$viewLabel HTML: MDF Servers must render before MDF Power.");
+            $this->assertLessThan($markerPosition['MDF Infrastructure'], $markerPosition['MDF Power'], "$viewLabel HTML: MDF Power must render before MDF Infrastructure.");
+            $this->assertLessThan($markerPosition['IDF Locations'], $markerPosition['MDF Infrastructure'], "$viewLabel HTML: MDF Infrastructure must render before IDF Locations.");
+            $this->assertLessThan($markerPosition['Other Locations'], $markerPosition['IDF Locations'], "$viewLabel HTML: IDF Locations must render before Other Locations.");
+
+            // data-tv-combined-slide is deliberately TV-only
+            // (`@if($filters['tv'])`, rendered just before the
+            // vulnerable region begins) — checked only for the tv
+            // render, both to confirm it renders correctly there and
+            // to confirm the plain render correctly does NOT include
+            // TV-only markup.
+            // The bare attribute name alone is not a safe marker here: the
+            // embedded <script> block's client-side TV-toggle handling
+            // calls document.querySelector('[data-tv-combined-slide]')
+            // unconditionally (so it can gracefully no-op when the
+            // element is absent), and that JS source text is present in
+            // every render regardless of $filters['tv']. The real,
+            // TV-gated signal is whether the actual DOM element — its
+            // full opening tag — was rendered.
+            $combinedSlideTag = '<div class="tv-combined-slide" data-tv-combined-slide>';
+
+            if ($viewLabel === 'tv') {
+                $this->assertStringContainsString($combinedSlideTag, $html, 'TV render must include the TV combined-fleet slide element.');
+            } else {
+                $this->assertStringNotContainsString($combinedSlideTag, $html, 'Plain overview render must not include the TV-only combined-fleet slide element.');
+            }
+
+            // The actual fixture devices themselves must also survive
+            // rendering (not just their section's static heading), and
+            // each must land INSIDE its intended section's boundaries —
+            // proving the swallowed region's real @foreach loops, not
+            // only its literal HTML scaffolding, executed correctly,
+            // and that classification into MDF/IDF/Other genuinely
+            // routed each device to the right place.
+            //
+            // Each search starts from its own section's already-verified
+            // heading position, not from byte 0: an MDF/IDF/Other device
+            // that is also actionable (as these fixtures deliberately
+            // are, to exercise a real section) legitimately renders a
+            // second time, earlier, inside the always-visible priority
+            // panel (`<span class="priority-device">`) — an unanchored
+            // strpos() would find that earlier, unrelated occurrence
+            // instead of the one actually inside the section under test.
+            $criticalPosition = strpos($html, 'compile-guard-critical.example.com', $markerPosition['MDF Servers']);
+            $idfDevicePosition = strpos($html, 'compile-guard-idf.example.com', $markerPosition['IDF Locations']);
+            $otherDevicePosition = strpos($html, 'compile-guard-other.example.com', $markerPosition['Other Locations']);
+
+            $this->assertNotFalse($criticalPosition, "$viewLabel HTML must render the MDF-location fixture device.");
+            $this->assertNotFalse($idfDevicePosition, "$viewLabel HTML must render the IDF-location fixture device.");
+            $this->assertNotFalse($otherDevicePosition, "$viewLabel HTML must render the Other-location fixture device.");
+
+            $this->assertGreaterThan($markerPosition['MDF Servers'], $criticalPosition, "$viewLabel HTML: the MDF-location fixture device must render after the MDF Servers heading.");
+            $this->assertLessThan($markerPosition['MDF Power'], $criticalPosition, "$viewLabel HTML: the MDF-location fixture device must render inside the MDF Servers section, before MDF Power.");
+
+            $this->assertGreaterThan($markerPosition['IDF Locations'], $idfDevicePosition, "$viewLabel HTML: the IDF-location fixture device must render after the IDF Locations heading.");
+            $this->assertLessThan($markerPosition['Other Locations'], $idfDevicePosition, "$viewLabel HTML: the IDF-location fixture device must render inside the IDF Locations section, before Other Locations.");
+
+            $this->assertGreaterThan($markerPosition['Other Locations'], $otherDevicePosition, "$viewLabel HTML: the Other-location fixture device must render after the Other Locations heading.");
+        }
     }
 
     private function writeVisualFixture(string $name, string $html): void

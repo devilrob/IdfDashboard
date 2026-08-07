@@ -19,7 +19,7 @@
 
     .infra-refresh {
         color: #777;
-        font-size: 11px;
+        font-size: 12px;
         text-align: right;
     }
 
@@ -72,7 +72,7 @@
 
     .infra-visible-count {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         margin-left: 4px;
     }
 
@@ -187,11 +187,17 @@
     }
 
     /*
-     * Priority Attention — one row per unhealthy device, worst first,
-     * naming the exact cause (see buildPriorityAttention()/
+     * The top-of-page priority panel: one row per unhealthy device,
+     * worst first, naming the exact cause (see buildPriorityAttention()/
      * primaryIssueFor() in Page.php). This is the "what do I check
      * first" feed the rest of the dashboard's counts and per-location
      * cards summarize; it sits above them for that reason.
+     *
+     * (Deliberately not named with its on-screen heading text here —
+     * a rendered-HTML regression test greps for that exact phrase to
+     * prove the real heading below survives Blade compilation, and a
+     * same-string match inside this CSS comment would falsely satisfy
+     * that check before the real markup is ever reached.)
      */
     .priority-panel {
         background: #fff;
@@ -216,7 +222,7 @@
 
     .priority-count {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
         text-transform: none;
     }
@@ -267,7 +273,7 @@
     }
 
     .priority-severity {
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
     }
 
@@ -290,7 +296,7 @@
     .priority-location,
     .priority-role {
         color: #777;
-        font-size: 10px;
+        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         text-transform: uppercase;
@@ -306,7 +312,7 @@
     }
 
     .priority-cause {
-        font-size: 11px;
+        font-size: 12px;
         line-height: 1.35;
         overflow-wrap: anywhere;
         white-space: normal;
@@ -314,7 +320,7 @@
 
     .priority-since {
         color: #888;
-        font-size: 10px;
+        font-size: 12px;
         text-align: right;
         white-space: nowrap;
     }
@@ -375,13 +381,13 @@
 
     body.tv-mode-active .priority-cause {
         color: #e6ecf6;
-        font-size: 13px;
+        font-size: 14px;
     }
 
     body.tv-mode-active .priority-location,
     body.tv-mode-active .priority-role,
     body.tv-mode-active .priority-since {
-        font-size: 11px;
+        font-size: 12px;
     }
 
     .infra-section {
@@ -483,7 +489,7 @@
     .health-pill {
         border-radius: 12px;
         color: #fff;
-        font-size: 9px;
+        font-size: 12px;
         font-weight: 700;
         padding: 3px 7px;
         text-transform: uppercase;
@@ -514,7 +520,7 @@
     .location-counts {
         border-bottom: 1px solid #eee;
         color: #777;
-        font-size: 9px;
+        font-size: 12px;
         padding: 5px 8px;
     }
 
@@ -570,7 +576,7 @@
 
     .device-name a {
         display: block;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -579,14 +585,14 @@
 
     .device-meta {
         color: #888;
-        font-size: 9px;
+        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
 
     .device-state {
-        font-size: 9px;
+        font-size: 12px;
         font-weight: 700;
         text-transform: uppercase;
     }
@@ -625,7 +631,7 @@
         align-items: center;
         justify-content: space-between;
         gap: 7px;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
     }
 
@@ -638,7 +644,7 @@
 
     .device-card-meta {
         color: #777;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 3px;
     }
 
@@ -662,7 +668,7 @@
         background: #f3f5f6;
         border: 1px solid #dfe3e5;
         border-radius: 3px;
-        font-size: 9px;
+        font-size: 12px;
         padding: 3px 5px;
     }
 
@@ -778,13 +784,13 @@
     }
 
     .service-summary {
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 5px;
     }
 
     .service-issue {
         border-top: 1px solid #eee;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 5px;
         padding-top: 5px;
     }
@@ -804,7 +810,7 @@
 
     .recent-event-line {
         color: #888;
-        font-size: 9px;
+        font-size: 12px;
         margin-top: 4px;
     }
 
@@ -1125,8 +1131,9 @@
     /*
      * "All clear" slide — shown instead of a section whenever every
      * device in it is currently healthy, so a fully-healthy section
-     * (e.g. Other Locations with nothing active) is still visited by
-     * the TV rotation rather than silently disappearing from it.
+     * (e.g. the miscellaneous-locations grouping with nothing active)
+     * is still visited by the TV rotation rather than silently
+     * disappearing from it.
      */
     .tv-clear-slide {
         display: none;
@@ -1250,7 +1257,7 @@
     }
 
     body.tv-mode-active .infra-section-meta {
-        font-size: 11px;
+        font-size: 12px;
     }
 
     body.tv-mode-active .location-grid,
@@ -1327,8 +1334,8 @@
     }
 
     /*
-     * Devices directly in a standalone section's grid (MDF Servers/
-     * Power/Infrastructure) have no location-card wrapper, so they
+     * Devices directly in one of the three MDF-only grids (Servers,
+     * Power, Infrastructure) have no location-card wrapper, so they
      * are paginated individually — a matching device only renders
      * once it is also part of the slide's current chunk
      * (`.tv-active-card`), keeping every slide within the screen with
@@ -1340,9 +1347,10 @@
 
     /*
      * TV Mode's combined "everything, worst first" slide — one pool
-     * mixing devices from MDF Servers/Power/Infrastructure with
-     * location cards from IDF/Other Locations, Critical-first, shown
-     * on one static screen with no rotation whenever it all fits
+     * mixing devices from the three MDF-only grids with location
+     * cards from the IDF and miscellaneous-locations groupings,
+     * Critical-first, shown on one static screen with no rotation
+     * whenever it all fits
      * (see tvBuildCombinedSlides()). `.tv-combined-slide` is the
      * pagination unit (toggled exactly like a normal `[data-
      * dashboard-section]`); the grid inside uses the same 340px
@@ -1620,44 +1628,45 @@
      * whatever Settings currently says, matching how `state` already
      * self-corrects via `settingsVersion` — see loadPersistedState().
      */
-    $tvDefaults = [
-        'critical' => (bool) $config['default_severity_critical'],
-        'warning' => (bool) $config['default_severity_warning'],
-        'unknown' => (bool) $config['default_severity_unknown'],
-        'healthy' => (bool) $config['default_severity_healthy'],
+    // Single source of truth (Support/Config::visibilityPolicy()) —
+    // previously this array was hand-typed here independently of the
+    // equivalent list Page.php now also needs for server-side TV
+    // filtering, which is exactly the kind of two-source drift that
+    // let TV Mode silently stop respecting Settings. 'global' context:
+    // this `defaults` object backs desktop's session-local `state`
+    // (which starts from it and can diverge per viewer), so it must
+    // never carry the TV-only `tv_hide_*` restrictions — a viewer's
+    // default classic-grid filter should reflect the global severity
+    // policy, not a wall-display-specific one.
+    $tvDefaults = \App\Plugins\IdfDashboard\Support\Config::visibilityPolicy($config);
 
-        'temperature' => (bool) $config['default_problem_temperature'],
-        'humidity' => (bool) $config['default_problem_humidity'],
-        'battery' => (bool) $config['default_problem_battery'],
-        'voltage' => (bool) $config['default_problem_voltage'],
-        'fan' => (bool) $config['default_problem_fan'],
-        'device' => (bool) $config['default_problem_device'],
-        'service' => (bool) $config['default_problem_service'],
-        'alert' => (bool) $config['default_problem_alert'],
-        'state' => (bool) $config['default_problem_state'],
-        'storage' => (bool) $config['default_problem_storage'],
-        'memory' => (bool) $config['default_problem_memory'],
-        'processor' => (bool) $config['default_problem_processor'],
-        'stale' => (bool) $config['default_problem_stale'],
-        'other' => (bool) $config['default_problem_other'],
-
-        'priority' => (bool) $config['default_section_priority'],
-        'coverage' => (bool) $config['default_section_coverage'],
-        'summary' => (bool) $config['default_section_summary'],
-        'mdfServers' => (bool) $config['default_section_mdfServers'],
-        'mdfPower' => (bool) $config['default_section_mdfPower'],
-        'mdfInfrastructure' => (bool) $config['default_section_mdfInfrastructure'],
-        'idf' => (bool) $config['default_section_idf'],
-        'otherLocations' => (bool) $config['default_section_otherLocations'],
-
-        'tvSlideSeconds' => (int) $config['tv_default_slide_seconds'],
-    ];
+    /*
+     * $tv['policy'] (this request's already-computed $tvPolicy — 'tv'
+     * context, WITH tv_hide_* intersected) is exposed separately for
+     * tvDeviceMatches()'s own re-check. TV Mode has two entry points:
+     * the real ?tv=1 navigation (`data-enter-tv`), where the server
+     * has already restricted $sectionMdfServers/etc. to $tvPolicy
+     * before this markup ever reaches the browser — so this re-check
+     * is a harmless, redundant defense-in-depth pass there — and the
+     * classic grid's own client-side-only rotation toggle
+     * (`data-action="tv"`, no navigation, no server re-render), whose
+     * underlying markup is the FULL, un-tv-filtered classic grid.
+     * Re-checking against the 'global'-only $tvDefaults there would
+     * silently let a tv_hide_*-restricted severity (e.g. Stale, with
+     * default_severity_stale on but tv_hide_stale on) rotate onto
+     * screen — real fleet content reaching a "TV Mode" presentation
+     * without ever having been server-filtered by the TV-specific
+     * policy. tvDeviceMatches() must use this stricter object, never
+     * $tvDefaults, so both entry points enforce the same policy.
+     */
+    $tvOnlyDefaults = $tv['policy'];
 
 @endphp
 
 <div
     class="infra-dashboard"
     data-idf-defaults="{{ json_encode($tvDefaults) }}"
+    data-idf-tv-only-defaults="{{ json_encode($tvOnlyDefaults) }}"
     data-idf-settings-version="{{ $settingsVersion }}"
     data-idf-refresh-seconds="{{ $refreshSeconds }}"
     data-idf-animations-enabled="{{ $config['animations_enabled'] ? '1' : '0' }}"
@@ -1797,17 +1806,12 @@
         .phase2-pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px; font-size: 12px; }
         .phase2-pager-links { display: flex; gap: 5px; }
         .phase2-empty { padding: 36px 16px; text-align: center; color: #687785; }
-        .phase2-tv-source { display: none; }
         .infra-dashboard .infra-refresh,
-        .phase2-desktop .priority-item > *,
-        .phase2-tv-source .device-name,
-        .phase2-tv-source .device-meta,
-        .phase2-tv-source .device-state { font-size: 12px; }
+        .phase2-desktop .priority-item > * { font-size: 12px; }
         .phase2-desktop .infra-button { min-height: 34px; font-size: 12px; }
         @media (max-width: 1200px) { .phase2-summary { grid-template-columns: repeat(4, 1fr); position: static; } .phase2-filters { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 760px) { .phase2-nav { position: static; overflow-x: auto; } .phase2-summary { grid-template-columns: repeat(2, 1fr); } .phase2-filters { grid-template-columns: 1fr; } .phase2-detail { grid-template-columns: 1fr; } .phase2-list { min-width: 850px; } .phase2-table-wrap { overflow-x: auto; } }
         body.tv-mode-active .phase2-nav, body.tv-mode-active .phase2-summary, body.tv-mode-active .phase2-desktop { display: none !important; }
-        body.tv-mode-active .phase2-tv-source { display: block; }
     </style>
 
     <nav class="phase2-nav phase2-desktop" aria-label="Dashboard views">
@@ -1932,61 +1936,47 @@
     @if($filters['tv'])
     <div class="tv-clear-slide" data-dashboard-section="__tv_clear__"><div class="tv-clear-icon"><i class="fa fa-check-circle" aria-hidden="true"></i></div><div class="tv-clear-title"></div><div class="tv-clear-subtitle"></div></div>
     <div class="tv-combined-slide" data-tv-combined-slide><header class="infra-section-header"><h2 class="infra-section-title"><i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i> Priority Attention — Full Fleet Rotation</h2><div class="infra-section-meta" data-tv-combined-meta></div></header><div class="tv-combined-grid" data-tv-combined-grid></div></div>
-    <div class="phase2-tv-source">
-        <section class="infra-section" data-dashboard-section="mdfServers"><header class="infra-section-header"><h2 class="infra-section-title">All Authorized Devices</h2><div class="infra-section-meta">{{ $summary['active_devices'] }} devices</div></header><div class="infra-section-body"><ul class="location-device-list">@foreach($allLocations as $location)@foreach($location['devices'] as $device)<li class="monitor-device device-row" data-health="{{ $device['health'] }}" data-problems="{{ implode(',', $device['problem_types']) }}"><div class="device-main"><i class="fa fa-circle {{ $device['status'] ? 'status-up' : 'status-down' }}" aria-hidden="true"></i><div class="device-name">{{ $device['name'] }}<div class="device-meta">{{ $location['name'] }} · {{ $device['category'] }} · {{ $cause($device) }}</div></div><span class="device-state">{{ $stateLabel($device) }}</span></div></li>@endforeach @endforeach</ul></div></section>
-    </div>
     @endif
 
-    @if(false)
+    {{--
+        This is the real MDF Servers/Power/Infrastructure/IDF/Other
+        Locations device-grid markup — the section TV Mode's own JS
+        rotation (tvBuildCombinedSlides(), data-dashboard-section
+        selectors) scans for slides, and desktop's "classic" dashboard
+        view relies on. It lives outside the $viewData['kind'] switch
+        above (Locations/Devices/Location/Device get their own,
+        separate paginated markup there) because both desktop and TV
+        Mode need it present regardless of which Phase 2 view is
+        active; the $filters['tv'] ternaries inside the @php block
+        below already make it TV-aware on their own, so it needs no
+        outer view-kind guard.
 
-    <div
-        class="tv-clock"
-        data-updated-at="{{ $generatedAt }}"
-        data-updated-at-epoch="{{ strtotime($generatedAt) }}"
-    ></div>
-
-    <div
-        class="tv-status-banner"
-        data-critical="{{ $summary['critical_devices'] }}"
-        data-warning="{{ $summary['warning_devices'] }}"
-        data-down="{{ $summary['devices_down'] }}"
-        data-total="{{ $summary['active_devices'] }}"
-    ></div>
-
-    <div class="tv-clear-slide" data-dashboard-section="__tv_clear__">
-        <div class="tv-clear-icon">
-            <i class="fa fa-check-circle" aria-hidden="true"></i>
-        </div>
-        <div class="tv-clear-title"></div>
-        <div class="tv-clear-subtitle"></div>
-    </div>
+        commit 5b44ff8 ("feat: add paginated operational dashboard
+        views") wrapped this whole section in a literal `@if(false)`
+        while that Phase 2 work was in progress and never removed the
+        guard before merging — the entire section (including the
+        $sectionMdfServerCount/etc. @php block two dozen lines below)
+        was therefore permanently dead: real CI caught this via
+        "Undefined variable $sectionMdfServerCount" (the assignment
+        never ran) once a real Blade render was finally exercised for
+        the first time against this branch. No duplicate/replacement
+        implementation exists anywhere else in this file — this is the
+        one real copy, now restored to unconditional rendering to
+        match its unguarded siblings (tv-clock/tv-status-banner) just
+        above.
+    --}}
 
     {{--
-        TV Mode's combined "everything that matches, worst first"
-        slide — populated in JS (tvBuildCombinedSlides()) with clones
-        of whichever devices/location cards from MDF Servers/Power/
-        Infrastructure/IDF/Other Locations currently match Settings'
-        criteria, sorted Critical-first, shown on one static screen
-        with no rotation whenever it all fits, paginated only when
-        there's more than fits. Empty by default; never touched
-        outside TV Mode. `infra-section-header` reused deliberately
-        (not a new class) so tvEstimateChunkSize()'s existing chrome-
-        height measurement (which looks for that exact selector)
-        works for this slide too, without needing its own special
-        case.
+        The tv-clock / tv-status-banner / tv-clear-slide / tv-combined-slide
+        elements that used to be duplicated here (an artifact of commit
+        5b44ff8's in-progress edit) were removed — the real, single copies
+        of all four already render unconditionally/TV-gated just above
+        (see lines ~1905-1909), before this @if(false)-wrapped section
+        used to begin. Duplicating them here would have produced two
+        DOM nodes per selector, which the TV rotation JS
+        (document.querySelector('[data-tv-combined-slide]'), etc.) is
+        not written to expect.
     --}}
-    <div class="tv-combined-slide" data-tv-combined-slide>
-        <header class="infra-section-header">
-            <h2 class="infra-section-title">
-                <i class="fa fa-exclamation-triangle fa-fw" aria-hidden="true"></i>
-                All Issues — Worst First
-            </h2>
-
-            <div class="infra-section-meta" data-tv-combined-meta></div>
-        </header>
-
-        <div class="tv-combined-grid" data-tv-combined-grid></div>
-    </div>
 
     {{--
         Minimal, operational-only toolbar — Severity/Problem/Section
@@ -2262,6 +2252,25 @@
         </div>
     </div>
 
+    {{--
+        This panel is desktop-only — .summary-panel is force-hidden by
+        `body.tv-mode-active .summary-panel { display: none !important }`
+        and TV's own slide-rotation JS (tvShowSlide()) never adds
+        tv-active-slide to it, so it never appears during TV Mode
+        rotation regardless of its data-dashboard-section attribute.
+
+        Its six severity/problem-derived cards (Devices down, Critical,
+        Warning, Needs review, Service issues, Stale power sensors, No
+        sensor installed) now read from $visibleSummary, the same
+        centralized severity-policy source the header bar above and TV
+        Mode already use — this panel used to read the raw, policy-
+        unaware $summary block, so a desktop viewer could see two
+        different counts for the same "Critical devices" concept on one
+        page depending only on which panel they looked at. Devices up
+        and Active alerts stay on $summary deliberately: operational
+        status and the underlying LibreNMS alert count are not
+        themselves severities the default_severity_* policy governs.
+    --}}
     <div
         class="summary-panel"
         data-dashboard-section="summary"
@@ -2275,36 +2284,36 @@
 
         <div class="summary-card">
             <div class="summary-label">Devices down</div>
-            <div class="summary-value {{ $summary['devices_down'] > 0 ? 'status-down' : 'status-up' }}">
-                {{ $summary['devices_down'] }}
+            <div class="summary-value {{ $visibleSummary['devices_down'] > 0 ? 'status-down' : 'status-up' }}">
+                {{ $visibleSummary['devices_down'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Critical devices</div>
             <div class="summary-value text-danger">
-                {{ $summary['critical_devices'] }}
+                {{ $visibleSummary['critical_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Warning devices</div>
             <div class="summary-value text-warning">
-                {{ $summary['warning_devices'] }}
+                {{ $visibleSummary['warning_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Needs review</div>
             <div class="summary-value text-info">
-                {{ $summary['unknown_devices'] }}
+                {{ $visibleSummary['unknown_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">Service issues</div>
-            <div class="summary-value {{ $summary['service_problems'] > 0 ? 'text-danger' : 'status-up' }}">
-                {{ $summary['service_problems'] }}
+            <div class="summary-value {{ $visibleSummary['service_problems'] > 0 ? 'text-danger' : 'status-up' }}">
+                {{ $visibleSummary['service_problems'] }}
             </div>
         </div>
 
@@ -2317,15 +2326,15 @@
 
         <div class="summary-card">
             <div class="summary-label">Stale power sensors</div>
-            <div class="summary-value {{ $summary['stale_sensor_devices'] > 0 ? 'text-warning' : 'status-up' }}">
-                {{ $summary['stale_sensor_devices'] }}
+            <div class="summary-value {{ $visibleSummary['stale_sensor_devices'] > 0 ? 'text-warning' : 'status-up' }}">
+                {{ $visibleSummary['stale_sensor_devices'] }}
             </div>
         </div>
 
         <div class="summary-card">
             <div class="summary-label">No sensor installed</div>
             <div class="summary-value text-muted">
-                {{ $summary['no_sensor_installed'] }}
+                {{ $visibleSummary['no_sensor_installed'] }}
             </div>
         </div>
     </div>
@@ -2334,6 +2343,55 @@
         <i class="fa fa-check-circle fa-fw" aria-hidden="true"></i>
         No devices match the selected filters.
     </div>
+
+    {{--
+        TV Mode renders this shared section markup from the
+        server-filtered $tv[...] collections (Config::visibilityPolicy()
+        + ProblemPolicy::deviceVisible(), computed once in Page::data());
+        the interactive desktop view keeps the full authorized set so
+        its own state/deviceMatches() session-local filtering still has
+        everything to filter from — see the comment on $tvVisible in
+        Page.php for why these two are deliberately not the same set.
+
+        Root-cause note (deliberately paraphrased below, avoiding the
+        literal directive spellings, since BladeCompiler's own raw-PHP-
+        block extraction runs BEFORE comment stripping and would
+        otherwise treat this very explanation as more of the same bug it
+        describes): this section is written as 12 individual inline
+        "run this one php expression" statements rather than one bare-
+        keyword-then-matching-close-tag block. Blade's compiler locates
+        that closing tag with a regex that does not distinguish an
+        inline, self-terminating statement from the start of a real
+        block — so an EARLIER inline statement with no close tag of its
+        own (several exist a little above this comment, in the Phase 2
+        view-switch content) will happily treat ANY later real block's
+        close tag, anywhere else in the file, as its own — silently
+        swallowing every line of markup in between into one opaque,
+        never-compiled placeholder. This block's own close tag used to
+        be exactly that later, wrongly-claimed tag. Confirmed directly
+        against Laravel's real Blade compiler, on both this file's
+        current content and the original pre-Phase-3A revision (proving
+        this predates and is unrelated to any Phase 3 change): the
+        resulting compiled output is invalid PHP ("unexpected token
+        class" / "unexpected end of file, expecting elseif or else or
+        endif" — matching the exact class of error real CI reported
+        here). Rewriting every statement in this block to the same
+        self-terminating inline form used above removes the only
+        remaining close tag anywhere after those earlier statements,
+        so there is nothing left for that regex to wrongly match.
+    --}}
+    @php($sectionMdfServers = $filters['tv'] ? $tv['mdfServers'] : $mdf['servers'])
+    @php($sectionMdfServerCount = $filters['tv'] ? $tv['mdfServers']->count() : $mdf['server_count'])
+    @php($sectionMdfPower = $filters['tv'] ? $tv['mdfPower'] : $mdf['power'])
+    @php($sectionMdfPowerCount = $filters['tv'] ? $tv['mdfPower']->count() : $mdf['power_count'])
+    @php($sectionMdfInfrastructure = $filters['tv'] ? $tv['mdfInfrastructure'] : $mdf['infrastructure'])
+    @php($sectionMdfInfrastructureCount = $filters['tv'] ? $tv['mdfInfrastructure']->count() : $mdf['infrastructure_count'])
+    @php($sectionIdfLocations = $filters['tv'] ? $tv['idfLocations'] : $locations)
+    @php($sectionIdfLocationCount = $filters['tv'] ? $tv['idfLocations']->count() : $summary['idf_locations'])
+    @php($sectionIdfDeviceCount = $filters['tv'] ? $tv['idfLocations']->sum('total') : $summary['idf_devices'])
+    @php($sectionOtherLocations = $filters['tv'] ? $tv['otherLocations'] : $otherLocations)
+    @php($sectionOtherLocationCount = $filters['tv'] ? $tv['otherLocations']->count() : $summary['other_locations'])
+    @php($sectionOtherDeviceCount = $filters['tv'] ? $tv['otherLocations']->sum('total') : $summary['other_devices'])
 
     <section
         class="infra-section"
@@ -2346,13 +2404,13 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['server_count'] }} devices
+                {{ $sectionMdfServerCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['servers'] as $device)
+                @foreach($sectionMdfServers as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2414,13 +2472,13 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['power_count'] }} PDU/UPS devices
+                {{ $sectionMdfPowerCount }} PDU/UPS devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['power'] as $device)
+                @foreach($sectionMdfPower as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2462,14 +2520,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $mdf['infrastructure_count'] }}
+                {{ $sectionMdfInfrastructureCount }}
                 network, firewall, wireless and management devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="device-card-grid">
-                @foreach($mdf['infrastructure'] as $device)
+                @foreach($sectionMdfInfrastructure as $device)
                     <article
                         class="monitor-device device-card health-{{ $device['health'] }}"
                         data-health="{{ $device['health'] }}"
@@ -2512,14 +2570,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $summary['idf_locations'] }} locations ·
-                {{ $summary['idf_devices'] }} devices
+                {{ $sectionIdfLocationCount }} locations ·
+                {{ $sectionIdfDeviceCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="location-grid">
-                @foreach($locations as $location)
+                @foreach($sectionIdfLocations as $location)
                     <section
                         class="location-card health-{{ $location['health'] }}"
                         data-location-card
@@ -2600,14 +2658,14 @@
             </h2>
 
             <div class="infra-section-meta">
-                {{ $summary['other_locations'] }} locations ·
-                {{ $summary['other_devices'] }} devices
+                {{ $sectionOtherLocationCount }} locations ·
+                {{ $sectionOtherDeviceCount }} devices
             </div>
         </header>
 
         <div class="infra-section-body">
             <div class="location-grid">
-                @foreach($otherLocations as $location)
+                @foreach($sectionOtherLocations as $location)
                     <section
                         class="location-card health-{{ $location['health'] }}"
                         data-location-card
@@ -2676,7 +2734,6 @@
             </div>
         </div>
     </section>
-    @endif
 </div>
 
 <script>
@@ -2778,6 +2835,21 @@ function initDashboard() {
     const defaults = dashboardEl && dashboardEl.dataset.idfDefaults
         ? JSON.parse(dashboardEl.dataset.idfDefaults)
         : {};
+
+    // The TV-context policy (Page.php's $tvPolicy, exposed as
+    // $tv['policy']) — the same 'global' object above with tv_hide_*
+    // additionally intersected in. tvDeviceMatches() must use this,
+    // never `defaults`: the classic grid's own client-side-only "TV
+    // Mode" toggle (`data-action="tv"`, no page navigation) renders
+    // from the un-tv-filtered classic grid, so this client-side
+    // re-check is the ONLY place tv_hide_* is enforced on that path —
+    // falling back to `defaults` here is intentional only if this
+    // attribute is somehow missing (e.g. an older cached fragment),
+    // matching the server's own fail-open-to-global behavior for a
+    // policy field it cannot resolve.
+    const tvOnlyDefaults = dashboardEl && dashboardEl.dataset.idfTvOnlyDefaults
+        ? JSON.parse(dashboardEl.dataset.idfTvOnlyDefaults)
+        : defaults;
 
     const parsedRefreshSeconds = dashboardEl
         ? Number.parseInt(dashboardEl.dataset.idfRefreshSeconds, 10)
@@ -3017,12 +3089,20 @@ function initDashboard() {
             .filter(Boolean);
     }
 
+    // 'stale' is deliberately two different config keys under one JS
+    // object: state.stale/defaults.stale is the *severity* toggle (is a
+    // device whose worst state is Stale shown at all), while a device's
+    // own problem_types can independently contain the string 'stale'
+    // meaning "this device has some stale telemetry" (state.problem_stale
+    // / Support/Config::FIELDS' default_problem_stale) — same word, two
+    // policy questions. See Support/ProblemPolicy::deviceVisible()'s
+    // identical mapping on the PHP side.
+    function problemPolicyKey(problem) {
+        return problem === 'stale' ? 'problem_stale' : problem;
+    }
+
     function deviceMatches(device) {
         const health = device.dataset.health || 'healthy';
-
-        if (health === 'maintenance') {
-            return Boolean(state.healthy);
-        }
 
         if (!state[health]) {
             return false;
@@ -3039,7 +3119,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(state[problem]);
+            return Boolean(state[problemPolicyKey(problem)]);
         });
     }
 
@@ -3085,7 +3165,7 @@ function initDashboard() {
             return Boolean(state[filterKey]);
         }
 
-        if (isStale && metricState === 'healthy' && !state.stale) {
+        if (isStale && metricState === 'healthy' && !state.problem_stale) {
             return false;
         }
 
@@ -3370,21 +3450,16 @@ function initDashboard() {
     // what Settings actually says. Reported directly: "solo quiero que
     // salga los devices que tiene los criterios puesto en setting" —
     // an unattended wall display must show exactly the Settings-
-    // configured criteria (`defaults`), never a stray local override.
-    // `tvDeviceMatches()`/`defaults` below are TV Mode's own copy of
-    // `deviceMatches()`/`state` for exactly this reason; the
-    // interactive view keeps using `state` unchanged.
+    // configured criteria (`tvOnlyDefaults`, not the interactive
+    // `state`), never a stray local override. `tvDeviceMatches()`
+    // deliberately reads `tvOnlyDefaults` (tv_hide_* included), not
+    // the plain `defaults` the desktop `state` starts from — see the
+    // comment on `tvOnlyDefaults`'s own definition above for why both
+    // TV Mode entry points need the stricter object here specifically.
     function tvDeviceMatches(device) {
-        // Phase 2's compact TV source is already the authorized fleet and is
-        // intentionally cheap to render. Keep every device in the rotation;
-        // sorting still places actionable Critical/Warning devices first.
-        if (device.closest('.phase2-tv-source')) {
-            return true;
-        }
-
         const health = device.dataset.health || 'healthy';
 
-        if (!defaults[health]) {
+        if (!tvOnlyDefaults[health]) {
             return false;
         }
 
@@ -3395,11 +3470,11 @@ function initDashboard() {
         const problems = parseProblems(device);
 
         if (problems.length === 0) {
-            return Boolean(defaults.other);
+            return Boolean(tvOnlyDefaults.other);
         }
 
         return problems.some(function (problem) {
-            return Boolean(defaults[problem]);
+            return Boolean(tvOnlyDefaults[problemPolicyKey(problem)]);
         });
     }
 

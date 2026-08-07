@@ -179,6 +179,17 @@ class Page extends PageHook
         ];
 
         /*
+         * The single centralized visibility decision (Support/
+         * ProblemPolicy::deviceVisible()) both Priority Attention and
+         * TV Mode's server-filtered collections now consult, instead of
+         * severity display policy living only in Blade-embedded
+         * JavaScript. `$tvPolicy` additionally intersects the `tv_hide_*`
+         * restrictions and can only ever be a subset of `$policy`.
+         */
+        $policy = Config::visibilityPolicy($config, 'global');
+        $tvPolicy = Config::visibilityPolicy($config, 'tv');
+
+        /*
          * Load every active LibreNMS device authorized by the core
          * Device::hasAccess() scope. No authorized location or device
          * type is silently excluded; every downstream table is then
@@ -456,6 +467,51 @@ class Page extends PageHook
         $otherLocations = $this->buildLocationGroups($otherDevices);
 
         /*
+         * TV Mode's own collections, filtered server-side through the
+         * exact same $tvPolicy every other TV consumer (Priority
+         * Attention, future views) uses — the browser never receives a
+         * Healthy/disabled-severity device's markup for TV at all
+         * (bounding TV's DOM/HTML size), and TV's JS-side
+         * tvDeviceMatches() check on top of this is now pure defense in
+         * depth against a stale client-side settings cache, not the
+         * only enforcement point. Desktop's own $idfLocations/
+         * $otherLocations/$mdfServers/etc. above are deliberately left
+         * as the full authorized set — desktop's "Problems only"/"View
+         * all" toggle is a genuine per-viewer *session* override (see
+         * settings.blade.php's own header text), which only makes sense
+         * against an unfiltered base collection.
+         */
+        $tvVisible = fn (array $device): bool => ProblemPolicy::deviceVisible($device, $tvPolicy);
+
+        $tvIdfDevices = $idfDevices->filter($tvVisible)->values();
+        $tvIdfLocations = $this->buildLocationGroups($tvIdfDevices);
+
+        $tvOtherDevices = $otherDevices->filter($tvVisible)->values();
+        $tvOtherLocations = $this->buildLocationGroups($tvOtherDevices);
+
+        $tvMdfServers = $this->sortDevices($mdfServers->filter($tvVisible)->values());
+        $tvMdfPower = $this->sortDevices($mdfPower->filter($tvVisible)->values());
+        $tvMdfInfrastructure = $this->sortDevices($mdfInfrastructure->filter($tvVisible)->values());
+
+        /*
+         * Defensive DOM-size ceiling: even after severity filtering, a
+         * very large fleet with everything enabled could still exceed
+         * what a TV screen should ever render into the page at once.
+         * Truncation always happens worst-severity-first (sortDevices()
+         * / buildLocationGroups() already order that way), so a
+         * Critical/Warning device is never pushed out by a
+         * lower-severity one that fits — the omitted remainder is
+         * reported as a count, never silently dropped from the fleet.
+         */
+        $tvMaxDevices = max(1, $tvPolicy['tvMaximumDevicesRendered']);
+        $tvOmittedDeviceCount = max(0, $tvMdfServers->count() - $tvMaxDevices)
+            + max(0, $tvMdfPower->count() - $tvMaxDevices)
+            + max(0, $tvMdfInfrastructure->count() - $tvMaxDevices);
+        $tvMdfServers = $tvMdfServers->take($tvMaxDevices)->values();
+        $tvMdfPower = $tvMdfPower->take($tvMaxDevices)->values();
+        $tvMdfInfrastructure = $tvMdfInfrastructure->take($tvMaxDevices)->values();
+
+        /*
          * Real monitoring-coverage audit.
          *
          * This intentionally replaces the previous "coverage" metric,
@@ -550,8 +606,17 @@ class Page extends PageHook
             ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
             ->count();
 
+        /*
+         * Priority Attention now consults the same centralized policy
+         * TV Mode does — previously it filtered purely on each issue's
+         * fixed Severity::metadata()['actionable'] flag, so disabling
+         * "Needs Review" (Unknown) in Settings had no effect here even
+         * though it correctly hid those devices from TV: two different
+         * sources of truth for the same "is this severity shown"
+         * question, exactly what a single policy is meant to prevent.
+         */
         $priorityAttention = $this->buildPriorityAttention(
-            $devices,
+            $devices->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))->values(),
             (int) $config['maximum_priority_issues']
         );
         $allLocations = $this->buildLocationGroups($devices);
@@ -570,21 +635,63 @@ class Page extends PageHook
             $filteredDevices,
             $allLocations,
             $filteredLocations,
-            $priorityAttention
+            $priorityAttention,
+            $policy
         );
+
+        /*
+         * The header summary (`$visibleSummary`) now consults the same
+         * centralized policy Priority Attention and TV Mode do — it
+         * previously counted from $filteredDevices, which reflects only
+         * the Phase 2 per-request interactive filter (a URL-scoped
+         * severity/category/problem dropdown, search, pagination), never
+         * default_severity_*. An admin disabling Unknown/Stale/
+         * Maintenance/Healthy in Settings had no effect on these header
+         * counters at all — a third, independent source of truth for
+         * "is this severity shown" alongside the two already fixed.
+         *
+         * Deliberately a *separate* collection from $filteredDevices/
+         * $filteredLocations, not a mutation of them: the Locations/
+         * Devices paginated list views and their own independent
+         * severity/category/problem dropdown filter are unaffected by
+         * this change, matching this phase's explicit "summary total
+         * interno / summary visible / summary TV" three-way distinction
+         * rather than collapsing them into one shared collection.
+         */
+        $policyVisibleDevices = $filteredDevices
+            ->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))
+            ->values();
+        $policyVisibleLocations = $this->buildLocationGroups($policyVisibleDevices);
+
         $visibleSummary = [
-            'critical_devices' => $filteredDevices->where('health', Severity::CRITICAL)->count(),
-            'warning_devices' => $filteredDevices->where('health', Severity::WARNING)->count(),
-            'devices_down' => $filteredDevices
+            'critical_devices' => $policyVisibleDevices->where('health', Severity::CRITICAL)->count(),
+            'warning_devices' => $policyVisibleDevices->where('health', Severity::WARNING)->count(),
+            'unknown_devices' => $policyVisibleDevices->where('health', Severity::UNKNOWN)->count(),
+            'devices_down' => $policyVisibleDevices
                 ->filter(fn (array $device): bool => $device['status'] === 0 && ! $device['maintenance'])
                 ->count(),
-            'service_problems' => $filteredDevices->sum('service_problem_count'),
-            'locations_affected' => $filteredLocations->where('issue_count', '>', 0)->count(),
-            'stale_sensor_devices' => $filteredDevices
+            'service_problems' => $policyVisibleDevices->sum('service_problem_count'),
+            'locations_affected' => $policyVisibleLocations->where('issue_count', '>', 0)->count(),
+            'stale_sensor_devices' => $policyVisibleDevices
                 ->filter(fn (array $device): bool => in_array('stale', $device['problem_types'], true))
                 ->count(),
-            'no_sensor_installed' => $filteredDevices->sum('no_sensor_count'),
-            'devices' => $filteredDevices->count(),
+            /*
+             * no_sensor_count is never part of a device's overall health
+             * (Severity::worst() explicitly skips NO_SENSOR — a device
+             * with nothing else wrong is 'healthy' and only reaches
+             * $policyVisibleDevices if the Healthy toggle allows it,
+             * which would make this counter always read 0 whenever
+             * Healthy is off, unrelated to the actual no_sensor
+             * setting). Counted from the request-filtered-but-not-
+             * severity-filtered set instead, gated only by
+             * default_severity_no_sensor's own toggle — Caso 8's exact
+             * requirement: "no aparece ... en su contador" when that
+             * one setting is off, independent of Healthy.
+             */
+            'no_sensor_installed' => $policy['no_sensor']
+                ? $filteredDevices->sum('no_sensor_count')
+                : 0,
+            'devices' => $policyVisibleDevices->count(),
         ];
         $locationOptions = $allLocations
             ->map(fn (array $location): array => [
@@ -617,6 +724,23 @@ class Page extends PageHook
 
                 'infrastructure' => $mdfInfrastructure,
                 'infrastructure_count' => $mdfInfrastructure->count(),
+            ],
+
+            /*
+             * TV Mode's own, already-Settings-filtered collections (see
+             * $tvVisible above). TV Mode must render from these, never
+             * from the unfiltered 'locations'/'otherLocations'/'mdf'
+             * keys above — that unfiltered path is what let TV silently
+             * show devices outside the configured severity policy.
+             */
+            'tv' => [
+                'idfLocations' => $tvIdfLocations,
+                'otherLocations' => $tvOtherLocations,
+                'mdfServers' => $tvMdfServers,
+                'mdfPower' => $tvMdfPower,
+                'mdfInfrastructure' => $tvMdfInfrastructure,
+                'omittedDeviceCount' => $tvOmittedDeviceCount,
+                'policy' => $tvPolicy,
             ],
 
             'summary' => [
@@ -818,7 +942,8 @@ class Page extends PageHook
         Collection $filteredDevices,
         Collection $allLocations,
         Collection $filteredLocations,
-        array $priorityAttention
+        array $priorityAttention,
+        array $policy
     ): array {
         $view = $filters['view'];
 
@@ -871,11 +996,37 @@ class Page extends PageHook
             ];
         }
 
+        /*
+         * The Overview view's own inline Priority Attention / Critical
+         * Locations panels (rendered directly in page.blade.php's
+         * `main#phase2-content`, distinct from the always-visible
+         * `.priority-panel` banner further down the page) were still
+         * built from $filteredDevices/$filteredLocations — Phase 2's
+         * interactive search/category/problem filter only, never
+         * ProblemPolicy::deviceVisible(). That made this the third
+         * independent "is this severity shown" answer alongside the
+         * two already fixed for the top-level $priorityAttention (see
+         * its own comment above) and $visibleSummary below: an admin
+         * disabling Unknown/Stale/Maintenance in Settings correctly
+         * emptied the persistent banner and header counters, but this
+         * inline panel — directly beneath that banner, on the exact
+         * same page — kept showing the same devices regardless, since
+         * Overview has no severity dropdown of its own for a viewer to
+         * have deliberately opted back into seeing them (unlike the
+         * Devices/Locations list views, which intentionally stay
+         * policy-independent so a viewer can explicitly browse past
+         * the default policy — see the $visibleSummary comment below).
+         */
+        $policyVisibleOverviewDevices = $filteredDevices
+            ->filter(fn (array $device): bool => ProblemPolicy::deviceVisible($device, $policy))
+            ->values();
+        $policyVisibleOverviewLocations = $this->buildLocationGroups($policyVisibleOverviewDevices);
+
         $visiblePriority = $this->buildPriorityAttention(
-            $filteredDevices,
+            $policyVisibleOverviewDevices,
             max(1, count($priorityAttention['items']))
         );
-        $problemLocations = $filteredLocations
+        $problemLocations = $policyVisibleOverviewLocations
             ->where('issue_count', '>', 0)
             ->take(8)
             ->values();
@@ -884,6 +1035,20 @@ class Page extends PageHook
             'kind' => 'overview',
             'priority' => $visiblePriority,
             'critical_locations' => $problemLocations,
+            /*
+             * Deliberately NOT filtered through the same policy pass as
+             * priority/critical_locations above: this panel answers "how
+             * much of the fleet is fine", the same category of question
+             * as $visibleSummary's no_sensor_installed counter (see its
+             * comment) — an informational count that stays meaningful
+             * even when the Healthy severity toggle is hiding individual
+             * Healthy device *cards* elsewhere on the dashboard. Applying
+             * deviceVisible() here would make this panel read exactly
+             * "0 healthy locations, 0 healthy devices" any time an admin
+             * turns Healthy off — the default policy — misleadingly
+             * implying nothing in the fleet is healthy, rather than "we
+             * chose not to list them individually".
+             */
             'healthy' => [
                 'devices' => $filteredDevices->where('health', Severity::HEALTHY)->count(),
                 'locations' => $filteredLocations->where('health', Severity::HEALTHY)->count(),

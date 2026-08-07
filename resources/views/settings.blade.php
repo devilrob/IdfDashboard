@@ -68,6 +68,7 @@
                 'severity' => 'Default Severity Shown on Load',
                 'problem' => 'Default Problem Types Shown on Load',
                 'section' => 'Default Sections Visible on Load',
+                'tv_restrict' => 'TV Mode Additional Restrictions',
             ];
         @endphp
 
