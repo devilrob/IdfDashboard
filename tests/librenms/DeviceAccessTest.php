@@ -1764,9 +1764,18 @@ class DeviceAccessTest extends TestCase
             // only its literal HTML scaffolding, executed correctly,
             // and that classification into MDF/IDF/Other genuinely
             // routed each device to the right place.
-            $criticalPosition = strpos($html, 'compile-guard-critical.example.com');
-            $idfDevicePosition = strpos($html, 'compile-guard-idf.example.com');
-            $otherDevicePosition = strpos($html, 'compile-guard-other.example.com');
+            //
+            // Each search starts from its own section's already-verified
+            // heading position, not from byte 0: an MDF/IDF/Other device
+            // that is also actionable (as these fixtures deliberately
+            // are, to exercise a real section) legitimately renders a
+            // second time, earlier, inside the always-visible priority
+            // panel (`<span class="priority-device">`) — an unanchored
+            // strpos() would find that earlier, unrelated occurrence
+            // instead of the one actually inside the section under test.
+            $criticalPosition = strpos($html, 'compile-guard-critical.example.com', $markerPosition['MDF Servers']);
+            $idfDevicePosition = strpos($html, 'compile-guard-idf.example.com', $markerPosition['IDF Locations']);
+            $otherDevicePosition = strpos($html, 'compile-guard-other.example.com', $markerPosition['Other Locations']);
 
             $this->assertNotFalse($criticalPosition, "$viewLabel HTML must render the MDF-location fixture device.");
             $this->assertNotFalse($idfDevicePosition, "$viewLabel HTML must render the IDF-location fixture device.");
