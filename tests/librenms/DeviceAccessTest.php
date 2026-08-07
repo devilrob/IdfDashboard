@@ -1319,7 +1319,12 @@ class DeviceAccessTest extends TestCase
         $this->assertSame([], $d['priorityAttention']['items'], 'Caso D: Priority Attention is empty — Healthy devices have no actionable issue.');
         $this->assertSame(0, $d['priorityAttention']['total']);
         $this->assertSame([], $overviewPriorityIds($d), 'Caso D: the Overview view\'s inline panel is also empty — no actionable issue exists to disagree about.');
-        $this->assertSame([], $d['viewData']['critical_locations'], 'Caso D: no location has an open issue once Critical/Warning/Unknown/Stale/Maintenance are all off.');
+        // critical_locations is an Illuminate\Support\Collection (built via
+        // ->where(...)->take(8)->values() in Page.php's buildViewData()),
+        // not a plain array — assertSame([], ...) fails strict-identity
+        // type comparison even when the collection is genuinely empty, so
+        // emptiness is asserted via assertCount() instead.
+        $this->assertCount(0, $d['viewData']['critical_locations'], 'Caso D: no location has an open issue once Critical/Warning/Unknown/Stale/Maintenance are all off.');
         // healthy['devices']/['locations'] are deliberately NOT policy-
         // filtered (see the buildViewData() comment) — this reads 3
         // regardless of which severities are toggled, the same

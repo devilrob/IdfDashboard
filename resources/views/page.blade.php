@@ -187,11 +187,17 @@
     }
 
     /*
-     * Priority Attention — one row per unhealthy device, worst first,
-     * naming the exact cause (see buildPriorityAttention()/
+     * The top-of-page priority panel: one row per unhealthy device,
+     * worst first, naming the exact cause (see buildPriorityAttention()/
      * primaryIssueFor() in Page.php). This is the "what do I check
      * first" feed the rest of the dashboard's counts and per-location
      * cards summarize; it sits above them for that reason.
+     *
+     * (Deliberately not named with its on-screen heading text here —
+     * a rendered-HTML regression test greps for that exact phrase to
+     * prove the real heading below survives Blade compilation, and a
+     * same-string match inside this CSS comment would falsely satisfy
+     * that check before the real markup is ever reached.)
      */
     .priority-panel {
         background: #fff;
@@ -1125,8 +1131,9 @@
     /*
      * "All clear" slide — shown instead of a section whenever every
      * device in it is currently healthy, so a fully-healthy section
-     * (e.g. Other Locations with nothing active) is still visited by
-     * the TV rotation rather than silently disappearing from it.
+     * (e.g. the miscellaneous-locations grouping with nothing active)
+     * is still visited by the TV rotation rather than silently
+     * disappearing from it.
      */
     .tv-clear-slide {
         display: none;
@@ -1327,8 +1334,8 @@
     }
 
     /*
-     * Devices directly in a standalone section's grid (MDF Servers/
-     * Power/Infrastructure) have no location-card wrapper, so they
+     * Devices directly in one of the three MDF-only grids (Servers,
+     * Power, Infrastructure) have no location-card wrapper, so they
      * are paginated individually — a matching device only renders
      * once it is also part of the slide's current chunk
      * (`.tv-active-card`), keeping every slide within the screen with
@@ -1340,9 +1347,10 @@
 
     /*
      * TV Mode's combined "everything, worst first" slide — one pool
-     * mixing devices from MDF Servers/Power/Infrastructure with
-     * location cards from IDF/Other Locations, Critical-first, shown
-     * on one static screen with no rotation whenever it all fits
+     * mixing devices from the three MDF-only grids with location
+     * cards from the IDF and miscellaneous-locations groupings,
+     * Critical-first, shown on one static screen with no rotation
+     * whenever it all fits
      * (see tvBuildCombinedSlides()). `.tv-combined-slide` is the
      * pagination unit (toggled exactly like a normal `[data-
      * dashboard-section]`); the grid inside uses the same 340px
