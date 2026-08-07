@@ -1481,6 +1481,219 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(2, $withPower['tv']['omittedDeviceCount'], 'omittedDeviceCount sums across sections but mdfPower contributed zero (1 device, ceiling 10).');
     }
 
+    /**
+     * Regression guard for the real Blade compilation bug found while
+     * closing out Phase 3A: BladeCompiler::storeUncompiledBlocks() ->
+     * storePhpBlocks() uses the regex `(?<!@)@php(.*?)@endphp` to
+     * protect raw PHP blocks before Blade's main directive compiler
+     * runs. That regex does not distinguish the self-terminating
+     * inline form (`@php($expr)`, used by this file's Phase 2
+     * view-switch content) from the block form (`@php ... @endphp`) —
+     * an inline statement with no @endphp of its own will match
+     * forward to the *next* @endphp anywhere later in the file,
+     * silently swallowing every line of markup in between (hundreds
+     * of lines here: the rest of the view-switch, .tv-clock/
+     * .tv-status-banner, the toolbar, and the entire MDF Servers/
+     * Power/Infrastructure/IDF Locations/Other Locations device grid)
+     * into one opaque, never-compiled raw block.
+     *
+     * A plain grep for "@php"/"@endphp" cannot catch this — the file
+     * looks perfectly reasonable directive-by-directive; it only
+     * manifests once the *compiled* output is actually parsed/
+     * rendered, which is also why this went unnoticed for as long as
+     * it did (the swallowed section had independently been dead code
+     * behind an unrelated `@if(false)` since commit 5b44ff8, so
+     * nothing ever exercised a real render of it until both bugs were
+     * found and fixed together in this same effort).
+     *
+     * This test compiles the real page.blade.php through the actual
+     * Illuminate\View\Compilers\BladeCompiler LibreNMS's own container
+     * already provides (not a hand-rolled parser), then separately
+     * renders it end to end, and asserts that markers belonging to
+     * clearly distinct sections positioned on both sides of the
+     * historically-vulnerable region (the Phase 2 view-switch's inline
+     * @php($pager = ...) statements around lines 1864-1899, through to
+     * the MDF/IDF/Other Locations grid a few hundred lines later) are
+     * ALL present together. If a future edit reintroduces an
+     * unterminated inline @php(...) ahead of some later @endphp, the
+     * swallowed markers would simply be absent from the compiled/
+     * rendered output and these assertions would fail — deliberately
+     * not a whitespace-exact/full-HTML-snapshot comparison, which
+     * would be fragile against any unrelated, legitimate markup
+     * change.
+     */
+    public function testBladeCompilerNeverSwallowsMarkupBetweenPhpDirectives(): void
+    {
+        // Page.php's MDF membership check is an EXACT string match
+        // (->where('location', 'MDF')), and its IDF membership check is a
+        // strict format regex (^IDF[0-9]{2}(?:[A-Z]|M)?$ via isIdfLocation()).
+        // The literal values below are required for these fixture devices to
+        // actually land in the MDF Servers / IDF Locations sections rather
+        // than silently falling into Other Locations.
+        $mdfLocation = Location::factory()->create(['location' => 'MDF']);
+        $idfLocation = Location::factory()->create(['location' => 'IDF01']);
+        $otherLocation = Location::factory()->create(['location' => 'Warehouse Compile Guard']);
+
+        $critical = Device::factory()->create([
+            'display' => 'Compile Guard Critical',
+            'hostname' => 'compile-guard-critical.example.com',
+            'location_id' => $mdfLocation->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($critical)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Ambient',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $idfDevice = Device::factory()->create([
+            'display' => 'Compile Guard IDF Switch',
+            'hostname' => 'compile-guard-idf.example.com',
+            'location_id' => $idfLocation->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $otherDevice = Device::factory()->create([
+            'display' => 'Compile Guard Other Device',
+            'hostname' => 'compile-guard-other.example.com',
+            'location_id' => $otherLocation->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+
+        $rawSource = file_get_contents(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php')
+        );
+        $this->assertIsString($rawSource, 'page.blade.php must be readable for direct compilation.');
+
+        // Compile the raw source directly through the real compiler
+        // LibreNMS's own container already configures — not a fresh,
+        // hand-rolled instance — so this exercises the exact same
+        // storePhpBlocks()/compileStatements() pipeline a real request
+        // does.
+        $compiler = app(\Illuminate\View\Compilers\BladeCompiler::class);
+        $compiled = $compiler->compileString($rawSource);
+
+        // Blade replaces every stored raw block (from @php...@endphp,
+        // @verbatim, and component-tag precompilation) with a
+        // "@__raw_block_<N>__@" placeholder, then restores the real
+        // content back in as its very last compilation step. A
+        // placeholder that failed to resolve — the direct fingerprint
+        // of exactly this class of bug — would leak into the compiled
+        // output as literal, never-executed text.
+        $this->assertStringNotContainsString(
+            '@__raw_block_',
+            $compiled,
+            'Compiled output must not contain an unresolved Blade raw-block placeholder.'
+        );
+
+        foreach (['overview' => [], 'tv' => ['tv' => 1]] as $viewLabel => $extraQuery) {
+            $request = Request::create('/plugin/IdfDashboard', 'GET', array_merge(['view' => 'overview'], $extraQuery));
+            $request->setUserResolver(fn (): User => $user);
+            $payload = (new Page())->data(['default_severity_healthy' => '1'], $request);
+            $html = view()->file(
+                app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+                $payload
+            )->render();
+
+            $this->assertStringNotContainsString(
+                '@__raw_block_',
+                $html,
+                "Rendered $viewLabel HTML must not contain an unresolved Blade raw-block placeholder."
+            );
+
+            // Markers spanning both sides of the historically-vulnerable
+            // region, in file order: Priority Attention (inside the
+            // Phase 2 view-switch, BEFORE the inline @php($pager=...)
+            // statements starting a few dozen lines later) through to
+            // MDF Servers/Power/Infrastructure, IDF Locations, and
+            // Other Locations — all AFTER the block-form @php that
+            // used to wrongly claim the earlier inline statements'
+            // close tag. Present in both the plain and TV renders
+            // (none of these headings are themselves TV-gated), so
+            // checked for every $viewLabel. Every one of these must
+            // survive together, in the same render, for the swallow
+            // bug to be conclusively absent.
+            $expectedMarkers = [
+                'Priority Attention',
+                'MDF Servers',
+                'MDF Power',
+                'MDF Infrastructure',
+                'IDF Locations',
+                'Other Locations',
+            ];
+
+            $markerPosition = [];
+            foreach ($expectedMarkers as $marker) {
+                $position = strpos($html, $marker);
+                $this->assertNotFalse(
+                    $position,
+                    "Rendered $viewLabel HTML is missing expected marker \"$marker\" — a section between the Phase 2 view-switch and the MDF/IDF/Other Locations grid may have been swallowed."
+                );
+                $markerPosition[$marker] = $position;
+            }
+
+            // Relative order (not exact whitespace) proves the swallowed
+            // region's sections are still emitted in their real, intended
+            // sequence rather than merely all being present somewhere.
+            $this->assertLessThan($markerPosition['MDF Servers'], $markerPosition['Priority Attention'], "$viewLabel HTML: Priority Attention must render before MDF Servers.");
+            $this->assertLessThan($markerPosition['MDF Power'], $markerPosition['MDF Servers'], "$viewLabel HTML: MDF Servers must render before MDF Power.");
+            $this->assertLessThan($markerPosition['MDF Infrastructure'], $markerPosition['MDF Power'], "$viewLabel HTML: MDF Power must render before MDF Infrastructure.");
+            $this->assertLessThan($markerPosition['IDF Locations'], $markerPosition['MDF Infrastructure'], "$viewLabel HTML: MDF Infrastructure must render before IDF Locations.");
+            $this->assertLessThan($markerPosition['Other Locations'], $markerPosition['IDF Locations'], "$viewLabel HTML: IDF Locations must render before Other Locations.");
+
+            // data-tv-combined-slide is deliberately TV-only
+            // (`@if($filters['tv'])`, rendered just before the
+            // vulnerable region begins) — checked only for the tv
+            // render, both to confirm it renders correctly there and
+            // to confirm the plain render correctly does NOT include
+            // TV-only markup.
+            if ($viewLabel === 'tv') {
+                $this->assertStringContainsString('data-tv-combined-slide', $html, 'TV render must include the TV combined-fleet slide.');
+            } else {
+                $this->assertStringNotContainsString('data-tv-combined-slide', $html, 'Plain overview render must not include TV-only markup.');
+            }
+
+            // The actual fixture devices themselves must also survive
+            // rendering (not just their section's static heading), and
+            // each must land INSIDE its intended section's boundaries —
+            // proving the swallowed region's real @foreach loops, not
+            // only its literal HTML scaffolding, executed correctly,
+            // and that classification into MDF/IDF/Other genuinely
+            // routed each device to the right place.
+            $criticalPosition = strpos($html, 'compile-guard-critical.example.com');
+            $idfDevicePosition = strpos($html, 'compile-guard-idf.example.com');
+            $otherDevicePosition = strpos($html, 'compile-guard-other.example.com');
+
+            $this->assertNotFalse($criticalPosition, "$viewLabel HTML must render the MDF-location fixture device.");
+            $this->assertNotFalse($idfDevicePosition, "$viewLabel HTML must render the IDF-location fixture device.");
+            $this->assertNotFalse($otherDevicePosition, "$viewLabel HTML must render the Other-location fixture device.");
+
+            $this->assertGreaterThan($markerPosition['MDF Servers'], $criticalPosition, "$viewLabel HTML: the MDF-location fixture device must render after the MDF Servers heading.");
+            $this->assertLessThan($markerPosition['MDF Power'], $criticalPosition, "$viewLabel HTML: the MDF-location fixture device must render inside the MDF Servers section, before MDF Power.");
+
+            $this->assertGreaterThan($markerPosition['IDF Locations'], $idfDevicePosition, "$viewLabel HTML: the IDF-location fixture device must render after the IDF Locations heading.");
+            $this->assertLessThan($markerPosition['Other Locations'], $idfDevicePosition, "$viewLabel HTML: the IDF-location fixture device must render inside the IDF Locations section, before Other Locations.");
+
+            $this->assertGreaterThan($markerPosition['Other Locations'], $otherDevicePosition, "$viewLabel HTML: the Other-location fixture device must render after the Other Locations heading.");
+        }
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
