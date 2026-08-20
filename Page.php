@@ -1610,9 +1610,19 @@ class Page extends PageHook
     ): array {
         $items = $devices
             ->map(function (array $device): ?array {
+                // Warning-severity alert issues used to be excluded here
+                // entirely — a conservative noise-reduction measure from
+                // before Support\AlertRules gave administrators explicit
+                // per-rule curation. Now that every issue's severity comes
+                // only from administrator-selected Alert Rules (see
+                // buildDeviceIssues()'s own docblock), that blanket
+                // exclusion would silently hide exactly the kind of issue
+                // an included Warning Alert Rule exists to surface, so it
+                // is gone — 'actionable' plus the normal priority ordering
+                // (PRIORITY_WARNING_ALERT ranks correctly below
+                // PRIORITY_CRITICAL_ALERT) is the only remaining filter.
                 $actionable = $device['issues']
-                    ->filter(fn (array $issue): bool => $issue['actionable']
-                        && ! ($issue['source'] === 'alert' && $issue['severity'] === Severity::WARNING))
+                    ->filter(fn (array $issue): bool => $issue['actionable'])
                     ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
                     ->values();
                 $primary = $actionable->first();

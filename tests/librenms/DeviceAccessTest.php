@@ -584,7 +584,16 @@ class DeviceAccessTest extends TestCase
                 && str_contains($issue['description'], 'Device Down')
         ));
         $this->assertSame('warning', $warningAlertData['health']);
-        $this->assertFalse(collect($payload['priorityAttention']['items'])->contains(
+        // Priority Attention used to blanket-exclude every warning-severity
+        // alert issue — a conservative noise-reduction measure from before
+        // Support\AlertRules gave administrators explicit per-rule
+        // curation (see buildPriorityAttention()'s own updated comment).
+        // Now that severity comes only from administrator-selected Alert
+        // Rules, a device whose only cause is an included Warning Alert
+        // Rule must be able to appear here like any other actionable
+        // issue — hiding it would silently defeat the point of checking
+        // that rule in Settings in the first place.
+        $this->assertTrue(collect($payload['priorityAttention']['items'])->contains(
             'device_id',
             $warningAlertOnly->device_id
         ));
@@ -616,7 +625,12 @@ class DeviceAccessTest extends TestCase
         $this->assertLessThan(5000, $elapsedMs, 'Fixture Page::data() remains within a defensive local ceiling.');
         $this->assertLessThan(64 * 1024 * 1024, $memoryDelta, 'Fixture Page::data() memory delta remains bounded.');
         $this->assertLessThan(2 * 1024 * 1024, $htmlBytes, 'Fixture HTML remains within a defensive ceiling.');
-        $this->assertStringContainsString('Device down — unavailable for', $html);
+        // The native "Device down — unavailable for ..." description no
+        // longer exists at all (see buildDeviceIssues()'s own removal) —
+        // $down's rendered card now carries its alert-sourced description
+        // instead, matching the structured $downData['issues'] assertion
+        // above at the actual rendered-HTML level.
+        $this->assertStringContainsString('Active alert — Device Down', $html);
         $this->assertStringContainsString('No sensor installed', $html);
 
         fwrite(STDOUT, sprintf(

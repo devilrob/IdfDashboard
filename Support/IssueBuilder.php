@@ -10,6 +10,7 @@ final class IssueBuilder
     public const PRIORITY_CRITICAL_SENSOR = 20;
     public const PRIORITY_CRITICAL_SERVICE = 30;
     public const PRIORITY_CRITICAL_ALERT = 40;
+    public const PRIORITY_WARNING_ALERT = 45;
     public const PRIORITY_WARNING_SENSOR = 50;
     public const PRIORITY_WARNING_SERVICE = 60;
     public const PRIORITY_STALE = 70;
@@ -125,6 +126,26 @@ final class IssueBuilder
         return 'Current value crossed the configured threshold';
     }
 
+    /**
+     * [Severity::CRITICAL, 'device']/'sensor'/'service' and
+     * [Severity::WARNING, 'sensor']/'service' are no longer reachable in
+     * practice — Page.php's buildDeviceIssues() replaced native Device
+     * Down/Service Issue/per-sensor-threshold detection with
+     * administrator-selected LibreNMS Alert Rules entirely (source
+     * 'alert' only) — but this match is a general-purpose priority-
+     * ordering contract for IssueBuilder::make() callers, not something
+     * narrowly coupled to Page.php's current calling pattern, so those
+     * arms (and their constants) are kept rather than pruned; see
+     * tests/run.php's own standalone IssueBuilder coverage. The one arm
+     * that genuinely had no equivalent until now was
+     * [Severity::WARNING, 'alert']: it silently fell through to the
+     * `default` (PRIORITY_INFORMATIONAL) catch-all, so a real
+     * warning-severity Alert Rule issue was ranked below Stale/Unknown
+     * and dropped out of Priority Attention entirely — caught only once
+     * a real warning-severity Alert Rule fixture exercised this path in
+     * CI (tests/librenms/DeviceAccessTest.php's
+     * testCasosAToFRespectConfiguredSeverityPolicyAcrossSummaryPriorityAndTv).
+     */
     private static function priorityFor(string $severity, string $source): int
     {
         return match ([$severity, $source]) {
@@ -132,6 +153,7 @@ final class IssueBuilder
             [Severity::CRITICAL, 'sensor'] => self::PRIORITY_CRITICAL_SENSOR,
             [Severity::CRITICAL, 'service'] => self::PRIORITY_CRITICAL_SERVICE,
             [Severity::CRITICAL, 'alert'] => self::PRIORITY_CRITICAL_ALERT,
+            [Severity::WARNING, 'alert'] => self::PRIORITY_WARNING_ALERT,
             [Severity::WARNING, 'sensor'] => self::PRIORITY_WARNING_SENSOR,
             [Severity::WARNING, 'service'] => self::PRIORITY_WARNING_SERVICE,
             [Severity::STALE, 'sensor'] => self::PRIORITY_STALE,

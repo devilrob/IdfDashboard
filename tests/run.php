@@ -121,11 +121,25 @@ $assert([
     IssueBuilder::PRIORITY_CRITICAL_SENSOR,
     IssueBuilder::PRIORITY_CRITICAL_SERVICE,
     IssueBuilder::PRIORITY_CRITICAL_ALERT,
+    IssueBuilder::PRIORITY_WARNING_ALERT,
     IssueBuilder::PRIORITY_WARNING_SENSOR,
     IssueBuilder::PRIORITY_WARNING_SERVICE,
     IssueBuilder::PRIORITY_STALE,
     IssueBuilder::PRIORITY_UNKNOWN,
-] === [10, 20, 30, 40, 50, 60, 70, 80], 'Priority Attention order is exact');
+] === [10, 20, 30, 40, 45, 50, 60, 70, 80], 'Priority Attention order is exact');
+$warningAlertIssue = IssueBuilder::make([
+    'key' => 'alert:9:warning',
+    'device_id' => 9,
+    'severity' => Severity::WARNING,
+    'source' => 'alert',
+    'type' => 'alert',
+    'title' => 'Active alert',
+    'description' => 'Active alert — Vendor warning alarm',
+]);
+$assert(
+    $warningAlertIssue['priority'] === IssueBuilder::PRIORITY_WARNING_ALERT,
+    'a warning-severity alert-sourced issue ranks as PRIORITY_WARNING_ALERT, never falling through to the PRIORITY_INFORMATIONAL default — the exact regression that silently dropped a real Warning Alert Rule device out of Priority Attention'
+);
 $assert($sensorIssue['description'] !== '', 'critical issue always has a cause');
 $fallbackIssue = IssueBuilder::make(['severity' => 'warning', 'source' => 'sensor', 'value' => null]);
 $assert($fallbackIssue['description'] === 'Current value unavailable', 'warning issue explains an unavailable value');
