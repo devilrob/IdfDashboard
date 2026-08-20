@@ -527,29 +527,41 @@ class DeviceAccessTest extends TestCase
         $sensorData = $devices->get($sensorDevice->device_id);
         $warningAlertData = $devices->get($warningAlertOnly->device_id);
 
+        // $down's own device-status=0 severity is now purely from the
+        // "Device Down"-named Alert Rule attached to it below, not any
+        // native computation — down_since/down_age_seconds are separate,
+        // real-outage-timestamp data untouched by that removal (see
+        // Page.php's normalizeDevice()), so they stay asserted directly.
         $this->assertSame('critical', $downData['health']);
         $this->assertGreaterThanOrEqual(660, $downData['down_age_seconds']);
         $this->assertLessThan(900, $downData['down_age_seconds']);
-        $this->assertStringContainsString('unavailable for', $downData['issues']->first()['description']);
         $this->assertSame('maintenance', $maintenanceData['health']);
-        $this->assertFalse($maintenanceData['issues']->contains('type', 'device_down'));
         $this->assertTrue($recoveredData['recovered_recently']);
         $this->assertFalse($oldRecoveryData['recovered_recently']);
         $this->assertSame('Power', $upsData['category']);
         $this->assertGreaterThan(0, $upsData['no_sensor_count']);
-        $this->assertTrue($sensorData['issues']->contains(
+        // Native per-sensor threshold breach (temperature 40 > limit 35,
+        // formatted here as 104°F/95°F), native state-sensor Critical/
+        // Warning decoding, and native Service Issue detection are all
+        // removed entirely — a real LibreNMS Alert Rule is now the only
+        // way any of these become a Critical/Warning issue. None of
+        // these three has a matching Alert Rule in this fixture, so
+        // none can appear as an issue on $sensorData anymore.
+        $this->assertFalse($sensorData['issues']->contains(
             fn (array $issue): bool => str_contains($issue['description'], '104')
                 && str_contains($issue['description'], '95')
         ));
-        $this->assertTrue($sensorData['issues']->contains(
+        $this->assertFalse($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['type'] === 'state'
                 && str_contains($issue['description'], 'failed')
         ));
-        $this->assertTrue($sensorData['issues']->contains(
+        $this->assertFalse($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'service'
-                && $issue['severity'] === 'critical'
-                && str_contains($issue['description'], 'Connection refused')
         ));
+        // The full per-sensor telemetry array is no longer exposed to
+        // the frontend as chip data (see page.blade.php's own removal
+        // of $renderTelemetry/$metricIcon) — locking that in here.
+        $this->assertArrayNotHasKey('issue_telemetry', $sensorData);
         $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'alert'
                 && $issue['severity'] === 'critical'
@@ -566,7 +578,7 @@ class DeviceAccessTest extends TestCase
             fn (array $issue): bool => $issue['source'] === 'alert'
                 && str_contains($issue['description'], 'Sensor over limit')
         ));
-        $this->assertCount(1, $downData['issues']->where('type', 'device_down'));
+        $this->assertCount(0, $downData['issues']->where('type', 'device_down'), 'Native "device_down" issue type no longer exists at all — see buildDeviceIssues().');
         $this->assertTrue($downData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'alert'
                 && str_contains($issue['description'], 'Device Down')
@@ -592,8 +604,14 @@ class DeviceAccessTest extends TestCase
                 $this->assertSame($deviceData['device_id'], $issue['device_id']);
             }
         }
-        $this->assertSame('device_down', $payload['priorityAttention']['items'][0]['type']);
-        $this->assertSame(IssueBuilder::PRIORITY_DEVICE_DOWN, $payload['priorityAttention']['items'][0]['priority']);
+        // PRIORITY_DEVICE_DOWN/PRIORITY_CRITICAL_SENSOR/PRIORITY_CRITICAL_SERVICE
+        // are all unreachable now (their issue sources were removed) —
+        // PRIORITY_CRITICAL_ALERT is deterministically the best priority
+        // any issue can have across this whole fixture, regardless of
+        // which specific device/alert wins the device_name tie-break in
+        // buildPriorityAttention()'s final cross-device sort.
+        $this->assertSame('alert', $payload['priorityAttention']['items'][0]['type']);
+        $this->assertSame(IssueBuilder::PRIORITY_CRITICAL_ALERT, $payload['priorityAttention']['items'][0]['priority']);
         $this->assertLessThan(80, $dataQueryCount, 'Phase 1 remains fixed-query and avoids N+1 behavior.');
         $this->assertLessThan(5000, $elapsedMs, 'Fixture Page::data() remains within a defensive local ceiling.');
         $this->assertLessThan(64 * 1024 * 1024, $memoryDelta, 'Fixture Page::data() memory delta remains bounded.');
@@ -795,6 +813,21 @@ class DeviceAccessTest extends TestCase
             'behavior' => 1,
         ]);
         $futureSchedule->devices()->attach($future->device_id);
+
+        // $expired/$future both have status=0 like every other device
+        // fixture here, but native Device Down detection was removed
+        // entirely (see Page.php's buildDeviceIssues()) — a real
+        // critical-severity Alert Rule is now required for either to
+        // show as anything other than Healthy, so this test's actual
+        // subject (expired/future maintenance windows must not
+        // suppress a real Critical severity) stays meaningful.
+        $windowRule = AlertRule::factory()->create([
+            'name' => 'Maintenance window fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $expired->device_id, 'rule_id' => $windowRule->id]);
+        Alert::factory()->create(['device_id' => $future->device_id, 'rule_id' => $windowRule->id]);
+
         $hiddenSchedule = AlertSchedule::factory()->create(['title' => 'HIDDEN SCHEDULE'] + $activeValues);
         $hiddenSchedule->locations()->attach($hiddenLocation->id);
 
@@ -1135,6 +1168,15 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now(),
         ]);
+        // This sensor reading alone no longer produces any issue at all
+        // (native per-sensor threshold breach was removed — see Page.php's
+        // buildDeviceIssues()); a real critical-severity Alert Rule is what
+        // makes $critical actually 'critical' throughout every Caso below.
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'Caso critical fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $critical->device_id, 'rule_id' => $criticalRule->id]);
 
         $warning = Device::factory()->create([
             'display' => 'Caso Warning',
@@ -1154,6 +1196,11 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now(),
         ]);
+        $warningRule = AlertRule::factory()->create([
+            'name' => 'Caso warning fixture alert',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create(['device_id' => $warning->device_id, 'rule_id' => $warningRule->id]);
 
         $unknown = Device::factory()->create([
             'display' => 'Caso Unknown',
@@ -1242,6 +1289,18 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now()->subDays(2),
         ]);
+        // $staleCritical's old sensor reading alone no longer produces any
+        // issue either — its Critical severity below (which must survive
+        // even when Stale is toggled off in Caso F, since the two are
+        // independent conditions) comes entirely from this Alert. Alerts
+        // are not subject to the "stale data" staleness check at all
+        // (that check applies only to $stale's own PDU-freshness escalation,
+        // which stays native — see Config::FIELDS' default_problem_stale).
+        $staleCriticalRule = AlertRule::factory()->create([
+            'name' => 'Caso stale-critical fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $staleCritical->device_id, 'rule_id' => $staleCriticalRule->id]);
 
         $healthy = Device::factory()->create([
             'display' => 'Caso Healthy',
@@ -1482,9 +1541,12 @@ class DeviceAccessTest extends TestCase
             $tvDevicesF->get($staleCritical->device_id)['health'],
             'Caso F: an old-but-critical reading still shows Critical even when Stale is off.'
         );
+        // $staleCritical's Critical issue is now alert-sourced (see the
+        // Alert Rule fixture above) — its type/source are 'alert', not
+        // the removed native 'temperature'/'sensor' shape.
         $this->assertTrue(
             $tvDevicesF->get($staleCritical->device_id)['issues']->contains(
-                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'temperature'
+                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'alert' && $issue['source'] === 'alert'
             )
         );
         // Priority Attention (both the persistent banner and the
@@ -1556,6 +1618,20 @@ class DeviceAccessTest extends TestCase
             ]);
         };
 
+        // Native per-sensor threshold breach was removed entirely (see
+        // Page.php's buildDeviceIssues()) — these sensor readings alone no
+        // longer produce any issue, so every Critical/Warning device below
+        // is given a matching Alert Rule fixture; the sensor rows stay
+        // (harmless, unused-for-severity) purely as realistic fixture data.
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'TV ceiling fixture critical alert',
+            'severity' => 'critical',
+        ]);
+        $warningRule = AlertRule::factory()->create([
+            'name' => 'TV ceiling fixture warning alert',
+            'severity' => 'warning',
+        ]);
+
         $criticalIds = [];
         for ($i = 1; $i <= 7; $i++) {
             $critical = $makeServer("tv-ceiling-critical-{$i}.example.com");
@@ -1564,6 +1640,7 @@ class DeviceAccessTest extends TestCase
                 'sensor_current' => 90 + $i, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
                 'sensor_alert' => 1, 'lastupdate' => now(),
             ]);
+            Alert::factory()->create(['device_id' => $critical->device_id, 'rule_id' => $criticalRule->id]);
             $criticalIds[] = $critical->device_id;
         }
 
@@ -1575,6 +1652,7 @@ class DeviceAccessTest extends TestCase
                 'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
                 'sensor_alert' => 1, 'lastupdate' => now(),
             ]);
+            Alert::factory()->create(['device_id' => $warning->device_id, 'rule_id' => $warningRule->id]);
             $warningIds[] = $warning->device_id;
         }
 

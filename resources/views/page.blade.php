@@ -657,52 +657,6 @@
         animation: downPulse 1s ease-in-out infinite;
     }
 
-    .telemetry {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-top: 5px;
-    }
-
-    .metric {
-        background: #f3f5f6;
-        border: 1px solid #dfe3e5;
-        border-radius: 3px;
-        font-size: 12px;
-        padding: 3px 5px;
-    }
-
-    .metric-warning {
-        background: #fff8e5;
-        border-color: #f0ad4e;
-    }
-
-    .metric-critical {
-        background: #fdeaea;
-        border-color: #d9534f;
-    }
-
-    .metric-unknown {
-        background: #eeeefa;
-        border-color: #5c6bc0;
-    }
-
-    .metric-missing {
-        color: #888;
-    }
-
-    .metric-no_sensor {
-        background: #f7f7f7;
-        border-style: dotted;
-        color: #666;
-    }
-
-    .metric-freshness {
-        display: inline-block;
-        margin-left: 4px;
-        opacity: .78;
-    }
-
     .health-maintenance {
         border-color: #607d8b !important;
     }
@@ -710,77 +664,6 @@
     .health-stale {
         border-color: #f0ad4e !important;
         border-style: dashed !important;
-    }
-
-    /*
-     * Freshness is layered on top of severity, never a replacement
-     * for it — a metric whose last known reading was critical stays
-     * visually critical (red) even when stale; this dashed outline +
-     * clock icon only adds "this may not be the current instant" on
-     * top of whatever severity color already applies. See
-     * AUDIT_NOTES.md for the incident this design corrects (a stale
-     * dead UPS battery was previously shown as a neutral gray badge
-     * instead of a critical one).
-     */
-    .metric-is-stale {
-        border-style: dashed;
-    }
-
-    .metric-is-stale::after {
-        content: "\f017";
-        font-family: FontAwesome;
-        margin-left: 4px;
-        opacity: .6;
-    }
-
-    .metric-filtered {
-        display: none !important;
-    }
-
-    .telemetry-empty-note {
-        color: #888;
-        display: none;
-        font-size: 9px;
-        font-style: italic;
-        margin-top: 5px;
-    }
-
-    .telemetry-empty-note.telemetry-empty-visible {
-        display: block;
-    }
-
-    .metric-icon {
-        margin-right: 3px;
-    }
-
-    .metric-temperature.metric-warning .metric-icon {
-        color: #e67e22;
-        animation: heatPulse 1.7s ease-in-out infinite;
-    }
-
-    .metric-temperature.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: heatCritical .9s ease-in-out infinite;
-    }
-
-    .metric-humidity.metric-warning .metric-icon {
-        color: #428bca;
-        animation: humidityPulse 1.7s ease-in-out infinite;
-    }
-
-    .metric-humidity.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: humidityCritical 1s ease-in-out infinite;
-    }
-
-    .metric-battery.metric-warning .metric-icon {
-        color: #e67e22;
-        animation: batteryPulse 1.4s ease-in-out infinite;
-    }
-
-    .metric-battery.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: batteryCritical .75s ease-in-out infinite;
     }
 
     .service-summary {
@@ -884,80 +767,6 @@
         50% {
             opacity: 1;
             text-shadow: 0 0 5px rgba(217, 83, 79, .7);
-        }
-    }
-
-    @keyframes heatPulse {
-        0%, 100% {
-            transform: translateY(0) scale(1);
-        }
-
-        50% {
-            transform: translateY(-2px) scale(1.16);
-        }
-    }
-
-    @keyframes heatCritical {
-        0%, 100% {
-            transform: translateY(0) rotate(-3deg) scale(1);
-        }
-
-        50% {
-            transform: translateY(-2px) rotate(3deg) scale(1.25);
-        }
-    }
-
-    @keyframes humidityPulse {
-        0%, 100% {
-            opacity: .65;
-            transform: translateY(0);
-        }
-
-        50% {
-            opacity: 1;
-            transform: translateY(2px);
-        }
-    }
-
-    @keyframes humidityCritical {
-        0%, 100% {
-            transform: scale(1);
-        }
-
-        50% {
-            transform: scale(1.3);
-        }
-    }
-
-    @keyframes batteryPulse {
-        0%, 100% {
-            opacity: .6;
-            transform: scale(1);
-        }
-
-        50% {
-            opacity: 1;
-            transform: scale(1.18);
-        }
-    }
-
-    @keyframes batteryCritical {
-        0%, 100% {
-            opacity: .45;
-            transform: translateX(0);
-        }
-
-        25% {
-            transform: translateX(-2px);
-        }
-
-        50% {
-            opacity: 1;
-            transform: translateX(0) scale(1.22);
-        }
-
-        75% {
-            transform: translateX(2px);
         }
     }
 
@@ -1294,7 +1103,6 @@
     body.tv-mode-active .device-meta,
     body.tv-mode-active .device-state,
     body.tv-mode-active .sensor-pill,
-    body.tv-mode-active .metric-freshness,
     body.tv-mode-active .service-summary,
     body.tv-mode-active .service-issue,
     body.tv-mode-active .service-message,
@@ -1457,15 +1265,6 @@
         padding: 4px 10px;
     }
 
-    body.tv-mode-active .metric {
-        font-size: 12px;
-        padding: 4px 7px;
-    }
-
-    body.tv-mode-active .metric-missing {
-        display: none;
-    }
-
     body.tv-mode-active .empty-filter-result {
         background: #131a29;
         border-color: #333f57;
@@ -1476,93 +1275,15 @@
 </style>
 
 @php
-    $metricIcon = function (array $metric): array {
-        $label = strtolower($metric['label']);
-
-        if (str_contains($label, 'temperature')) {
-            return ['temperature', 'fa-thermometer-full'];
-        }
-
-        if (str_contains($label, 'humidity')) {
-            return ['humidity', 'fa-tint'];
-        }
-
-        if (str_contains($label, 'battery')) {
-            return ['battery', 'fa-battery-quarter'];
-        }
-
-        if (str_contains($label, 'voltage')) {
-            return ['voltage', 'fa-bolt'];
-        }
-
-        if (str_contains($label, 'fan')) {
-            return ['fan', 'fa-refresh'];
-        }
-
-        if (str_contains($label, 'runtime')) {
-            return ['runtime', 'fa-clock-o'];
-        }
-
-        if (str_contains($label, 'state')) {
-            return ['state', 'fa-info-circle'];
-        }
-
-        if (str_contains($label, 'storage')) {
-            return ['storage', 'fa-hdd-o'];
-        }
-
-        if (str_contains($label, 'memory')) {
-            return ['memory', 'fa-microchip'];
-        }
-
-        if (str_contains($label, 'processor')) {
-            return ['processor', 'fa-tachometer'];
-        }
-
-        return ['other', 'fa-line-chart'];
-    };
-
-    $renderTelemetry = function ($telemetry) use ($metricIcon) {
-        if ($telemetry->isEmpty()) {
-            return '';
-        }
-
-        $html = '<div class="telemetry">';
-
-        foreach ($telemetry as $metric) {
-            [$metricType, $icon] = $metricIcon($metric);
-
-            $isStale = $metric['stale'] ?? false;
-
-            $title = e($metric['cause'] ?? $metric['description']);
-
-            if ($metric['lastupdate']) {
-                $title .= ' · ' . e($metric['lastupdate']);
-            }
-
-            $html .= '<span class="metric metric-' . e($metric['state']) . ' metric-' . e($metricType)
-                . ($isStale ? ' metric-is-stale' : '') . '"'
-                . ' data-metric-state="' . e($metric['state']) . '"'
-                . ' data-metric-type="' . e($metricType) . '"'
-                . ' data-metric-stale="' . ($isStale ? '1' : '0') . '"'
-                . ' title="' . $title . '">'
-                . '<i class="fa ' . e($icon) . ' metric-icon" aria-hidden="true"></i>'
-                . '<strong>' . e($metric['label']) . ':</strong> '
-                . e($metric['value'])
-                . (isset($metric['freshness']['label'])
-                    ? '<small class="metric-freshness">' . e($metric['freshness']['label']) . '</small>'
-                    : '')
-                . '</span>';
-        }
-
-        $html .= '</div>';
-        $html .= '<div class="telemetry-empty-note" data-telemetry-empty-note>'
-            . 'No sensors match the current filters'
-            . '</div>';
-
-        return $html;
-    };
-
+    // Per-sensor value chips were removed entirely: severity is now
+    // decided only by administrator-selected LibreNMS Alert Rules (see
+    // Support\AlertRules), never by this plugin re-evaluating raw
+    // sensor_current/sensor_limit* values itself, so a chip strip
+    // implying a live per-sensor verdict would be misleading. The
+    // underlying $device['telemetry'] data still exists and still
+    // feeds the Coverage panel's aggregate max-temperature/max-
+    // humidity figures elsewhere on this page — only the per-device
+    // chip rendering is gone.
     $renderIssues = function (array $device, int $limit = 3) {
         $html = '';
 
@@ -1832,8 +1553,15 @@
     <div class="phase2-summary phase2-desktop" aria-label="Operational summary">
         <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'critical']) }}"><strong>{{ $visibleSummary['critical_devices'] }}</strong><span>Critical</span></a>
         <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'warning']) }}"><strong>{{ $visibleSummary['warning_devices'] }}</strong><span>Warning</span></a>
-        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'device']) }}"><strong>{{ $visibleSummary['devices_down'] }}</strong><span>Devices Down</span></a>
-        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'service']) }}"><strong>{{ $visibleSummary['service_problems'] }}</strong><span>Services Down</span></a>
+        {{-- Plain (non-link) counters: raw LibreNMS device-status/service
+             counts, independent of severity/Alert Rules — a device can
+             read "Down: yes" here while showing Healthy on its card if
+             no matching Alert Rule is currently checked. There is no
+             more problem_types value to filter these by (see
+             Support\Config::normalizeDashboardRequest()), so these are
+             informational only, matching "Last Updated" below. --}}
+        <div class="phase2-counter phase2-counter-critical"><strong>{{ $visibleSummary['devices_down'] }}</strong><span>Devices Down</span></div>
+        <div class="phase2-counter phase2-counter-critical"><strong>{{ $visibleSummary['service_problems'] }}</strong><span>Services Down</span></div>
         <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'locations', 'problems_only' => 1]) }}"><strong>{{ $visibleSummary['locations_affected'] }}</strong><span>Locations Affected</span></a>
         <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'stale' => 1]) }}"><strong>{{ $visibleSummary['stale_sensor_devices'] }}</strong><span>Stale</span></a>
         <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'no_sensor' => 1]) }}"><strong>{{ $visibleSummary['no_sensor_installed'] }}</strong><span>No Sensor</span></a>
@@ -1847,7 +1575,14 @@
             <label class="phase2-field">Search<input type="search" name="search" maxlength="100" value="{{ $filters['search'] }}" placeholder="Name, host, IP, hardware or location"></label>
             <label class="phase2-field">Severity<select name="severity"><option value="">All severities</option>@foreach(['critical','warning','unknown','stale','maintenance','healthy'] as $option)<option value="{{ $option }}" @selected($filters['severity'] === $option)>{{ ucfirst($option) }}</option>@endforeach</select></label>
             <label class="phase2-field">Category<select name="category"><option value="">All categories</option>@foreach($categories as $option)<option value="{{ $option }}" @selected($filters['category'] === $option)>{{ $option }}</option>@endforeach</select></label>
-            <label class="phase2-field">Problem<select name="problem"><option value="">All problem types</option>@foreach(['device' => 'Device down', 'service' => 'Service', 'alert' => 'Alert', 'temperature' => 'Temperature', 'humidity' => 'Humidity', 'battery' => 'Battery', 'voltage' => 'Voltage', 'state' => 'State', 'storage' => 'Storage', 'memory' => 'Memory', 'processor' => 'Processor', 'other' => 'Other'] as $key => $label)<option value="{{ $key }}" @selected($filters['problem'] === $key)>{{ $label }}</option>@endforeach</select></label>
+            {{-- Device/Service/per-sensor-type options were removed: a
+                 device's problem_types can now only ever be 'alert',
+                 'stale' or 'other' (see Config::normalizeDashboardRequest()
+                 and Page.php's normalizeDevice() — severity/problem
+                 detection comes only from administrator-selected LibreNMS
+                 Alert Rules now). 'stale' keeps its own dedicated checkbox
+                 below, unchanged. --}}
+            <label class="phase2-field">Problem<select name="problem"><option value="">All problem types</option>@foreach(['alert' => 'Alert', 'other' => 'Other'] as $key => $label)<option value="{{ $key }}" @selected($filters['problem'] === $key)>{{ $label }}</option>@endforeach</select></label>
             @if($dashboardView !== 'location')
                 <label class="phase2-field">Location<select name="location"><option value="">All locations</option>@foreach($locationOptions as $option)<option value="{{ $option['id'] }}" @selected($filters['location'] === $option['id'])>{{ $option['name'] }}</option>@endforeach</select></label>
             @endif
@@ -2432,8 +2167,6 @@
                             {{ strtoupper($device['os']) }}
                         </div>
 
-                        {!! $renderTelemetry($device['telemetry']) !!}
-
                         <div class="service-summary">
                             @if($device['service_total'] === 0)
                                 <span class="text-muted">
@@ -2500,8 +2233,6 @@
                             {{ $device['hostname'] }}
                         </div>
 
-                        {!! $renderTelemetry($device['telemetry']) !!}
-
                         {!! $renderIssues($device) !!}
                     </article>
                 @endforeach
@@ -2549,8 +2280,6 @@
                             {{ $device['hostname'] }} ·
                             {{ $device['os'] }}
                         </div>
-
-                        {!! $renderTelemetry($device['telemetry']) !!}
 
                         {!! $renderIssues($device) !!}
                     </article>
@@ -2635,9 +2364,7 @@
                                         </span>
                                     </div>
 
-                                    {!! $renderTelemetry($device['telemetry']) !!}
-
-                                    {!! $renderIssues($device, 2) !!}
+                                                {!! $renderIssues($device, 2) !!}
                                 </li>
                             @endforeach
                         </ul>
@@ -2723,9 +2450,7 @@
                                         </span>
                                     </div>
 
-                                    {!! $renderTelemetry($device['telemetry']) !!}
-
-                                    {!! $renderIssues($device, 2) !!}
+                                                {!! $renderIssues($device, 2) !!}
                                 </li>
                             @endforeach
                         </ul>
@@ -3135,114 +2860,6 @@ function initDashboard() {
         });
     }
 
-    const metricTypeFilterKey = {
-        temperature: 'temperature',
-        humidity: 'humidity',
-        battery: 'battery',
-        voltage: 'voltage',
-        fan: 'fan',
-        runtime: 'other',
-        state: 'state',
-        storage: 'storage',
-        memory: 'memory',
-        processor: 'processor',
-        other: 'other'
-    };
-
-    // `metricState` is always the real severity computed from the
-    // metric's last known value (critical/warning/healthy/missing) —
-    // Page.php never softens it just because the reading is old (a
-    // UPS battery last seen at 0% stays Critical). Staleness is a
-    // separate `data-metric-stale` flag, purely about how much to
-    // trust the timestamp, and only gates visibility for the one case
-    // where it is the *entire* story: a stale reading whose last
-    // known value was itself healthy (no evidence of a problem, just
-    // lost visibility). A stale Critical/Warning reading is a real
-    // problem and is never hidden by the "Stale data" checkbox — only
-    // by the normal Severity/Problem checkboxes, like any other one.
-    function metricMatches(metricEl) {
-        const metricState = metricEl.dataset.metricState;
-        const metricType = metricEl.dataset.metricType;
-        const isStale = metricEl.dataset.metricStale === '1';
-
-        // Legacy missing rows remain hidden. The explicit no_sensor
-        // state is intentionally visible and informational.
-        if (metricState === 'missing') {
-            return false;
-        }
-
-        const filterKey = metricTypeFilterKey[metricType] || 'other';
-
-        if (metricState === 'no_sensor') {
-            return Boolean(state[filterKey]);
-        }
-
-        if (isStale && metricState === 'healthy' && !state.problem_stale) {
-            return false;
-        }
-
-        if (!state[metricState]) {
-            return false;
-        }
-
-        return Boolean(state[filterKey]);
-    }
-
-    // Beyond deciding which whole devices appear, each visible card
-    // only shows the sensors whose severity (Critical/Warning/Healthy)
-    // AND type (Temperature/Humidity/.../Other) are both checked above
-    // — this is what stops a mostly-healthy PDU card from burying its
-    // one critical humidity reading under a wall of unrelated "No
-    // recent data" placeholders.
-    function applyMetricVisibility(device) {
-        const metrics = device.querySelectorAll('.metric');
-        let anyVisible = false;
-        const hiddenBySeverity = { critical: 0, warning: 0 };
-
-        metrics.forEach(function (metricEl) {
-            const show = metricMatches(metricEl);
-
-            metricEl.classList.toggle('metric-filtered', !show);
-
-            if (show) {
-                anyVisible = true;
-            } else if (metricEl.dataset.metricState in hiddenBySeverity) {
-                hiddenBySeverity[metricEl.dataset.metricState]++;
-            }
-        });
-
-        const emptyNote = device.querySelector('[data-telemetry-empty-note]');
-
-        if (emptyNote) {
-            const showEmptyNote = metrics.length > 0 && !anyVisible;
-
-            emptyNote.classList.toggle('telemetry-empty-visible', showEmptyNote);
-
-            // A card can show Critical/Warning even with zero visible
-            // metrics — the badge always reflects real severity,
-            // independent of what the viewer's filters currently show
-            // (see AUDIT_NOTES.md). Left as a bare "No sensors match"
-            // note, that reads as a bug ("why is this red with nothing
-            // shown?"); naming what's hidden makes the badge legible
-            // again without changing what the filters actually do.
-            if (showEmptyNote) {
-                const hidden = [];
-
-                if (hiddenBySeverity.critical > 0) {
-                    hidden.push(hiddenBySeverity.critical + ' Critical');
-                }
-
-                if (hiddenBySeverity.warning > 0) {
-                    hidden.push(hiddenBySeverity.warning + ' Warning');
-                }
-
-                emptyNote.textContent = hidden.length > 0
-                    ? 'No sensors match the current filters — hiding ' + hidden.join(', ')
-                    : 'No sensors match the current filters';
-            }
-        }
-    }
-
     function filterStandaloneSection(sectionName) {
         const section = document.querySelector(
             '[data-dashboard-section="' + sectionName + '"]'
@@ -3265,7 +2882,6 @@ function initDashboard() {
             const show = deviceMatches(device);
 
             device.style.display = show ? '' : 'none';
-            applyMetricVisibility(device);
 
             if (show) {
                 visible += 1;
@@ -3304,7 +2920,6 @@ function initDashboard() {
                 const show = deviceMatches(device);
 
                 device.style.display = show ? '' : 'none';
-                applyMetricVisibility(device);
 
                 if (show) {
                     locationVisible += 1;

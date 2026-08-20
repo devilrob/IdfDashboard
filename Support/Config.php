@@ -144,14 +144,29 @@ class Config
             'help' => 'Controls only the "No sensor installed" counter/callouts, not device severity — a device with no curated sensor is never Critical/Warning by itself.',
         ],
 
-        // --- Default Problem types shown on load -----------------------
+        // --- Sensor coverage & data-quality checks ----------------------
+        // Renamed from "Default Problem Types Shown on Load": severity
+        // (Critical/Warning) is no longer computed by this plugin at all
+        // — it comes only from the administrator-selected LibreNMS Alert
+        // Rules (see resources/views/settings.blade.php's "Included
+        // LibreNMS Alert Rules" section). These checkboxes now control a
+        // narrower, still-genuinely-native concern: whether a *missing*
+        // sensor of this type is flagged ("No sensor installed"), and
+        // whether an *unreadable/misconfigured* sensor of this type is
+        // flagged ("Needs Review" / Unknown) — neither of those is
+        // something a LibreNMS Alert Rule condition can express, since a
+        // rule can only evaluate a sensor that already exists and already
+        // has a numeric/decoded value. 'Device down' and 'Service issue'
+        // were removed entirely: LibreNMS already has real Alert Rules
+        // for both (see the screenshots this redesign was built from —
+        // "Cisco Switch Down", "Critical Devices - Device Down",
+        // "Service Critical/Warning"), and this plugin no longer keeps a
+        // second, independent copy of that same status check.
         'default_problem_temperature' => ['type' => 'bool', 'default' => true, 'label' => 'Temperature', 'group' => 'problem', 'help' => ''],
         'default_problem_humidity' => ['type' => 'bool', 'default' => true, 'label' => 'Humidity', 'group' => 'problem', 'help' => ''],
         'default_problem_battery' => ['type' => 'bool', 'default' => true, 'label' => 'Battery', 'group' => 'problem', 'help' => ''],
         'default_problem_voltage' => ['type' => 'bool', 'default' => true, 'label' => 'Voltage', 'group' => 'problem', 'help' => ''],
         'default_problem_fan' => ['type' => 'bool', 'default' => true, 'label' => 'Fan', 'group' => 'problem', 'help' => ''],
-        'default_problem_device' => ['type' => 'bool', 'default' => true, 'label' => 'Device down', 'group' => 'problem', 'help' => ''],
-        'default_problem_service' => ['type' => 'bool', 'default' => true, 'label' => 'Service issue', 'group' => 'problem', 'help' => ''],
         // 'Alert' is deliberately not a FIELDS entry here: which real
         // LibreNMS Alert Rules feed this dashboard's Alert issues is
         // now a dynamic, DB-driven multi-select (Support\AlertRules),
@@ -159,14 +174,14 @@ class Config
         // rule or none". See resources/views/settings.blade.php's
         // dedicated "Included LibreNMS Alert Rules" section.
         'default_problem_state' => ['type' => 'bool', 'default' => true, 'label' => 'State sensor', 'group' => 'problem', 'help' => 'Discrete/enum sensors such as "System Status" or "Battery Status" — decoded via LibreNMS\'s state_translations table, not a numeric threshold.'],
-        'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table. A "crashinfo" partition full at 100% is common and often benign on some vendors\' switches, so it is capped at Warning here, never auto-Critical.'],
+        'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table.'],
         'default_problem_memory' => ['type' => 'bool', 'default' => true, 'label' => 'Memory', 'group' => 'problem', 'help' => 'Memory pool usage from LibreNMS\'s mempools table.'],
         'default_problem_processor' => ['type' => 'bool', 'default' => true, 'label' => 'Processor', 'group' => 'problem', 'help' => 'CPU usage from LibreNMS\'s processors table.'],
         'default_problem_stale' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Stale data',
             'group' => 'problem',
-            'help' => 'When disabled, stale readings are excluded from telemetry, severity, counters, cards, filters, and Priority Attention.',
+            'help' => 'A curated power (PDU/UPS) reading that has stopped updating but was last seen healthy still elevates the device to "Stale" while this is on — see the "Stale" severity toggle above for whether that elevation itself is shown at all.',
         ],
         'default_problem_other' => ['type' => 'bool', 'default' => true, 'label' => 'Other', 'group' => 'problem', 'help' => ''],
 
@@ -274,10 +289,14 @@ class Config
             'battery' => (bool) $config['default_problem_battery'],
             'voltage' => (bool) $config['default_problem_voltage'],
             'fan' => (bool) $config['default_problem_fan'],
-            'device' => (bool) $config['default_problem_device'],
-            'service' => (bool) $config['default_problem_service'],
-            // Deliberately no 'alert' key here — see the FIELDS comment
-            // above. ProblemPolicy::deviceVisible() reads
+            // Deliberately no 'device'/'service' keys anymore — native
+            // Device Down/Service Issue detection was removed from
+            // Page.php entirely (real LibreNMS Alert Rules cover both),
+            // so 'device'/'service' can never appear in a device's
+            // problem_types again; keeping dead keys here would be
+            // exactly the kind of redundancy this plugin is trying to
+            // remove. Deliberately no 'alert' key here either — see the
+            // FIELDS comment above. ProblemPolicy::deviceVisible() reads
             // $policy[$key] ?? true, so an issue of type 'alert' (which
             // only ever exists after Support\AlertRules' own per-rule
             // inclusion filter already ran) is never re-gated by a
@@ -340,8 +359,13 @@ class Config
             : '';
         $category = trim((string) ($input['category'] ?? ''));
         $category = in_array($category, DeviceClassifier::CATEGORIES, true) ? $category : '';
+        // 'device'/'service'/'temperature'/'humidity'/etc. were removed:
+        // a device's problem_types array can now only ever contain
+        // 'alert', 'stale' or 'other' (see Page.php's normalizeDevice()
+        // — native per-sensor-type/device/service issue generation was
+        // replaced by administrator-selected LibreNMS Alert Rules).
         $problem = strtolower(trim((string) ($input['problem'] ?? '')));
-        $problem = in_array($problem, ['device', 'service', 'alert', 'temperature', 'humidity', 'battery', 'voltage', 'fan', 'state', 'storage', 'memory', 'processor', 'stale', 'other'], true)
+        $problem = in_array($problem, ['alert', 'stale', 'other'], true)
             ? $problem
             : '';
         $sort = strtolower(trim((string) ($input['sort'] ?? 'severity')));

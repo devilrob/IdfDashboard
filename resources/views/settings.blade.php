@@ -66,7 +66,7 @@
                 'navigation' => 'Navigation & Lists',
                 'updates' => 'Updates',
                 'severity' => 'Default Severity Shown on Load',
-                'problem' => 'Default Problem Types Shown on Load',
+                'problem' => 'Sensor Coverage & Data-Quality Checks',
                 'section' => 'Default Sections Visible on Load',
                 'tv_restrict' => 'TV Mode Additional Restrictions',
             ];
@@ -75,6 +75,23 @@
         @foreach ($groupLabels as $groupKey => $groupLabel)
             <fieldset class="idf-settings-group">
                 <legend>{{ $groupLabel }}</legend>
+
+                @if ($groupKey === 'problem')
+                    <p class="idf-settings-group-intro">
+                        Whether a reading is a real problem is decided only
+                        by the LibreNMS Alert Rules checked below under
+                        "Included LibreNMS Alert Rules" — this dashboard no
+                        longer evaluates sensor thresholds itself. These
+                        checkboxes control something narrower: whether a
+                        <em>missing</em> sensor of this type is flagged as
+                        "No sensor installed", and whether an
+                        <em>unreadable/unrecognized</em> reading of this
+                        type is flagged as "Needs Review" — neither of
+                        those is something an Alert Rule can express, since
+                        a rule can only evaluate a sensor that already
+                        exists and already has a decodable value.
+                    </p>
+                @endif
 
                 <div class="idf-settings-field-grid">
                     @foreach ($groups[$groupKey] ?? [] as $key => $field)
