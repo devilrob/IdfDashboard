@@ -152,7 +152,12 @@ class Config
         'default_problem_fan' => ['type' => 'bool', 'default' => true, 'label' => 'Fan', 'group' => 'problem', 'help' => ''],
         'default_problem_device' => ['type' => 'bool', 'default' => true, 'label' => 'Device down', 'group' => 'problem', 'help' => ''],
         'default_problem_service' => ['type' => 'bool', 'default' => true, 'label' => 'Service issue', 'group' => 'problem', 'help' => ''],
-        'default_problem_alert' => ['type' => 'bool', 'default' => true, 'label' => 'Alert', 'group' => 'problem', 'help' => ''],
+        // 'Alert' is deliberately not a FIELDS entry here: which real
+        // LibreNMS Alert Rules feed this dashboard's Alert issues is
+        // now a dynamic, DB-driven multi-select (Support\AlertRules),
+        // not a static bool that could only ever mean "show every
+        // rule or none". See resources/views/settings.blade.php's
+        // dedicated "Included LibreNMS Alert Rules" section.
         'default_problem_state' => ['type' => 'bool', 'default' => true, 'label' => 'State sensor', 'group' => 'problem', 'help' => 'Discrete/enum sensors such as "System Status" or "Battery Status" — decoded via LibreNMS\'s state_translations table, not a numeric threshold.'],
         'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table. A "crashinfo" partition full at 100% is common and often benign on some vendors\' switches, so it is capped at Warning here, never auto-Critical.'],
         'default_problem_memory' => ['type' => 'bool', 'default' => true, 'label' => 'Memory', 'group' => 'problem', 'help' => 'Memory pool usage from LibreNMS\'s mempools table.'],
@@ -271,7 +276,12 @@ class Config
             'fan' => (bool) $config['default_problem_fan'],
             'device' => (bool) $config['default_problem_device'],
             'service' => (bool) $config['default_problem_service'],
-            'alert' => (bool) $config['default_problem_alert'],
+            // Deliberately no 'alert' key here — see the FIELDS comment
+            // above. ProblemPolicy::deviceVisible() reads
+            // $policy[$key] ?? true, so an issue of type 'alert' (which
+            // only ever exists after Support\AlertRules' own per-rule
+            // inclusion filter already ran) is never re-gated by a
+            // second, redundant boolean here.
             'state' => (bool) $config['default_problem_state'],
             'storage' => (bool) $config['default_problem_storage'],
             'memory' => (bool) $config['default_problem_memory'],

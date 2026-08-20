@@ -3101,6 +3101,18 @@ function initDashboard() {
         return problem === 'stale' ? 'problem_stale' : problem;
     }
 
+    // Mirrors ProblemPolicy::deviceVisible()'s own `$policy[$key] ?? true`
+    // fallback exactly: a problem type with no key at all in the policy
+    // object (currently only 'alert', which has no single global on/off
+    // setting anymore — see Support\AlertRules) must default to visible,
+    // never to hidden. A plain `Boolean(policy[key])` would silently
+    // read a missing key as false and hide every alert-having device —
+    // the same class of client/server policy drift the P1 severity-
+    // policy fix (v1.3.0) already root-caused and fixed once.
+    function policyAllows(policy, key) {
+        return key in policy ? Boolean(policy[key]) : true;
+    }
+
     function deviceMatches(device) {
         const health = device.dataset.health || 'healthy';
 
@@ -3119,7 +3131,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(state[problemPolicyKey(problem)]);
+            return policyAllows(state, problemPolicyKey(problem));
         });
     }
 
@@ -3474,7 +3486,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(tvOnlyDefaults[problemPolicyKey(problem)]);
+            return policyAllows(tvOnlyDefaults, problemPolicyKey(problem));
         });
     }
 

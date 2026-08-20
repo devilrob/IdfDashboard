@@ -125,6 +125,52 @@
             </fieldset>
         @endforeach
 
+        <fieldset class="idf-settings-group">
+            <legend>Included LibreNMS Alert Rules</legend>
+
+            <p class="idf-settings-group-intro">
+                Every rule below is a real Alert Rule already configured in LibreNMS
+                (Alert Rules admin page). Checked rules feed this dashboard's "Alert"
+                issues; unchecked rules are simply not shown here — LibreNMS keeps
+                evaluating and notifying on them exactly as configured either way.
+                Nothing is hidden automatically anymore: a rule stays included the
+                first time you open this page, and stays exactly as you left it after
+                that.
+            </p>
+
+            @if (empty($availableAlertRules))
+                <div class="idf-settings-help">
+                    No LibreNMS Alert Rules were found (or this LibreNMS version's
+                    schema was not recognized). Every currently active alert is shown
+                    on the dashboard; there is nothing to select yet.
+                </div>
+            @else
+                <input type="hidden" name="settings[{{ $alertRuleSettingKey }}][]" value="">
+
+                <div class="idf-settings-field-grid idf-alert-rules-grid">
+                    @foreach ($availableAlertRules as $rule)
+                        <div class="idf-settings-field idf-settings-field-bool">
+                            <label class="idf-settings-checkbox-label">
+                                <input
+                                    type="checkbox"
+                                    class="idf-alert-rule-checkbox"
+                                    name="settings[{{ $alertRuleSettingKey }}][]"
+                                    value="{{ $rule['id'] }}"
+                                    @checked(in_array($rule['id'], $includedAlertRuleIds, true))
+                                >
+                                <span>
+                                    {{ $rule['name'] }}
+                                    @if ($rule['severity'] !== '')
+                                        <span class="idf-alert-rule-severity">{{ $rule['severity'] }}</span>
+                                    @endif
+                                </span>
+                            </label>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+        </fieldset>
+
         <div class="idf-settings-actions">
             <button type="submit" class="idf-settings-save">Save Settings</button>
             <button type="button" class="idf-settings-reset" data-idf-reset-defaults>
@@ -149,6 +195,15 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
                 input.value = value;
             }
         });
+    });
+
+    // Included LibreNMS Alert Rules has no FIELDS default of its own
+    // (it is a dynamic, DB-driven list, not a static bool/choice/int
+    // field) — "reset to defaults" for it means every rule included,
+    // matching Support\AlertRules::resolveIncludedIds()'s own default
+    // for "no explicit choice has ever been saved".
+    document.querySelectorAll('.idf-alert-rule-checkbox').forEach(function (input) {
+        input.checked = true;
     });
 });
 </script>
@@ -289,6 +344,28 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         display: grid;
         gap: 10px 24px;
         grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    }
+
+    .idf-settings-group-intro {
+        color: #666;
+        font-size: 12px;
+        margin: 0 0 12px;
+        max-width: 720px;
+    }
+
+    .idf-alert-rules-grid {
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    }
+
+    .idf-alert-rule-severity {
+        background: #eef2f5;
+        border-radius: 3px;
+        color: #5f6b76;
+        font-size: 10px;
+        margin-left: 6px;
+        padding: 1px 6px;
+        text-transform: uppercase;
+        letter-spacing: .02em;
     }
 
     .idf-settings-field {

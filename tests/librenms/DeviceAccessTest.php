@@ -555,12 +555,21 @@ class DeviceAccessTest extends TestCase
                 && $issue['severity'] === 'critical'
                 && str_contains($issue['description'], 'Vendor power alarm')
         ));
-        $this->assertFalse($sensorData['issues']->contains(
-            fn (array $issue): bool => str_contains($issue['description'], 'Sensor over limit')
+        // No idf_included_alert_rule_ids setting was saved for this
+        // request ($settings === []), so Support\AlertRules defaults to
+        // "every currently defined rule is included" — there is no more
+        // hardcoded exclusion of rules named "Sensor over limit"/
+        // "Device Down"; an administrator now has to explicitly
+        // uncheck a rule in Settings for it to disappear (see the
+        // dedicated exclusion assertions further below).
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Sensor over limit')
         ));
         $this->assertCount(1, $downData['issues']->where('type', 'device_down'));
-        $this->assertFalse($downData['issues']->contains(
-            fn (array $issue): bool => str_contains($issue['description'], 'Device Down')
+        $this->assertTrue($downData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Device Down')
         ));
         $this->assertSame('warning', $warningAlertData['health']);
         $this->assertFalse(collect($payload['priorityAttention']['items'])->contains(
@@ -602,6 +611,94 @@ class DeviceAccessTest extends TestCase
             $memoryDelta,
             $htmlBytes
         ));
+    }
+
+    /**
+     * Support\AlertRules replaced the old hardcoded rule-*name*
+     * guessing (REDUNDANT_ALERT_RULE_NAMES / the device-down regex)
+     * with an explicit, administrator-chosen selection of real
+     * alert_rules.id values. This proves both halves: nothing is
+     * hidden until an administrator explicitly says so, and once they
+     * do, the exclusion is exact and reflected in both the issue list
+     * and the device's own computed health/problem_types.
+     */
+    public function testAlertRuleInclusionDefaultsToEverythingAndRespectsAnExplicitAdministratorSelection(): void
+    {
+        $device = Device::factory()->create([
+            'hostname' => 'alert-rule-selection.example.com',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        $keepRule = AlertRule::factory()->create([
+            'name' => 'Vendor power alarm',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $device->device_id,
+            'rule_id' => $keepRule->id,
+        ]);
+        $excludableRule = AlertRule::factory()->create([
+            'name' => 'Sensor over limit - Check Device Health Settings',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $device->device_id,
+            'rule_id' => $excludableRule->id,
+        ]);
+
+        $issuesFor = static function (array $payload, int $deviceId): \Illuminate\Support\Collection {
+            return collect($payload['otherLocations'])
+                ->flatMap(fn (array $group) => $group['devices'])
+                ->firstWhere('device_id', $deviceId)['issues'];
+        };
+
+        // No idf_included_alert_rule_ids setting has ever been saved
+        // ($settings === []) -- both rules are included by default,
+        // Support\AlertRules::resolveIncludedIds()'s documented
+        // behavior for "no explicit choice yet".
+        $defaultIssues = $issuesFor((new Page())->data([], $request), $device->device_id);
+        $this->assertTrue($defaultIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Vendor power alarm')
+        ));
+        $this->assertTrue($defaultIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Sensor over limit')
+        ));
+
+        // An administrator explicitly includes only $keepRule, exactly
+        // the shape settings.blade.php's checkbox list submits
+        // (settings[idf_included_alert_rule_ids][] per checked box).
+        $filteredIssues = $issuesFor((new Page())->data(
+            ['idf_included_alert_rule_ids' => [(string) $keepRule->id]],
+            $request
+        ), $device->device_id);
+        $this->assertTrue($filteredIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Vendor power alarm')
+        ));
+        $this->assertFalse($filteredIssues->contains(
+            fn (array $issue): bool => str_contains($issue['description'], 'Sensor over limit')
+        ));
+
+        // An administrator explicitly excludes every rule -- submitted
+        // as the settings form's hidden-fallback placeholder value
+        // (an array containing only '') when every checkbox is left
+        // unchecked. The device has no other issue, so this must
+        // clear its health/problem_types entirely, not merely drop
+        // the alert-sourced issue rows while leaving it flagged.
+        $emptyPayload = (new Page())->data(['idf_included_alert_rule_ids' => ['']], $request);
+        $emptyDevice = collect($emptyPayload['otherLocations'])
+            ->flatMap(fn (array $group) => $group['devices'])
+            ->firstWhere('device_id', $device->device_id);
+        $this->assertSame('healthy', $emptyDevice['health']);
+        $this->assertTrue($emptyDevice['issues']->isEmpty());
     }
 
     public function testUserWithoutDevicePermissionGetsAnEmptyDeviceSet(): void

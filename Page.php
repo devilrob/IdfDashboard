@@ -5,6 +5,7 @@ namespace App\Plugins\IdfDashboard;
 use App\Models\AlertSchedule;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
+use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
@@ -69,30 +70,6 @@ class Page extends PageHook
      * new false criticals on best-effort sensors.
      */
     private const STALE_IS_URGENT_ROLES = ['pdu', 'ups'];
-
-    /**
-     * LibreNMS's built-in "Sensor over/under limit" alert rules
-     * (verified via the API: rule query is
-     * `sensors.sensor_current > sensors.sensor_limit ... sensor_alert = 1`,
-     * i.e. exactly the same condition sensorState() already evaluates
-     * per-sensor) fire on ANY sensor class device-wide with no
-     * indication of which sensor triggered them — a generic "Sensor
-     * over limit - Check Device Health Settings" text that cannot be
-     * attributed to Temperature/Humidity/Battery/etc., so it could
-     * never respect those Problem checkboxes (reported: unchecking
-     * "Humidity" left a humidity-caused instance of this alert
-     * showing anyway). Since this dashboard's own per-sensor telemetry
-     * already surfaces the identical condition with the specific
-     * sensor, its value, and proper filtering, showing this alert too
-     * is pure duplicate noise, not additional information — suppressed
-     * in loadActiveAlerts(). Alerts from *other* rules (device down,
-     * service up/down, vendor-specific rules, etc.) are unaffected;
-     * those are not redundant with the sensor telemetry view.
-     */
-    private const REDUNDANT_ALERT_RULE_NAMES = [
-        'sensor over limit',
-        'sensor under limit',
-    ];
 
     private const RECENT_EVENTS_PER_DEVICE = 3;
 
@@ -169,7 +146,10 @@ class Page extends PageHook
             'fan' => (bool) $config['default_problem_fan'],
             'device' => (bool) $config['default_problem_device'],
             'service' => (bool) $config['default_problem_service'],
-            'alert' => (bool) $config['default_problem_alert'],
+            // Deliberately no 'alert' entry — which rule-sourced alerts
+            // count toward severity/problem_types is decided per-rule
+            // by $includedAlertRuleIds below, not by one blanket
+            // category toggle. See Support\AlertRules.
             'state' => (bool) $config['default_problem_state'],
             'storage' => (bool) $config['default_problem_storage'],
             'memory' => (bool) $config['default_problem_memory'],
@@ -177,6 +157,22 @@ class Page extends PageHook
             'stale' => (bool) $config['default_problem_stale'],
             'other' => (bool) $config['default_problem_other'],
         ];
+
+        /*
+         * Real LibreNMS Alert Rules, and which of them an administrator
+         * has explicitly chosen to include on this dashboard. Absent an
+         * explicit choice, every currently defined rule is included —
+         * see Support\AlertRules::resolveIncludedIds() for why that is
+         * the safe default (never hide a rule the admin never chose to
+         * hide). $availableAlertRules is also handed to the view so the
+         * per-device "Active alert" list can show whatever rule detail
+         * it already carries without a second lookup.
+         */
+        $availableAlertRules = AlertRules::available();
+        $includedAlertRuleIds = AlertRules::resolveIncludedIds(
+            $settings[AlertRules::SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
 
         /*
          * The single centralized visibility decision (Support/
@@ -359,7 +355,7 @@ class Page extends PageHook
          * breaking the whole dashboard when a table/column is not
          * found. See AUDIT_NOTES.md for the assumptions made here.
          */
-        $deviceAlerts = $this->loadActiveAlerts($allDeviceIds);
+        $deviceAlerts = $this->loadActiveAlerts($allDeviceIds, $includedAlertRuleIds, $availableAlertRules !== []);
         $deviceEvents = $this->loadRecentEvents($allDeviceIds);
 
         /*
@@ -1288,17 +1284,20 @@ class Page extends PageHook
         $recentEvents = $events->values();
 
         // Same admin exclusion as the telemetry filter above, applied
-        // to the three problem categories that aren't per-sensor
-        // metrics: a device-down, a service problem, or an alert only
-        // counts toward health/problem_types if its own Settings
-        // checkbox is on. Unlike telemetry, the underlying
-        // service/alert rows are still returned in full below — they
-        // are structural lists with their own display purpose, not
-        // chips that would clutter the card the way an excluded sensor
-        // reading would.
+        // to the two problem categories that aren't per-sensor
+        // metrics and aren't already rule-filtered: a device-down or a
+        // service problem only counts toward health/problem_types if
+        // its own Settings checkbox is on. Unlike telemetry, the
+        // underlying service rows are still returned in full below —
+        // they are structural lists with their own display purpose,
+        // not chips that would clutter the card the way an excluded
+        // sensor reading would. Alerts have no equivalent boolean here
+        // at all: $activeAlerts already only contains rules an
+        // administrator explicitly included (Support\AlertRules, via
+        // loadActiveAlerts()'s own filter) — a second gate would be
+        // pure redundancy.
         $deviceDownCounts = $this->enabledProblemTypes['device'] ?? true;
         $serviceCounts = $this->enabledProblemTypes['service'] ?? true;
-        $alertsCount = $this->enabledProblemTypes['alert'] ?? true;
 
         $maintenanceActive = $maintenance !== null;
         $downSince = $currentOutage !== null && isset($currentOutage->going_down)
@@ -1321,8 +1320,7 @@ class Page extends PageHook
             $downSince,
             $staleIsUrgent,
             $deviceDownCounts,
-            $serviceCounts,
-            $alertsCount
+            $serviceCounts
         );
 
         $health = Severity::worst(
@@ -1350,7 +1348,7 @@ class Page extends PageHook
             $problemTypes->push('service');
         }
 
-        if ($alertsCount && $activeAlerts->isNotEmpty()) {
+        if ($activeAlerts->isNotEmpty()) {
             $problemTypes->push('alert');
         }
 
@@ -1474,8 +1472,7 @@ class Page extends PageHook
         ?Carbon $downSince,
         bool $staleIsUrgent,
         bool $deviceDownCounts,
-        bool $serviceCounts,
-        bool $alertsCount
+        bool $serviceCounts
     ): Collection {
         $deviceId = (int) $device->device_id;
         $locationId = $device->location_id !== null ? (int) $device->location_id : null;
@@ -1641,33 +1638,31 @@ class Page extends PageHook
             }
         }
 
-        if ($alertsCount) {
-            foreach ($alerts as $alert) {
-                $name = trim((string) $alert['name']);
-                $isDownDuplicate = (int) $device->status === 0
-                    && preg_match('/\b(?:device|host)\b.*\b(?:down|unreachable)\b/i', $name) === 1;
-
-                if ($isDownDuplicate) {
-                    continue;
-                }
-
-                $severity = ($alert['severity_class'] ?? '') === Severity::CRITICAL
-                    ? Severity::CRITICAL
-                    : Severity::WARNING;
-                $issues->push(IssueBuilder::make([
-                    'key' => 'alert:' . $deviceId . ':' . md5($name),
-                    'device_id' => $deviceId,
-                    'location_id' => $locationId,
-                    'severity' => $severity,
-                    'source' => 'alert',
-                    'type' => 'alert',
-                    'title' => 'Active alert',
-                    'description' => 'Active alert — ' . ($name !== '' ? $name : 'rule name unavailable'),
-                    'timestamp' => $alert['timestamp'] ?? null,
-                    'actionable' => true,
-                    'device_url' => $deviceUrl,
-                ]));
-            }
+        // $alerts already only contains the rules an administrator
+        // explicitly included (Support\AlertRules, filtered in
+        // loadActiveAlerts()) — if a device-down-shaped rule like
+        // "Cisco Switch Down" duplicates this dashboard's own native
+        // device_down issue above, the admin can simply leave that
+        // rule unchecked in Settings; there is no more name-pattern
+        // guessing here to do it for them silently.
+        foreach ($alerts as $alert) {
+            $name = trim((string) $alert['name']);
+            $severity = ($alert['severity_class'] ?? '') === Severity::CRITICAL
+                ? Severity::CRITICAL
+                : Severity::WARNING;
+            $issues->push(IssueBuilder::make([
+                'key' => 'alert:' . $deviceId . ':' . md5($name),
+                'device_id' => $deviceId,
+                'location_id' => $locationId,
+                'severity' => $severity,
+                'source' => 'alert',
+                'type' => 'alert',
+                'title' => 'Active alert',
+                'description' => 'Active alert — ' . ($name !== '' ? $name : 'rule name unavailable'),
+                'timestamp' => $alert['timestamp'] ?? null,
+                'actionable' => true,
+                'device_url' => $deviceUrl,
+            ]));
         }
 
         return $issues
@@ -3054,14 +3049,28 @@ class Page extends PageHook
     }
 
     /**
-     * Active, still-open LibreNMS alerts for the given devices. Table
-     * and column names are resolved defensively because they differ
-     * slightly across LibreNMS releases; when the expected shape is
-     * not found this returns available=false rather than throwing,
-     * so a schema mismatch degrades to an honest "N/A" instead of a
-     * broken dashboard. See AUDIT_NOTES.md.
+     * Active, still-open LibreNMS alerts for the given devices, scoped
+     * to the specific Alert Rules an administrator has chosen to
+     * include (see Support\AlertRules — Settings now lists every real
+     * rule with a checkbox, replacing this method's old hardcoded
+     * rule-*name* guessing). Table and column names are resolved
+     * defensively because they differ slightly across LibreNMS
+     * releases; when the expected shape is not found this returns
+     * available=false rather than throwing, so a schema mismatch
+     * degrades to an honest "N/A" instead of a broken dashboard. See
+     * AUDIT_NOTES.md.
+     *
+     * @param  array<int, int>  $includedRuleIds  Rule IDs an admin has
+     *         chosen to include (Support\AlertRules::resolveIncludedIds()).
+     * @param  bool  $rulesKnown  Whether alert_rules itself was
+     *         readable at all this request (Support\AlertRules::available()
+     *         returned at least one rule). When false, $includedRuleIds
+     *         cannot mean anything (there is nothing to select from),
+     *         so every alert passes through unfiltered — the same
+     *         graceful degradation this method already applies to every
+     *         other LibreNMS-version schema variance it defends against.
      */
-    private function loadActiveAlerts(Collection $deviceIds): array
+    private function loadActiveAlerts(Collection $deviceIds, array $includedRuleIds, bool $rulesKnown): array
     {
         $unavailable = ['available' => false, 'byDevice' => collect()];
 
@@ -3099,6 +3108,7 @@ class Page extends PageHook
             $select = [
                 "a.$deviceCol as device_id",
                 "a.$stateCol as state",
+                "a.$ruleCol as rule_id",
             ];
 
             if ($timeCol !== null) {
@@ -3120,11 +3130,8 @@ class Page extends PageHook
         }
 
         $byDevice = $rows
-            ->reject(function ($row): bool {
-                $name = Str::lower(trim((string) ($row->rule_name ?? '')));
-
-                return $name !== '' && Str::contains($name, self::REDUNDANT_ALERT_RULE_NAMES);
-            })
+            ->filter(fn ($row): bool => ! $rulesKnown
+                || in_array((int) ($row->rule_id ?? 0), $includedRuleIds, true))
             ->map(function ($row): array {
                 $severity = Str::lower(trim((string) ($row->severity ?? '')));
                 $isCritical = $severity !== '' && Str::contains(
@@ -3134,6 +3141,7 @@ class Page extends PageHook
 
                 return [
                     'device_id' => (int) $row->device_id,
+                    'rule_id' => (int) $row->rule_id,
                     'name' => trim((string) ($row->rule_name ?? '')) !== ''
                         ? trim((string) $row->rule_name)
                         : 'Active alert',

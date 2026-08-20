@@ -4,6 +4,7 @@ namespace App\Plugins\IdfDashboard;
 
 use App\Models\User;
 use App\Plugins\Hooks\SettingsHook;
+use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
 use App\Plugins\IdfDashboard\Support\Version;
@@ -32,10 +33,19 @@ class Settings extends SettingsHook
         $resolved = Config::resolve($settings);
         $forceUpdateCheck = request()->boolean('idf_check_updates');
 
+        $availableAlertRules = AlertRules::available();
+        $includedAlertRuleIds = AlertRules::resolveIncludedIds(
+            $settings[AlertRules::SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
+
         return [
             'settings' => $settings,
             'resolved' => $resolved,
             'groups' => Config::grouped(),
+            'availableAlertRules' => $availableAlertRules,
+            'includedAlertRuleIds' => $includedAlertRuleIds,
+            'alertRuleSettingKey' => AlertRules::SETTING_KEY,
             'updateStatus' => UpdateStatus::get(
                 (bool) $resolved['update_check_enabled'],
                 $forceUpdateCheck
