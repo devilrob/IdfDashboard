@@ -35,92 +35,28 @@ class Config
             'group' => 'timing',
             'help' => 'How far back the "Event Log Activity" coverage card looks. Informational only — never raises severity.',
         ],
+        // --- TV Mode ----------------------------------------------------
         'tv_default_slide_seconds' => [
             'type' => 'int', 'default' => 12, 'min' => 5, 'max' => 120,
             'label' => 'TV Mode default slide time (seconds)',
-            'group' => 'timing',
+            'group' => 'tv',
             'help' => 'Default time each TV Mode slide stays on screen before rotating to the next one.',
         ],
         'tv_maximum_devices_rendered' => [
             'type' => 'int', 'default' => 200, 'min' => 10, 'max' => 2000,
             'label' => 'TV Mode maximum devices rendered (defensive ceiling)',
-            'group' => 'timing',
+            'group' => 'tv',
             'help' => 'A defensive cap on how many already-Settings-filtered, worst-severity-first devices TV Mode renders into the page at all. Never drops a Critical/Warning device ahead of a lower-severity one that fits; the remainder past this ceiling is reported as a count, never silently dropped.',
         ],
-
-        // --- Thresholds ---------------------------------------------
-        'battery_critical_percent' => [
-            'type' => 'int', 'default' => 20, 'min' => 0, 'max' => 100,
-            'label' => 'Battery Charge — Critical at or below (%)',
-            'group' => 'thresholds',
-            'help' => 'LibreNMS rarely has a configured threshold for UPS battery charge percent, so this dashboard applies its own.',
-        ],
-        'battery_warning_percent' => [
-            'type' => 'int', 'default' => 50, 'min' => 0, 'max' => 100,
-            'label' => 'Battery Charge — Warning at or below (%)',
-            'group' => 'thresholds',
-            'help' => '',
-        ],
-        'storage_critical_percent' => [
-            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
-            'label' => 'Storage — Critical at or above (%)',
-            'group' => 'thresholds',
-            'help' => 'LibreNMS only has a single "warning" percent per filesystem, no critical tier — this dashboard applies its own ceiling. A "crashinfo" partition never exceeds Warning here regardless of this setting (see the help text on the "Storage" problem type).',
-        ],
-        'memory_critical_percent' => [
-            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
-            'label' => 'Memory — Critical at or above (%)',
-            'group' => 'thresholds',
-            'help' => 'Same reasoning as Storage above — LibreNMS\'s mempool warning threshold has no critical counterpart.',
-        ],
-        'processor_critical_percent' => [
-            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
-            'label' => 'Processor — Critical at or above (%)',
-            'group' => 'thresholds',
-            'help' => 'Same reasoning as Storage above.',
-        ],
-
-        // --- Visual ---------------------------------------------------
-        'animations_enabled' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Enable card animations (Critical/Warning glow, alert pulse)',
-            'group' => 'visual',
-            'help' => 'Turn off for a fully static display — colors and text still reflect severity, only the motion is disabled.',
-        ],
-
-        // --- Phase 2 navigation --------------------------------------
-        'default_view' => [
-            'type' => 'choice', 'default' => 'overview',
-            'options' => ['overview' => 'Overview', 'locations' => 'Locations', 'devices' => 'Devices'],
-            'label' => 'Default dashboard view',
-            'group' => 'navigation',
-            'help' => 'The first view shown when the URL does not explicitly select one.',
-        ],
-        'devices_per_page' => [
-            'type' => 'choice', 'default' => 25,
-            'options' => [25 => '25', 50 => '50', 100 => '100'],
-            'label' => 'Devices per page',
-            'group' => 'navigation',
-            'help' => 'A defensive maximum of 100 devices is enforced for every request.',
-        ],
-        'show_healthy_locations' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Show healthy locations',
-            'group' => 'navigation',
-            'help' => 'Healthy locations remain available through filters even when hidden by default.',
-        ],
-        'maximum_priority_issues' => [
-            'type' => 'int', 'default' => 10, 'min' => 1, 'max' => 50,
-            'label' => 'Maximum Priority Attention devices',
-            'group' => 'navigation',
-            'help' => 'Priority Attention keeps one primary row per device and reports additional causes.',
-        ],
-        'default_problems_only' => [
-            'type' => 'bool', 'default' => false,
-            'label' => 'Show only problems by default',
-            'group' => 'navigation',
-            'help' => 'Can be changed per URL without changing the organization-wide default.',
-        ],
+        // These can only ever remove something the global severity policy
+        // below already allows; there is deliberately no TV setting that
+        // can re-enable a severity the global policy has turned off. See
+        // Config::visibilityPolicy()'s "$globallyEnabled &&" intersection.
+        'tv_hide_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Healthy in TV Mode', 'group' => 'tv', 'help' => ''],
+        'tv_hide_unknown' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Needs Review in TV Mode', 'group' => 'tv', 'help' => ''],
+        'tv_hide_stale' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Stale in TV Mode', 'group' => 'tv', 'help' => ''],
+        'tv_hide_maintenance' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Maintenance in TV Mode', 'group' => 'tv', 'help' => ''],
+        'tv_hide_no_sensor' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide "No sensor installed" in TV Mode', 'group' => 'tv', 'help' => ''],
 
         // --- Updates --------------------------------------------------
         'update_check_enabled' => [
@@ -130,187 +66,226 @@ class Config
             'help' => 'Checks GitHub at most every six hours when an administrator opens this Settings page. Installation always requires the CLI command below.',
         ],
 
-        // --- Operational Priority Policy -------------------------------
-        // The single setting Support\OperationalPolicy needs (see its own
-        // class docblock and Page::loadOperationallyCriticalDeviceIds()).
-        // Deliberately not a per-device toggle inside this plugin —
-        // membership in the named LibreNMS Device Group is the actual
-        // criticality signal, managed entirely in LibreNMS's own admin UI.
-        'operational_critical_group_name' => [
-            'type' => 'string', 'default' => 'Operational Critical', 'max_length' => 191,
-            'label' => 'Operational Critical Device Group name',
+        // --- Operational Priority ---------------------------------------
+        // Which real LibreNMS Device Group(s) count as Operational
+        // Critical is NOT a FIELDS entry — like Alert Rule inclusion, it
+        // is a dynamic, DB-driven multi-select (Support\DeviceGroups),
+        // not a static field. See resources/views/settings.blade.php's
+        // "Operational Critical Device Groups" control and
+        // Support\DeviceGroups::resolveEffectiveGroupIds().
+        'fallback_suppress_during_maintenance' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Suppress fallback during active LibreNMS maintenance windows',
             'group' => 'policy',
-            'help' => 'Must exactly match a LibreNMS Device Group name (case-insensitive). Devices in this group get Critical severity for an otherwise-uncovered Device Down/Service/sensor condition; every other device gets Warning for the same condition.',
+            'help' => 'Does not change LibreNMS\'s own maintenance/schedule suppression of Alert Rules — only this dashboard\'s own fallback safety net.',
         ],
 
-        // --- Operational Severity Policy (fallback safety net) ---------
-        // Every setting here governs Support\OperationalPolicy's
-        // fallback safety net ONLY — the severity this dashboard shows
-        // for a technical condition (device down / sensor / service)
-        // that no active, administrator-selected Alert Rule EXACTLY
-        // covers for that same device. "Exactly" matters: Device Down
-        // is the one condition where a rule tagged as covering it
-        // (AlertRules::CONDITION_SETTING_KEY, "Included LibreNMS Alert
-        // Rules" section below) shares a real, exact identifier
-        // (device_id) with the fallback it replaces. A sensor/service
-        // category tag is administrative documentation only — it is
-        // never used to suppress a sensor/service fallback, because no
-        // exact per-sensor/per-service identity exists on an Alert-
-        // Rule-sourced issue in this schema (see Support\
-        // OperationalPolicy's own docblock); an unrelated Alert Rule
-        // must never hide a real, different sensor/service failure.
-        // Defaults below intentionally reproduce this project's
-        // previously-hardcoded policy matrix exactly, so upgrading to
-        // this version changes zero effective behavior for an
-        // administrator who has not opened this section.
+        // --- Advanced -----------------------------------------------------
+        // Detailed Operational Priority overrides. Every setting here
+        // governs Support\OperationalPolicy's fallback safety net ONLY —
+        // the severity this dashboard shows for a technical condition
+        // (device down / sensor / service) that no active, administrator-
+        // selected Alert Rule EXACTLY covers for that same device. Device
+        // Down is the one condition where a rule tagged as covering it
+        // (see "Alert Rules" below) shares a real, exact identifier
+        // (device_id) with the fallback it replaces — no other condition
+        // can be exactly correlated with today's LibreNMS alert schema,
+        // so an unrelated Alert Rule can never suppress a sensor/service
+        // fallback here. Defaults below intentionally reproduce this
+        // project's original policy matrix exactly, so upgrading changes
+        // zero effective behavior for an administrator who has not opened
+        // this section. Choices are deliberately only 'critical'/
+        // 'warning'/'disabled' — Severity::UNKNOWN ("Needs Review") is a
+        // real, distinct technical state and is never offered here as a
+        // stand-in for "Informational". 'disabled' means this specific
+        // fallback slot never generates an issue (the underlying
+        // technical telemetry/service state remains visible regardless).
         //
-        // Choices are deliberately only 'critical'/'warning'/'disabled'
-        // — Severity::UNKNOWN ("Needs Review") is a real, distinct
-        // technical state (an unreadable/undecoded sensor) and is
-        // never offered here as a stand-in for "Informational"; this
-        // dashboard has no real Informational severity tier, and one is
-        // not invented for this policy. 'disabled' means this specific
-        // fallback slot never generates an issue at all (the underlying
-        // technical telemetry/service state remains visible regardless
-        // — see Config::visibilityPolicy(), which is untouched by this
-        // group).
+        // There is deliberately no single global "Fallback Safety Net
+        // enabled" master switch here: the four *_enabled toggles below
+        // already let an administrator disable each category
+        // independently, and a second master switch would just be a
+        // second, competing authority over the same decision.
         'fallback_device_down_enabled' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Enable Device Down fallback',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => 'When off, this dashboard never synthesizes a Device Down issue on its own — rely entirely on your own Alert Rules for this condition.',
         ],
         'fallback_device_down_critical_group_severity' => [
             'type' => 'choice', 'default' => 'critical',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'Device Down severity — Operational Critical Device Group',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+            'label' => 'Device Down severity — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => 'Applied only when no active, selected Alert Rule tagged "Device Down" already covers this device.',
         ],
         'fallback_device_down_normal_severity' => [
             'type' => 'choice', 'default' => 'warning',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Device Down severity — every other device',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+            'group' => 'advanced',
+            'help' => 'Applied only when no active, selected Alert Rule tagged "Device Down" already covers this device.',
         ],
         'fallback_numeric_sensor_enabled' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Enable numeric sensor fallback',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => 'When off, this dashboard never synthesizes an issue from a numeric sensor threshold on its own — the sensor reading stays visible, just not flagged as an issue.',
         ],
         'fallback_numeric_sensor_critical_group_severity' => [
             'type' => 'choice', 'default' => 'critical',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'Numeric sensor severity — Operational Critical Device Group',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+            'label' => 'Numeric sensor severity — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — no Alert Rule tag can suppress this (no exact per-sensor identity exists to correlate against).',
         ],
         'fallback_numeric_sensor_normal_severity' => [
             'type' => 'choice', 'default' => 'warning',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Numeric sensor severity — every other device',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+            'group' => 'advanced',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — no Alert Rule tag can suppress this (no exact per-sensor identity exists to correlate against).',
         ],
         'fallback_state_sensor_enabled' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Enable state sensor fallback',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => 'When off, this dashboard never synthesizes an issue from a state/discrete sensor (e.g. "Power Supply Failed") on its own — the decoded state stays visible, just not flagged as an issue.',
         ],
         'fallback_state_sensor_critical_group_severity' => [
             'type' => 'choice', 'default' => 'critical',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'State sensor severity — Operational Critical Device Group',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+            'label' => 'State sensor severity — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — no Alert Rule tag can suppress this. UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
         ],
         'fallback_state_sensor_normal_severity' => [
             'type' => 'choice', 'default' => 'warning',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'State sensor severity — every other device',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+            'group' => 'advanced',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — no Alert Rule tag can suppress this. UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
         ],
         'fallback_service_enabled' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Enable service check fallback',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => 'When off, this dashboard never synthesizes an issue from a LibreNMS service check on its own — the service status stays visible, just not flagged as an issue.',
         ],
         'fallback_service_critical_severity' => [
             'type' => 'choice', 'default' => 'critical',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Service severity — status CRITICAL',
-            'group' => 'operational_severity_policy',
-            'help' => 'Applies to every device by default (a failing service check is a stronger, more specific signal than infrastructure tier) — a service-category Alert Rule tag never suppresses this (no exact per-service identity is available to correlate against).',
+            'group' => 'advanced',
+            'help' => 'Applies to every device by default (a failing service check is a stronger, more specific signal than infrastructure tier) — no Alert Rule tag can suppress this (no exact per-service identity exists to correlate against).',
         ],
         'fallback_service_warning_severity' => [
             'type' => 'choice', 'default' => 'warning',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Service severity — status WARNING',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => '',
         ],
         'fallback_service_unknown_severity' => [
             'type' => 'choice', 'default' => 'warning',
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Service severity — status UNKNOWN',
-            'group' => 'operational_severity_policy',
+            'group' => 'advanced',
             'help' => 'A service check that could not determine its own state — never Critical by default, since that would manufacture an outage signal from a data-quality gap.',
         ],
-        'fallback_suppress_during_maintenance' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Suppress fallback during active LibreNMS maintenance windows',
-            'group' => 'operational_severity_policy',
-            'help' => 'Does not change LibreNMS\'s own maintenance/schedule suppression of Alert Rules — only this dashboard\'s own fallback safety net.',
+
+        // Legacy, hidden field — see Support\DeviceGroups::
+        // resolveEffectiveGroupIds()'s own docblock. Read ONLY when an
+        // administrator has never saved the new multi-select
+        // (operational_critical_group_ids); never rendered in Settings,
+        // never auto-migrated on a page read. Planned for removal one
+        // compatibility release after the multi-select shipped — see
+        // CHANGELOG.
+        'operational_critical_group_name' => [
+            'type' => 'string', 'default' => 'Operational Critical', 'max_length' => 191,
+            'label' => 'Operational Critical Device Group name (legacy)',
+            'group' => 'advanced', 'hidden' => true,
+            'help' => '',
         ],
 
-        // --- Default Severity shown on load ----------------------------
-        'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
-        'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],
-        'default_severity_unknown' => ['type' => 'bool', 'default' => true, 'label' => 'Needs Review', 'group' => 'severity', 'help' => 'A state sensor whose current value has no known translation — never confirmed healthy, never guessed at as a real problem either.'],
-        'default_severity_stale' => ['type' => 'bool', 'default' => true, 'label' => 'Stale (data quality)', 'group' => 'severity', 'help' => 'A device whose worst state is a stale-but-otherwise-healthy curated power reading (see "Stale data" under Problem Types for whether stale evidence counts toward severity at all).'],
-        'default_severity_maintenance' => ['type' => 'bool', 'default' => true, 'label' => 'Maintenance', 'group' => 'severity', 'help' => 'A device currently in a LibreNMS-scheduled maintenance window with no other active issue.'],
-        'default_severity_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Healthy', 'group' => 'severity', 'help' => ''],
+        // --- Dashboard Display --------------------------------------
+        'animations_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable card animations (Critical/Warning glow, alert pulse)',
+            'group' => 'display',
+            'help' => 'Turn off for a fully static display — colors and text still reflect severity, only the motion is disabled.',
+        ],
+        'default_view' => [
+            'type' => 'choice', 'default' => 'overview',
+            'options' => ['overview' => 'Overview', 'locations' => 'Locations', 'devices' => 'Devices'],
+            'label' => 'Default dashboard view',
+            'group' => 'display',
+            'help' => 'The first view shown when the URL does not explicitly select one.',
+        ],
+        'devices_per_page' => [
+            'type' => 'choice', 'default' => 25,
+            'options' => [25 => '25', 50 => '50', 100 => '100'],
+            'label' => 'Devices per page',
+            'group' => 'display',
+            'help' => 'A defensive maximum of 100 devices is enforced for every request.',
+        ],
+        'show_healthy_locations' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Show healthy locations',
+            'group' => 'display',
+            'help' => 'Healthy locations remain available through filters even when hidden by default.',
+        ],
+        'maximum_priority_issues' => [
+            'type' => 'int', 'default' => 10, 'min' => 1, 'max' => 50,
+            'label' => 'Maximum Priority Attention devices',
+            'group' => 'display',
+            'help' => 'Priority Attention keeps one primary row per device and reports additional causes.',
+        ],
+        'default_problems_only' => [
+            'type' => 'bool', 'default' => false,
+            'label' => 'Show only problems by default',
+            'group' => 'display',
+            'help' => 'Can be changed per URL without changing the organization-wide default.',
+        ],
+        'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Show Critical', 'group' => 'display', 'help' => ''],
+        'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Show Warning', 'group' => 'display', 'help' => ''],
+        'default_severity_unknown' => ['type' => 'bool', 'default' => true, 'label' => 'Show Needs Review', 'group' => 'display', 'help' => 'A state sensor whose current value has no known translation — never confirmed healthy, never guessed at as a real problem either.'],
+        'default_severity_stale' => ['type' => 'bool', 'default' => true, 'label' => 'Show Stale (data quality)', 'group' => 'display', 'help' => 'A device whose worst state is a stale-but-otherwise-healthy curated power reading.'],
+        'default_severity_maintenance' => ['type' => 'bool', 'default' => true, 'label' => 'Show Maintenance', 'group' => 'display', 'help' => 'A device currently in a LibreNMS-scheduled maintenance window with no other active issue.'],
+        'default_severity_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Show Healthy', 'group' => 'display', 'help' => ''],
         'default_severity_no_sensor' => [
             'type' => 'bool', 'default' => true,
-            'label' => 'No sensor installed',
-            'group' => 'severity',
+            'label' => 'Show "No sensor installed"',
+            'group' => 'display',
             'help' => 'Controls only the "No sensor installed" counter/callouts, not device severity — a device with no curated sensor is never Critical/Warning by itself.',
         ],
+        'default_section_priority' => ['type' => 'bool', 'default' => true, 'label' => 'Priority Attention', 'group' => 'display', 'help' => 'The "what to check first" list at the top of the dashboard.'],
+        'default_section_coverage' => ['type' => 'bool', 'default' => true, 'label' => 'Coverage panel', 'group' => 'display', 'help' => ''],
+        'default_section_summary' => ['type' => 'bool', 'default' => false, 'label' => 'Summary panel', 'group' => 'display', 'help' => ''],
+        'default_section_mdfServers' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Servers', 'group' => 'display', 'help' => ''],
+        'default_section_mdfPower' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Power', 'group' => 'display', 'help' => ''],
+        'default_section_mdfInfrastructure' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Infrastructure', 'group' => 'display', 'help' => ''],
+        'default_section_idf' => ['type' => 'bool', 'default' => true, 'label' => 'IDF Locations', 'group' => 'display', 'help' => ''],
+        'default_section_otherLocations' => ['type' => 'bool', 'default' => true, 'label' => 'Other Locations', 'group' => 'display', 'help' => ''],
 
-        // --- Sensor coverage & data-quality checks ----------------------
-        // Renamed from "Default Problem Types Shown on Load": severity
-        // (Critical/Warning) is no longer computed by this plugin at all
-        // — it comes only from the administrator-selected LibreNMS Alert
-        // Rules (see resources/views/settings.blade.php's "Included
-        // LibreNMS Alert Rules" section). These checkboxes now control a
-        // narrower, still-genuinely-native concern: whether a *missing*
-        // sensor of this type is flagged ("No sensor installed"), and
-        // whether an *unreadable/misconfigured* sensor of this type is
-        // flagged ("Needs Review" / Unknown) — neither of those is
-        // something a LibreNMS Alert Rule condition can express, since a
-        // rule can only evaluate a sensor that already exists and already
-        // has a numeric/decoded value. 'Device down' and 'Service issue'
-        // were removed entirely: LibreNMS already has real Alert Rules
-        // for both (see the screenshots this redesign was built from —
-        // "Cisco Switch Down", "Critical Devices - Device Down",
-        // "Service Critical/Warning"), and this plugin no longer keeps a
-        // second, independent copy of that same status check.
+        // --- Sensor / Data Quality ---------------------------------------
+        // Alert Rules are the preferred, explicit source of operational
+        // severity; the Operational Priority fallback above is a safety
+        // net for technical failures no Alert Rule covers yet. Neither
+        // is what these settings are about: this section covers a third,
+        // narrower concept — data QUALITY, not severity: whether a
+        // *missing* sensor of a type is flagged ("No sensor installed"),
+        // whether an *unreadable/untranslated* sensor is flagged ("Needs
+        // Review"), and this dashboard's own applied thresholds where
+        // LibreNMS has no native critical tier (Battery/Storage/Memory/
+        // Processor). None of this is something an Alert Rule condition
+        // can express, since a rule can only evaluate a sensor that
+        // already exists and already has a decodable value.
         'default_problem_temperature' => ['type' => 'bool', 'default' => true, 'label' => 'Temperature', 'group' => 'problem', 'help' => ''],
         'default_problem_humidity' => ['type' => 'bool', 'default' => true, 'label' => 'Humidity', 'group' => 'problem', 'help' => ''],
         'default_problem_battery' => ['type' => 'bool', 'default' => true, 'label' => 'Battery', 'group' => 'problem', 'help' => ''],
         'default_problem_voltage' => ['type' => 'bool', 'default' => true, 'label' => 'Voltage', 'group' => 'problem', 'help' => ''],
         'default_problem_fan' => ['type' => 'bool', 'default' => true, 'label' => 'Fan', 'group' => 'problem', 'help' => ''],
-        // 'Alert' is deliberately not a FIELDS entry here: which real
-        // LibreNMS Alert Rules feed this dashboard's Alert issues is
-        // now a dynamic, DB-driven multi-select (Support\AlertRules),
-        // not a static bool that could only ever mean "show every
-        // rule or none". See resources/views/settings.blade.php's
-        // dedicated "Included LibreNMS Alert Rules" section.
         'default_problem_state' => ['type' => 'bool', 'default' => true, 'label' => 'State sensor', 'group' => 'problem', 'help' => 'Discrete/enum sensors such as "System Status" or "Battery Status" — decoded via LibreNMS\'s state_translations table, not a numeric threshold.'],
         'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table.'],
         'default_problem_memory' => ['type' => 'bool', 'default' => true, 'label' => 'Memory', 'group' => 'problem', 'help' => 'Memory pool usage from LibreNMS\'s mempools table.'],
@@ -319,30 +294,39 @@ class Config
             'type' => 'bool', 'default' => true,
             'label' => 'Stale data',
             'group' => 'problem',
-            'help' => 'A curated power (PDU/UPS) reading that has stopped updating but was last seen healthy still elevates the device to "Stale" while this is on — see the "Stale" severity toggle above for whether that elevation itself is shown at all.',
+            'help' => 'A curated power (PDU/UPS) reading that has stopped updating but was last seen healthy still elevates the device to "Stale" while this is on.',
         ],
         'default_problem_other' => ['type' => 'bool', 'default' => true, 'label' => 'Other', 'group' => 'problem', 'help' => ''],
-
-        // --- Default Sections visible on load ---------------------------
-        'default_section_priority' => ['type' => 'bool', 'default' => true, 'label' => 'Priority Attention', 'group' => 'section', 'help' => 'The "what to check first" list at the top of the dashboard.'],
-        'default_section_coverage' => ['type' => 'bool', 'default' => true, 'label' => 'Coverage panel', 'group' => 'section', 'help' => ''],
-        'default_section_summary' => ['type' => 'bool', 'default' => false, 'label' => 'Summary panel', 'group' => 'section', 'help' => ''],
-        'default_section_mdfServers' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Servers', 'group' => 'section', 'help' => ''],
-        'default_section_mdfPower' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Power', 'group' => 'section', 'help' => ''],
-        'default_section_mdfInfrastructure' => ['type' => 'bool', 'default' => true, 'label' => 'MDF Infrastructure', 'group' => 'section', 'help' => ''],
-        'default_section_idf' => ['type' => 'bool', 'default' => true, 'label' => 'IDF Locations', 'group' => 'section', 'help' => ''],
-        'default_section_otherLocations' => ['type' => 'bool', 'default' => true, 'label' => 'Other Locations', 'group' => 'section', 'help' => ''],
-
-        // --- TV Mode additional restrictions -----------------------------
-        // These can only ever remove something the global severity policy
-        // above already allows; there is deliberately no TV setting that
-        // can re-enable a severity the global policy has turned off. See
-        // Config::visibilityPolicy()'s "$globallyEnabled &&" intersection.
-        'tv_hide_healthy' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Healthy in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
-        'tv_hide_unknown' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Needs Review in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
-        'tv_hide_stale' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Stale in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
-        'tv_hide_maintenance' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Maintenance in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
-        'tv_hide_no_sensor' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide "No sensor installed" in TV Mode', 'group' => 'tv_restrict', 'help' => ''],
+        'battery_critical_percent' => [
+            'type' => 'int', 'default' => 20, 'min' => 0, 'max' => 100,
+            'label' => 'Battery Charge — Critical at or below (%)',
+            'group' => 'problem',
+            'help' => 'LibreNMS rarely has a configured threshold for UPS battery charge percent, so this dashboard applies its own.',
+        ],
+        'battery_warning_percent' => [
+            'type' => 'int', 'default' => 50, 'min' => 0, 'max' => 100,
+            'label' => 'Battery Charge — Warning at or below (%)',
+            'group' => 'problem',
+            'help' => '',
+        ],
+        'storage_critical_percent' => [
+            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
+            'label' => 'Storage — Critical at or above (%)',
+            'group' => 'problem',
+            'help' => 'LibreNMS only has a single "warning" percent per filesystem, no critical tier — this dashboard applies its own ceiling. A "crashinfo" partition never exceeds Warning here regardless of this setting.',
+        ],
+        'memory_critical_percent' => [
+            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
+            'label' => 'Memory — Critical at or above (%)',
+            'group' => 'problem',
+            'help' => 'Same reasoning as Storage above — LibreNMS\'s mempool warning threshold has no critical counterpart.',
+        ],
+        'processor_critical_percent' => [
+            'type' => 'int', 'default' => 95, 'min' => 1, 'max' => 100,
+            'label' => 'Processor — Critical at or above (%)',
+            'group' => 'problem',
+            'help' => 'Same reasoning as Storage above.',
+        ],
     ];
 
     /**

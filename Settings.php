@@ -6,6 +6,8 @@ use App\Models\User;
 use App\Plugins\Hooks\SettingsHook;
 use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
+use App\Plugins\IdfDashboard\Support\DeviceGroups;
+use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
 use App\Plugins\IdfDashboard\Support\Version;
 
@@ -38,9 +40,24 @@ class Settings extends SettingsHook
             $settings[AlertRules::SETTING_KEY] ?? null,
             $availableAlertRules
         );
-        $alertRuleConditionCoverage = AlertRules::resolveConditionCoverage(
-            $settings[AlertRules::CONDITION_SETTING_KEY] ?? null,
+        $deviceDownTaggedIds = AlertRules::resolveDeviceDownTaggedIds(
+            $settings[AlertRules::DEVICE_DOWN_SETTING_KEY] ?? null,
             $availableAlertRules
+        );
+
+        $availableDeviceGroups = DeviceGroups::available();
+        $selectedDeviceGroupIds = DeviceGroups::resolveEffectiveGroupIds(
+            $settings,
+            $availableDeviceGroups,
+            (string) $resolved['operational_critical_group_name']
+        );
+
+        $policyConfig = array_intersect_key(
+            $resolved,
+            array_flip(array_keys(array_filter(
+                Config::FIELDS,
+                static fn (array $field): bool => in_array($field['group'], ['policy', 'advanced'], true)
+            )))
         );
 
         return [
@@ -50,13 +67,12 @@ class Settings extends SettingsHook
             'availableAlertRules' => $availableAlertRules,
             'includedAlertRuleIds' => $includedAlertRuleIds,
             'alertRuleSettingKey' => AlertRules::SETTING_KEY,
-            'alertRuleConditionCoverage' => $alertRuleConditionCoverage,
-            'alertRuleConditionSettingKey' => AlertRules::CONDITION_SETTING_KEY,
-            'alertRuleConditionCategories' => [
-                AlertRules::CATEGORY_DEVICE_DOWN => 'Device Down',
-                AlertRules::CATEGORY_SENSOR => 'Sensors',
-                AlertRules::CATEGORY_SERVICE => 'Services',
-            ],
+            'deviceDownTaggedIds' => $deviceDownTaggedIds,
+            'deviceDownSettingKey' => AlertRules::DEVICE_DOWN_SETTING_KEY,
+            'availableDeviceGroups' => $availableDeviceGroups,
+            'selectedDeviceGroupIds' => $selectedDeviceGroupIds,
+            'deviceGroupSettingKey' => DeviceGroups::SETTING_KEY,
+            'effectivePolicySummary' => OperationalPolicy::effectivePolicySummary($policyConfig),
             'updateStatus' => UpdateStatus::get(
                 (bool) $resolved['update_check_enabled'],
                 $forceUpdateCheck

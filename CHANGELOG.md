@@ -2,6 +2,60 @@
 
 All notable changes follow semantic versioning.
 
+## [1.4.0] - 2026-08-21
+
+### Changed
+
+- **Settings UX simplification.** The Settings page is restructured to:
+  Refresh & Timing, Dashboard Display, Operational Priority, Alert Rules,
+  Sensor/Data Quality, TV Mode, Updates, Advanced. "Operational Priority
+  Policy" and "Operational Severity Policy" are merged into one
+  "Operational Priority" section with a real Device Groups multi-select,
+  the Maintenance toggle, and a read-only effective-policy summary table
+  sourced live from `Support\OperationalPolicy::effectivePolicySummary()`
+  (never hardcoded Blade prose). Detailed per-condition severity overrides
+  moved into a collapsed "Advanced" section; no new global "Fallback
+  Safety Net enabled" master switch was added.
+- **Multiple Operational Critical Device Groups.** The free-text,
+  single-name Operational Critical Device Group setting is replaced by a
+  real multi-select of LibreNMS Device Groups
+  (`operational_critical_group_ids`, `Support\DeviceGroups`). A device is
+  Operational Critical if it belongs to **any** selected group. Both
+  static and dynamic LibreNMS groups are supported (membership is read
+  from `device_group_device`, which LibreNMS's own poller already
+  materializes for both group types). Deleted/invalid/duplicate IDs are
+  normalized away safely; renaming a group no longer breaks the
+  selection, since group identity is now a real ID, not a name string.
+- **Alert Rules simplified to one table** — Alert Rule, Severity, Include,
+  Device Down. `CATEGORY_SENSOR`/`CATEGORY_SERVICE` tagging is removed
+  entirely (config parsing, Settings controls, Policy Health checks,
+  help text, tests) — no exact per-sensor/per-service identity exists on
+  a fired LibreNMS alert in this schema, so a tag for either could never
+  safely suppress a fallback and was documentation-only. Device Down
+  remains the sole exact-correlation tag
+  (`Support\AlertRules::DEVICE_DOWN_SETTING_KEY`, formerly
+  `CONDITION_SETTING_KEY`/`resolveConditionCoverage()`, now
+  `resolveDeviceDownTaggedIds()`).
+- Fixed contradictory Sensor/Data Quality copy that claimed this
+  dashboard never evaluates sensor thresholds itself — the Operational
+  Priority fallback still does, when enabled.
+
+### Migration
+
+- **Legacy compatibility (one release only).** The old
+  `operational_critical_group_name` setting is still read, but only when
+  an administrator has never saved the new `operational_critical_group_ids`
+  multi-select, and only when the legacy name resolves to **exactly one**
+  real group (case-insensitive). An empty, unresolved, or ambiguous
+  legacy name resolves to an empty selection — fail-safe, matching this
+  plugin's standing "no exact identity = no suppression" invariant. No
+  migration ever runs automatically on a page read; the moment an
+  administrator saves the new multi-select (even as an empty selection),
+  `operational_critical_group_ids` becomes the sole runtime authority and
+  the legacy name is never consulted again. The legacy textbox is removed
+  from Settings; the field itself is planned for removal from
+  `Support\Config::FIELDS` in the next release after this one.
+
 ## [1.3.0] - 2026-08-07
 
 ### Fixed

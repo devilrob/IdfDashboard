@@ -2,10 +2,13 @@
 
 declare(strict_types=1);
 
+use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
+use App\Plugins\IdfDashboard\Support\DeviceGroups;
 use App\Plugins\IdfDashboard\Support\Freshness;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
+use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use App\Plugins\IdfDashboard\Support\Severity;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
@@ -21,6 +24,14 @@ require $root . '/Support/ProblemPolicy.php';
 require $root . '/Support/Severity.php';
 require $root . '/Support/Version.php';
 require $root . '/Support/UpdateStatus.php';
+// AlertRules.php/DeviceGroups.php/OperationalPolicy.php reference
+// Illuminate Facades (DB/Schema) and Collection only inside methods
+// this script never calls (available()/memberDeviceIds()/
+// resolveFallbackIssues()) — every method exercised below is pure
+// array-in/array-out logic, safe to load without a Laravel bootstrap.
+require $root . '/Support/AlertRules.php';
+require $root . '/Support/DeviceGroups.php';
+require $root . '/Support/OperationalPolicy.php';
 require $root . '/bin/update.php';
 
 $failures = 0;
@@ -1073,19 +1084,159 @@ $assert(
     'Summary Caso: the same device is counted once one of its two causes (stale) is an enabled problem type'
 );
 
+// --- Support\DeviceGroups (Gate B1) — pure array-in/array-out logic
+// only; available()/memberDeviceIds() touch the real DB and are
+// exercised in tests/librenms/DeviceAccessTest.php instead. -----------
+$availableGroups = [
+    ['id' => 1, 'name' => 'Operational Critical', 'type' => 'static'],
+    ['id' => 2, 'name' => 'Core Switches', 'type' => 'dynamic'],
+    ['id' => 3, 'name' => 'operational critical', 'type' => 'static'], // deliberately ambiguous vs. group 1's name, case-insensitively
+];
+$assert(
+    DeviceGroups::resolveSelectedIds([1], $availableGroups) === [1],
+    'DeviceGroups::resolveSelectedIds: a single selected group ID resolves'
+);
+$assert(
+    DeviceGroups::resolveSelectedIds([1, 2], $availableGroups) === [1, 2],
+    'DeviceGroups::resolveSelectedIds: multiple selected group IDs resolve, in available() order'
+);
+$assert(
+    DeviceGroups::resolveSelectedIds([1, 1, 2, 2], $availableGroups) === [1, 2],
+    'DeviceGroups::resolveSelectedIds: duplicate IDs normalize to one entry each'
+);
+$assert(
+    DeviceGroups::resolveSelectedIds([999], $availableGroups) === [],
+    'DeviceGroups::resolveSelectedIds: a deleted/nonexistent group ID is silently dropped, never causes an error'
+);
+$assert(
+    DeviceGroups::resolveSelectedIds(['not-a-number', 1], $availableGroups) === [1],
+    'DeviceGroups::resolveSelectedIds: a non-numeric entry is silently dropped'
+);
+$assert(
+    DeviceGroups::resolveSelectedIds('', $availableGroups) === [],
+    'DeviceGroups::resolveSelectedIds: a non-array raw setting (e.g. never saved) resolves to empty, never an error'
+);
+$assert(
+    DeviceGroups::resolveLegacyNameGroupId('Core Switches', $availableGroups) === 2,
+    'DeviceGroups::resolveLegacyNameGroupId: a legacy name that matches exactly one group resolves to that group\'s ID'
+);
+$assert(
+    DeviceGroups::resolveLegacyNameGroupId('Operational Critical', $availableGroups) === null,
+    'DeviceGroups::resolveLegacyNameGroupId: a legacy name matching more than one group (case-insensitive collision) fails safe to null, never guesses'
+);
+$assert(
+    DeviceGroups::resolveLegacyNameGroupId('Does Not Exist', $availableGroups) === null,
+    'DeviceGroups::resolveLegacyNameGroupId: a legacy name matching no group fails safe to null'
+);
+$unambiguousGroups = [['id' => 5, 'name' => 'Renamed Critical Group', 'type' => 'static']];
+$assert(
+    DeviceGroups::resolveLegacyNameGroupId('Renamed Critical Group', $unambiguousGroups) === 5,
+    'DeviceGroups::resolveLegacyNameGroupId: a group renamed since the legacy setting was saved is matched by its CURRENT name — the legacy setting is never itself rewritten, so this only resolves if the admin\'s stored text still matches the current name'
+);
+$assert(
+    DeviceGroups::resolveEffectiveGroupIds(['operational_critical_group_ids' => [2]], $availableGroups, 'Core Switches') === [2],
+    'DeviceGroups::resolveEffectiveGroupIds: once the new multi-select key is present at all (even selecting a different group), it is the sole authority — the legacy name is never consulted'
+);
+$assert(
+    DeviceGroups::resolveEffectiveGroupIds(['operational_critical_group_ids' => []], $availableGroups, 'Core Switches') === [],
+    'DeviceGroups::resolveEffectiveGroupIds: an explicitly-empty saved multi-select is authoritative too — it must not fall back to the legacy name'
+);
+$assert(
+    DeviceGroups::resolveEffectiveGroupIds([], $availableGroups, 'Core Switches') === [2],
+    'DeviceGroups::resolveEffectiveGroupIds: multi-select never saved + legacy name resolves uniquely -> that group\'s ID, for this request only'
+);
+$assert(
+    DeviceGroups::resolveEffectiveGroupIds([], $availableGroups, 'Operational Critical') === [],
+    'DeviceGroups::resolveEffectiveGroupIds: multi-select never saved + ambiguous legacy name -> empty selection, fail safe'
+);
+$assert(
+    DeviceGroups::resolveEffectiveGroupIds([], $availableGroups, '') === [],
+    'DeviceGroups::resolveEffectiveGroupIds: multi-select never saved + blank legacy name -> empty selection'
+);
+
+// --- Support\AlertRules::resolveDeviceDownTaggedIds (Gate B2) --------
+$availableRules = [
+    ['id' => 10, 'name' => 'Device Down', 'severity' => 'critical'],
+    ['id' => 20, 'name' => 'Unrelated Rule', 'severity' => 'warning'],
+];
+$assert(
+    AlertRules::resolveDeviceDownTaggedIds([10], $availableRules) === [10],
+    'AlertRules::resolveDeviceDownTaggedIds: a tagged rule ID resolves'
+);
+$assert(
+    AlertRules::resolveDeviceDownTaggedIds([10, 10, 999], $availableRules) === [10],
+    'AlertRules::resolveDeviceDownTaggedIds: duplicates normalize and a deleted rule ID is dropped'
+);
+$assert(
+    AlertRules::resolveDeviceDownTaggedIds(null, $availableRules) === [],
+    'AlertRules::resolveDeviceDownTaggedIds: never-saved setting resolves to "nothing tagged", never an error'
+);
+$alertRulesReflection = new ReflectionClass(AlertRules::class);
+$assert(
+    ! $alertRulesReflection->hasConstant('CATEGORY_SENSOR') && ! $alertRulesReflection->hasConstant('CATEGORY_SERVICE'),
+    'AlertRules: CATEGORY_SENSOR/CATEGORY_SERVICE no longer exist as class constants'
+);
+$assert(
+    ! $alertRulesReflection->hasConstant('CONDITION_SETTING_KEY') && ! $alertRulesReflection->hasConstant('CATEGORIES'),
+    'AlertRules: CONDITION_SETTING_KEY/CATEGORIES no longer exist as class constants'
+);
+$assert(
+    $alertRulesReflection->hasConstant('DEVICE_DOWN_SETTING_KEY'),
+    'AlertRules: DEVICE_DOWN_SETTING_KEY exists as the sole remaining condition tag'
+);
+
+// --- Support\OperationalPolicy::effectivePolicySummary (Gate B5 UI) —
+// must reflect $policyConfig exactly, never hardcoded prose. ----------
+$defaultPolicyConfig = Config::resolve([]);
+$summaryRows = OperationalPolicy::effectivePolicySummary($defaultPolicyConfig);
+$summaryByCondition = [];
+foreach ($summaryRows as $row) {
+    $summaryByCondition[$row['condition']] = $row;
+}
+$assert(
+    ($summaryByCondition['Device Down']['critical_groups'] ?? null) === 'Critical'
+        && ($summaryByCondition['Device Down']['other_devices'] ?? null) === 'Warning',
+    'OperationalPolicy::effectivePolicySummary: Device Down defaults match the documented policy matrix (Critical for Operational Critical groups, Warning otherwise)'
+);
+$assert(
+    array_key_exists('Sensor Failure', $summaryByCondition),
+    'OperationalPolicy::effectivePolicySummary: numeric and state sensor rows collapse into one "Sensor Failure" row when both resolve to the same severities (true for the defaults)'
+);
+$overriddenPolicyConfig = Config::resolve(['fallback_numeric_sensor_normal_severity' => 'disabled']);
+$overriddenRows = OperationalPolicy::effectivePolicySummary($overriddenPolicyConfig);
+$overriddenByCondition = [];
+foreach ($overriddenRows as $row) {
+    $overriddenByCondition[$row['condition']] = $row;
+}
+$assert(
+    array_key_exists('Numeric Sensor Failure', $overriddenByCondition) && array_key_exists('State Sensor Failure', $overriddenByCondition),
+    'OperationalPolicy::effectivePolicySummary: numeric/state sensor rows split into two once an Advanced override makes them diverge'
+);
+
 // --- Section 4/12: every Config::FIELDS group must actually render in
-// settings.blade.php — a field with a 'group' key not present in that
-// template's hardcoded $groupLabels list is persisted/resolved
-// correctly but invisible and unconfigurable from the admin UI. This
-// exact gap existed for the new 'tv_restrict' group (five tv_hide_*
-// settings) until settings.blade.php's $groupLabels was updated;
-// asserted generically here so any future group gets the same check
-// without needing its own one-off test. -----------------------------
+// settings.blade.php — a field with a 'group' key not accounted for by
+// that template is persisted/resolved correctly but invisible and
+// unconfigurable from the admin UI. Gate B3 restructured the form so
+// most groups render via a generic $mainGroupLabels/$tailGroupLabels
+// loop (each delegating to settings-field-group.blade.php), while
+// 'policy' (Operational Priority — Device Groups multi-select,
+// Maintenance toggle, effective policy summary) and 'advanced'
+// (collapsed Advanced section) are intentionally hand-rendered instead
+// of generically looped, since 'policy' has exactly one FIELDS entry
+// and 'advanced' is rendered inside a <details> block, not a fieldset
+// keyed by $mainGroupLabels/$tailGroupLabels. Asserted generically here
+// so any future group gets the same check without needing its own
+// one-off test. -----------------------------
 $settingsBladeSource = (string) file_get_contents($root . '/resources/views/settings.blade.php');
-preg_match('/\$groupLabels\s*=\s*\[(.*?)\];/s', $settingsBladeSource, $groupLabelsMatch);
-$renderedGroups = [];
-preg_match_all("/'([a-zA-Z0-9_]+)'\s*=>/", $groupLabelsMatch[1] ?? '', $groupLabelMatches);
-$renderedGroups = $groupLabelMatches[1] ?? [];
+preg_match('/\$mainGroupLabels\s*=\s*\[(.*?)\];/s', $settingsBladeSource, $mainGroupMatch);
+preg_match('/\$tailGroupLabels\s*=\s*\[(.*?)\];/s', $settingsBladeSource, $tailGroupMatch);
+preg_match_all(
+    "/'([a-zA-Z0-9_]+)'\s*=>/",
+    ($mainGroupMatch[1] ?? '') . ($tailGroupMatch[1] ?? ''),
+    $groupLabelMatches
+);
+$handRenderedGroups = ['policy', 'advanced'];
+$renderedGroups = array_merge($groupLabelMatches[1] ?? [], $handRenderedGroups);
 $definedGroups = array_keys(Config::grouped());
 $missingFromForm = array_values(array_diff($definedGroups, $renderedGroups));
 $assert(
@@ -1093,8 +1244,31 @@ $assert(
     'settings.blade.php: every Config::FIELDS group renders in the admin form (missing: ' . implode(', ', $missingFromForm) . ')'
 );
 $assert(
-    in_array('tv_restrict', $renderedGroups, true),
-    'settings.blade.php: the five new tv_hide_* TV-restriction settings are configurable from the Settings page, not silently persisted-but-invisible'
+    in_array('tv', $groupLabelMatches[1] ?? [], true),
+    'settings.blade.php: the five tv_hide_* TV-restriction settings (\'tv\' group) are configurable from the Settings page, not silently persisted-but-invisible'
+);
+$assert(
+    str_contains($settingsBladeSource, "\$groups['advanced']"),
+    'settings.blade.php: the Advanced section renders every advanced-group field generically'
+);
+$assert(
+    str_contains($settingsBladeSource, 'fallback_suppress_during_maintenance'),
+    'settings.blade.php: the Maintenance suppression toggle (policy group\'s one field) is rendered in Operational Priority'
+);
+$assert(
+    ! str_contains($settingsBladeSource, 'operational_critical_group_name'),
+    'settings.blade.php: the legacy free-text Operational Critical Device Group name textbox is removed from the UI'
+);
+$assert(
+    substr_count($settingsBladeSource, '<table class="idf-alert-rules-table">') === 1,
+    'settings.blade.php: Alert Rules render as exactly one unified table (Alert Rule / Severity / Include / Device Down), not two separate checkbox matrices'
+);
+$assert(
+    ! str_contains($settingsBladeSource, 'idf-alert-rule-conditions-grid')
+        && ! str_contains($settingsBladeSource, 'value="sensor"')
+        && ! str_contains($settingsBladeSource, 'value="service"')
+        && ! str_contains($settingsBladeSource, 'alertRuleConditionCategories'),
+    'settings.blade.php: no Sensors/Services Alert Rule tagging controls remain'
 );
 
 exit($failures === 0 ? 0 : 1);
