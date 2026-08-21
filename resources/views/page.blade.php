@@ -703,6 +703,27 @@
         overflow-wrap: anywhere;
     }
 
+    /*
+     * Visibility into the administrator-controlled Operational
+     * Critical Device Group membership that actually drives
+     * Support\OperationalPolicy's fallback severity (Section 15) — a
+     * small always-visible label, never a severity color of its own
+     * (a healthy Operational Critical device must not look like it has
+     * a problem).
+     */
+    .op-critical-badge {
+        background: #37474f;
+        color: #fff;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        padding: 1px 5px;
+        border-radius: 3px;
+        margin-left: 4px;
+        white-space: nowrap;
+        vertical-align: middle;
+    }
+
     .service-issue {
         border-top: 1px solid #eee;
         font-size: 12px;
@@ -2249,6 +2270,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2316,6 +2340,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2364,6 +2391,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2447,6 +2477,9 @@
                                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                                 {{ $device['name'] }}
                                             </a>
+                                            @if($device['operationally_critical'])
+                                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                                            @endif
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
@@ -2534,6 +2567,9 @@
                                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                                 {{ $device['name'] }}
                                             </a>
+                                            @if($device['operationally_critical'])
+                                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                                            @endif
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
