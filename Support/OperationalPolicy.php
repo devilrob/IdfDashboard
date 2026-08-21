@@ -90,7 +90,7 @@ final class OperationalPolicy
                 'title' => 'Device unreachable',
                 'description' => self::describeFallback(
                     'Device unreachable',
-                    $operationallyCritical
+                    $operationallyCritical ? 'Operational Critical device' : 'standard device'
                 ),
                 'actionable' => true,
                 'device_url' => $deviceUrl,
@@ -110,10 +110,21 @@ final class OperationalPolicy
             // its own — a service check that could not determine its own
             // state is a real "needs a human to look" signal, not
             // evidence of an outage.
-            $severity = match ($status) {
-                2 => $operationallyCritical ? Severity::CRITICAL : Severity::WARNING,
-                default => Severity::WARNING,
-            };
+            //
+            // Deliberately NOT gated on $operationallyCritical the way
+            // Device Down and sensor conditions are: a service check
+            // that has already classified itself Critical (a specific
+            // failing application/health-check, not raw ICMP/SNMP
+            // reachability) is Critical for every device by default —
+            // this is a stronger, more specific signal than the
+            // device's own infrastructure-tier Device Group membership,
+            // matching this design's own policy matrix. A device stops
+            // paging for this the same way anything else does: an
+            // administrator configures a real Alert Rule that reaches
+            // this specific device/condition, or explicitly excludes
+            // it via the affected Alert Rule's own targeting — this
+            // fallback never invents that exclusion on its own.
+            $severity = $status === 2 ? Severity::CRITICAL : Severity::WARNING;
 
             $name = trim((string) ($service['name'] ?? 'Service'));
             $message = trim((string) ($service['message'] ?? ''));
@@ -131,7 +142,7 @@ final class OperationalPolicy
                 'title' => 'Service ' . $name,
                 'description' => self::describeFallback(
                     $name . ($message !== '' ? ' — ' . $message : ''),
-                    $status === 2 && $operationallyCritical
+                    'a service check reporting ' . ($severity === Severity::CRITICAL ? 'Critical' : 'Warning') . ' applies to every device by default'
                 ),
                 'timestamp' => isset($service['changed']) ? (string) $service['changed'] : null,
                 'actionable' => true,
@@ -171,7 +182,7 @@ final class OperationalPolicy
                 'title' => (string) ($metric['label'] ?? 'Sensor'),
                 'description' => self::describeFallback(
                     $description,
-                    $state === Severity::CRITICAL && $operationallyCritical
+                    $operationallyCritical ? 'Operational Critical device' : 'standard device'
                 ),
                 'value' => $metric['current_value'] ?? null,
                 'unit' => $metric['unit'] ?? null,
@@ -195,11 +206,15 @@ final class OperationalPolicy
      * must be able to tell "this came from a real Alert Rule I
      * configured" apart from "this is the dashboard's own safety net
      * because no rule covers it yet" (Section 12/25's own requirement).
+     * $reason names the actual policy basis for the chosen severity —
+     * never just a bare true/false, since Device Down/sensor conditions
+     * and Service status conditions are governed by genuinely different
+     * defaults (see resolveFallbackIssues()'s own comments) and the
+     * text shown to an administrator must say which one actually
+     * applied here, not a generic label.
      */
-    private static function describeFallback(string $cause, bool $operationallyCritical): string
+    private static function describeFallback(string $cause, string $reason): string
     {
-        $scope = $operationallyCritical ? 'Operational Critical device' : 'standard device';
-
-        return $cause . ' (no active Alert Rule covers this — default policy for a ' . $scope . ')';
+        return $cause . ' (no active Alert Rule covers this — default policy for a ' . $reason . ')';
     }
 }

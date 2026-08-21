@@ -1990,6 +1990,220 @@ class DeviceAccessTest extends TestCase
         }
     }
 
+    /**
+     * Gate E regression matrix for Support\OperationalPolicy (Layer 3
+     * fallback) — proves the core principle this redesign is built on:
+     * "a technical failure is not automatically an operationally
+     * critical incident". Every fixture here deliberately has NO
+     * matching Alert Rule, so the observed severity comes only from
+     * OperationalPolicy's own default policy, never from
+     * Support\AlertRules — the moment an administrator configures a
+     * real rule, that separate code path takes over entirely (already
+     * covered by testAlertRuleInclusionDefaultsToEverythingAndRespects
+     * AnExplicitAdministratorSelection and the Caso A-F test above).
+     */
+    public function testOperationalPolicyFallbackSeverityFollowsTheOperationalCriticalPolicyMatrix(): void
+    {
+        $location = Location::factory()->create(['location' => 'Policy Fallback Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Caso 1: a kitchen-printer-style peripheral going DOWN is a
+        // real technical failure and must stay visible, but is not
+        // automatically an operationally critical incident — the
+        // mission's own opening example.
+        $peripheralDown = $makeDevice('kitchen-printer.example.com', 0);
+
+        // Caso 2: the same raw condition (Device Down), but on a
+        // device the administrator has placed in the Operational
+        // Critical group — a production cluster being unreachable IS
+        // Critical.
+        $clusterDown = $makeDevice('production-cluster.example.com', 0);
+        $criticalGroup->devices()->attach($clusterDown->device_id);
+
+        // Caso 3: a critical server's own numeric sensor breaching a
+        // Critical threshold, with no Alert Rule covering it yet — the
+        // condition must not be silently hidden just because no rule
+        // exists, and its severity follows the device's Operational
+        // Critical membership.
+        $criticalServerSensor = $makeDevice('critical-db-server.example.com', 1);
+        $criticalGroup->devices()->attach($criticalServerSensor->device_id);
+        Sensor::factory()->for($criticalServerSensor)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Server Ambient',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        // Caso 4: "Cluster Power Supply 2 = Failed" — a state sensor
+        // LibreNMS itself decodes as Critical (state_generic_value=2),
+        // again with no Alert Rule attached, on an Operational Critical
+        // device.
+        $clusterStateSensorFailed = $makeDevice('cluster-psu.example.com', 1);
+        $criticalGroup->devices()->attach($clusterStateSensorFailed->device_id);
+        $psuSensor = Sensor::factory()->for($clusterStateSensorFailed)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 2',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $psuStateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'policy-fallback-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $psuSensor->sensor_id,
+            'state_index_id' => $psuStateIndexId,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $psuStateIndexId,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        // Caso 5: service_status=1 is Warning for every device, critical
+        // or not — the mission's policy matrix makes no distinction here.
+        $serviceWarningStandard = $makeDevice('manageengine-agent.example.com', 1);
+        Service::factory()->for($serviceWarningStandard)->create([
+            'service_name' => 'ManageEngine Patch Status',
+            'service_status' => 1,
+            'service_message' => '3 pending patches',
+        ]);
+
+        // Caso 6: service_status=2 is Critical for every device by
+        // default (unlike Device Down/sensor conditions) — a specific
+        // failing service check is a stronger signal than the device's
+        // own infrastructure tier. $serviceCriticalStandard is
+        // deliberately NOT in the Operational Critical group.
+        $serviceCriticalStandard = $makeDevice('sophos-agent.example.com', 1);
+        Service::factory()->for($serviceCriticalStandard)->create([
+            'service_name' => 'Sophos Tamper Protection',
+            'service_status' => 2,
+            'service_message' => 'Tamper protection disabled',
+        ]);
+
+        // Caso 7: service_status=3 (Unknown) must never become Critical
+        // on its own — proven here on an Operational Critical device
+        // specifically, the case most likely to accidentally leak into
+        // Critical if this were implemented as "any nonzero status on a
+        // critical device is Critical".
+        $serviceUnknownOnCritical = $makeDevice('critical-unknown-service.example.com', 1);
+        $criticalGroup->devices()->attach($serviceUnknownOnCritical->device_id);
+        Service::factory()->for($serviceUnknownOnCritical)->create([
+            'service_name' => 'Undetermined check',
+            'service_status' => 3,
+            'service_message' => 'Check could not determine state',
+        ]);
+
+        // Caso 8: a real Warning-severity Alert Rule on an Operational
+        // Critical, currently-DOWN device must fully replace the
+        // fallback, not merge/escalate with it — the device must show
+        // exactly what the administrator's rule says (Warning), never
+        // the Critical the Device Down fallback would otherwise produce.
+        $alertOutranksFallback = $makeDevice('alert-covered-critical.example.com', 0);
+        $criticalGroup->devices()->attach($alertOutranksFallback->device_id);
+        $outrankingRule = AlertRule::factory()->create([
+            'name' => 'Deliberately scoped down to Warning',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $alertOutranksFallback->device_id,
+            'rule_id' => $outrankingRule->id,
+        ]);
+
+        // Caso 9: an active LibreNMS maintenance window suppresses the
+        // fallback exactly as it already does for Alert Rule-sourced
+        // issues — proven on an Operational Critical, currently-DOWN
+        // device with zero Alert Rules at all, so only the fallback's
+        // own maintenance gate (not an Alert Rule's own suppression)
+        // could be responsible for the result.
+        $maintenanceSuppressesFallback = $makeDevice('maintained-critical-cluster.example.com', 0);
+        $criticalGroup->devices()->attach($maintenanceSuppressesFallback->device_id);
+        $maintenanceSchedule = AlertSchedule::factory()->create([
+            'title' => 'Policy fallback maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenanceSchedule->devices()->attach($maintenanceSuppressesFallback->device_id);
+
+        // Caso 10: an old Critical-looking event log entry must never
+        // elevate a device's CURRENT severity — Priority Attention
+        // ordering (Section 14) is explicit that EventLog is context
+        // only. $eventLogDevice's only current condition is a Warning
+        // service; if EventLog participated in severity at all, this
+        // would incorrectly resolve to critical.
+        $eventLogDevice = $makeDevice('old-critical-event.example.com', 1);
+        Service::factory()->for($eventLogDevice)->create([
+            'service_name' => 'Background Sync',
+            'service_status' => 1,
+            'service_message' => 'Retrying',
+        ]);
+        DB::table('eventlog')->insert([
+            'device_id' => $eventLogDevice->device_id,
+            'datetime' => now()->subHours(2),
+            'message' => 'CRITICAL: historical event, must not affect current severity',
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data(
+            ['operational_critical_group_name' => 'Operational Critical'],
+            $request
+        );
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertSame('warning', $devices->get($peripheralDown->device_id)['health'], 'Caso 1: a non-critical device going down is Warning, not Critical.');
+        $this->assertFalse($devices->get($peripheralDown->device_id)['operationally_critical']);
+        $this->assertTrue($devices->get($peripheralDown->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'device' && $issue['severity'] === 'warning'
+        ));
+
+        $this->assertSame('critical', $devices->get($clusterDown->device_id)['health'], 'Caso 2: an Operational Critical device going down is Critical.');
+        $this->assertTrue($devices->get($clusterDown->device_id)['operationally_critical']);
+
+        $this->assertSame('critical', $devices->get($criticalServerSensor->device_id)['health'], 'Caso 3: a Critical numeric sensor on a critical server, no Alert Rule yet, is Critical.');
+        $this->assertTrue($devices->get($criticalServerSensor->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'sensor'
+                && $issue['severity'] === 'critical'
+                && str_contains($issue['description'], 'no active Alert Rule covers this')
+        ));
+
+        $this->assertSame('critical', $devices->get($clusterStateSensorFailed->device_id)['health'], 'Caso 4: a Critical state sensor (Power Supply 2 = Failed) on a critical cluster is Critical.');
+
+        $this->assertSame('warning', $devices->get($serviceWarningStandard->device_id)['health'], 'Caso 5: service_status=1 is Warning.');
+
+        $this->assertSame('critical', $devices->get($serviceCriticalStandard->device_id)['health'], 'Caso 6: service_status=2 (Sophos Tamper Protection disabled) is Critical for every device by default, not just Operational Critical ones.');
+        $this->assertFalse($devices->get($serviceCriticalStandard->device_id)['operationally_critical']);
+
+        $this->assertSame('warning', $devices->get($serviceUnknownOnCritical->device_id)['health'], 'Caso 7: service_status=3 (Unknown) never becomes Critical, even on an Operational Critical device.');
+
+        $this->assertSame('warning', $devices->get($alertOutranksFallback->device_id)['health'], 'Caso 8: a real Warning Alert Rule fully replaces the Critical the Device Down fallback would otherwise produce — it never merges/escalates.');
+        $this->assertFalse($devices->get($alertOutranksFallback->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'device',
+        ), 'Caso 8: the fallback device-down issue must not exist at all once a real alert-sourced issue exists.');
+
+        $this->assertSame('maintenance', $devices->get($maintenanceSuppressesFallback->device_id)['health'], 'Caso 9: an active maintenance window suppresses the fallback exactly as it does Alert Rule-sourced issues.');
+        $this->assertTrue($devices->get($maintenanceSuppressesFallback->device_id)['issues']->isEmpty());
+
+        $this->assertSame('warning', $devices->get($eventLogDevice->device_id)['health'], 'Caso 10: an old Critical-looking EventLog entry must never elevate current severity above what the live service status warrants.');
+        $this->assertGreaterThan(0, $devices->get($eventLogDevice->device_id)['recent_event_count'], 'Caso 10: the event is genuinely present as context, not silently dropped — it simply does not drive severity.');
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
