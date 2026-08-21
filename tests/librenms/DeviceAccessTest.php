@@ -542,24 +542,37 @@ class DeviceAccessTest extends TestCase
         $this->assertFalse($oldRecoveryData['recovered_recently']);
         $this->assertSame('Power', $upsData['category']);
         $this->assertGreaterThan(0, $upsData['no_sensor_count']);
-        // Native per-sensor threshold breach (temperature 40 > limit 35,
-        // formatted here as 104°F/95°F), native state-sensor Critical/
-        // Warning decoding, and native Service Issue detection are all
-        // removed entirely — a real LibreNMS Alert Rule is now the only
-        // way any of these become a Critical/Warning issue. None of
-        // these three has a matching Alert Rule in this fixture, so
-        // none can appear as an issue on $sensorData anymore.
-        $this->assertFalse($sensorData['issues']->contains(
+        // REGRESSION NOTE (final correlation hardening): this fixture
+        // attaches three Alert Rules to $sensorDevice ("Vendor power
+        // alarm", "Vendor warning alarm", "Sensor over limit - Check
+        // Device Health Settings") — none of them tagged, in Settings,
+        // as covering any technical-condition category, and none of
+        // them the real cause of the temperature/state/service
+        // conditions below. This assertion block used to expect all
+        // three conditions to stay invisible, on the theory that "a
+        // real LibreNMS Alert Rule is now the only way any of these
+        // become an issue". That theory relied on the pre-hardening
+        // device-wide gate (`$hasAlertIssue` — any active alert at all
+        // blanked out every fallback on the device), which was exactly
+        // the false-negative bug this project's "no exact identity = no
+        // suppression" hardening exists to fix: an unrelated Alert Rule
+        // must never hide a real, different technical failure. With
+        // that gate removed, OperationalPolicy correctly generates its
+        // own fallback for each of these three genuinely-uncovered
+        // conditions (no exact device_id/sensor_id/service_id
+        // correlation ties any of the three unrelated alerts to any of
+        // them), so all three now correctly DO appear.
+        $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => str_contains($issue['description'], '104')
                 && str_contains($issue['description'], '95')
-        ));
-        $this->assertFalse($sensorData['issues']->contains(
+        ), 'The uncovered CPU Temperature threshold breach must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
+        $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['type'] === 'state'
                 && str_contains($issue['description'], 'failed')
-        ));
-        $this->assertFalse($sensorData['issues']->contains(
+        ), 'The uncovered System Status state-sensor failure must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
+        $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'service'
-        ));
+        ), 'The uncovered SQL Server service failure must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
         // The full per-sensor telemetry array is no longer exposed to
         // the frontend as chip data (see page.blade.php's own removal
         // of $renderTelemetry/$metricIcon) — locking that in here.
@@ -2199,6 +2212,23 @@ class DeviceAccessTest extends TestCase
         // "covered" only by category tag (never by exact identity):
         // BOTH fallbacks must remain. Safe visual duplicate over a
         // hidden incident.
+        //
+        // REGRESSION NOTE: the Power Supply and Fan sensors below are
+        // deliberately different LibreNMS sensor_class values ('state'
+        // vs 'fanspeed'), not two 'state'-class sensors. This is not
+        // about OperationalPolicy's own correlation logic — it is
+        // because Page::genericTelemetry()/sensorMetric() (pre-existing,
+        // unrelated telemetry curation, documented at length in
+        // buildTelemetry()) already summarizes ALL same-sensor_class
+        // instances into a single "worst of N" telemetry entry per
+        // device, by design (e.g. "Signal (worst of 82)") — a real,
+        // separate behavior this correlation-hardening pass does not
+        // touch. Two 'state'-class sensors here would collapse into one
+        // telemetry metric before OperationalPolicy ever sees them,
+        // which would test that pre-existing curation, not condition-
+        // level correlation. Using two distinct sensor classes gives
+        // each condition its own telemetry entry/sensor_id, which is
+        // exactly what this test needs to isolate.
         $coveredSensorDevice = $makeDevice('covered-sensor.example.com', 1);
         $criticalGroup->devices()->attach($coveredSensorDevice->device_id);
         $sensorCoveringRule = AlertRule::factory()->create([
@@ -2228,28 +2258,20 @@ class DeviceAccessTest extends TestCase
             'state_generic_value' => 2,
         ]);
         $fanSensorB = Sensor::factory()->for($coveredSensorDevice)->create([
-            'sensor_class' => 'state',
+            'sensor_class' => 'fanspeed',
             'sensor_descr' => 'Fan 1',
-            'sensor_current' => 2,
+            'sensor_current' => 0,
+            'sensor_limit_low' => 500,
+            'sensor_limit_low_warn' => 1000,
             'sensor_alert' => 1,
             'lastupdate' => now(),
-        ]);
-        $fanStateIndexIdB = DB::table('state_indexes')->insertGetId(['state_name' => 'case-b-fan-state']);
-        DB::table('sensors_to_state_indexes')->insert([
-            'sensor_id' => $fanSensorB->sensor_id,
-            'state_index_id' => $fanStateIndexIdB,
-        ]);
-        DB::table('state_translations')->insert([
-            'state_index_id' => $fanStateIndexIdB,
-            'state_descr' => 'Failed',
-            'state_value' => 2,
-            'state_generic_value' => 2,
         ]);
 
         // Case C (Gate B): multiple genuinely uncovered conditions on
         // the same device must ALL surface — an unrelated rule must
         // not black out the rest, and "uncovered" must not collapse
-        // to only one fallback firing.
+        // to only one fallback firing. Same distinct-sensor_class
+        // reasoning as Case B/C above.
         $multiUncoveredDevice = $makeDevice('multi-uncovered.example.com', 1);
         $criticalGroup->devices()->attach($multiUncoveredDevice->device_id);
         Alert::factory()->create([
@@ -2275,22 +2297,13 @@ class DeviceAccessTest extends TestCase
             'state_generic_value' => 2,
         ]);
         $fanSensorC = Sensor::factory()->for($multiUncoveredDevice)->create([
-            'sensor_class' => 'state',
+            'sensor_class' => 'fanspeed',
             'sensor_descr' => 'Fan 1',
-            'sensor_current' => 2,
+            'sensor_current' => 0,
+            'sensor_limit_low' => 500,
+            'sensor_limit_low_warn' => 1000,
             'sensor_alert' => 1,
             'lastupdate' => now(),
-        ]);
-        $fanStateIndexIdC = DB::table('state_indexes')->insertGetId(['state_name' => 'case-c-fan-state']);
-        DB::table('sensors_to_state_indexes')->insert([
-            'sensor_id' => $fanSensorC->sensor_id,
-            'state_index_id' => $fanStateIndexIdC,
-        ]);
-        DB::table('state_translations')->insert([
-            'state_index_id' => $fanStateIndexIdC,
-            'state_descr' => 'Failed',
-            'state_value' => 2,
-            'state_generic_value' => 2,
         ]);
 
         // Case D (final hardening): a rule tagged "Services" must never
@@ -2536,7 +2549,22 @@ class DeviceAccessTest extends TestCase
         // Case J: maintenance suppression itself is configurable —
         // with it turned off, an active maintenance window must no
         // longer blank out the fallback.
+        //
+        // REGRESSION NOTE: this device is deliberately placed in the
+        // Operational Critical group so its Device Down severity
+        // resolves via fallback_device_down_critical_group_severity
+        // (left at its default 'critical' below), never via
+        // fallback_device_down_normal_severity — which Case F above
+        // deliberately sets to 'disabled' as part of a DIFFERENT
+        // scenario sharing this same settings payload. A normal
+        // (non-critical-group) device here would have its fallback
+        // suppressed by Case F's unrelated severity override, not by
+        // the maintenance-suppression setting this case actually
+        // exists to test — a real prior test bug that produced the
+        // exact "still suppressed" symptom of a genuine maintenance-
+        // override defect without one actually being present.
         $maintenanceNotSuppressed = $makeDevice('maintenance-not-suppressed.example.com', 0);
+        $criticalGroup->devices()->attach($maintenanceNotSuppressed->device_id);
         $maintenanceSchedule = AlertSchedule::factory()->create([
             'title' => 'Gate C maintenance window',
             'start' => now()->subHour(),
@@ -2614,7 +2642,11 @@ class DeviceAccessTest extends TestCase
             'Case F: a legacy-persisted "unknown" severity value safely falls back to the documented default (Critical), never a fake Informational state.'
         );
 
-        $this->assertNotSame('maintenance', $devices->get($maintenanceNotSuppressed->device_id)['health'], 'Case J: with fallback_suppress_during_maintenance turned off, the fallback must not be blanked out by an active maintenance window.');
+        $this->assertSame(
+            'critical',
+            $devices->get($maintenanceNotSuppressed->device_id)['health'],
+            'Case J: with fallback_suppress_during_maintenance turned off, the Operational Critical Device Down fallback must be evaluated normally (Critical) despite the active maintenance window, not blanked out.'
+        );
         $this->assertTrue(
             $devices->get($maintenanceNotSuppressed->device_id)['issues']->contains(fn (array $issue): bool => $issue['source'] === 'device'),
             'Case J: the Device Down fallback must be generated when maintenance suppression is disabled.'
