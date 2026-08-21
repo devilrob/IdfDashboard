@@ -20,6 +20,8 @@ use App\Models\User;
 use App\Plugins\IdfDashboard\Menu;
 use App\Plugins\IdfDashboard\Page;
 use App\Plugins\IdfDashboard\Settings;
+use App\Plugins\IdfDashboard\Support\AlertRules;
+use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -527,43 +529,86 @@ class DeviceAccessTest extends TestCase
         $sensorData = $devices->get($sensorDevice->device_id);
         $warningAlertData = $devices->get($warningAlertOnly->device_id);
 
+        // $down's own device-status=0 severity is now purely from the
+        // "Device Down"-named Alert Rule attached to it below, not any
+        // native computation — down_since/down_age_seconds are separate,
+        // real-outage-timestamp data untouched by that removal (see
+        // Page.php's normalizeDevice()), so they stay asserted directly.
         $this->assertSame('critical', $downData['health']);
         $this->assertGreaterThanOrEqual(660, $downData['down_age_seconds']);
         $this->assertLessThan(900, $downData['down_age_seconds']);
-        $this->assertStringContainsString('unavailable for', $downData['issues']->first()['description']);
         $this->assertSame('maintenance', $maintenanceData['health']);
-        $this->assertFalse($maintenanceData['issues']->contains('type', 'device_down'));
         $this->assertTrue($recoveredData['recovered_recently']);
         $this->assertFalse($oldRecoveryData['recovered_recently']);
         $this->assertSame('Power', $upsData['category']);
         $this->assertGreaterThan(0, $upsData['no_sensor_count']);
+        // REGRESSION NOTE (final correlation hardening): this fixture
+        // attaches three Alert Rules to $sensorDevice ("Vendor power
+        // alarm", "Vendor warning alarm", "Sensor over limit - Check
+        // Device Health Settings") — none of them tagged, in Settings,
+        // as covering any technical-condition category, and none of
+        // them the real cause of the temperature/state/service
+        // conditions below. This assertion block used to expect all
+        // three conditions to stay invisible, on the theory that "a
+        // real LibreNMS Alert Rule is now the only way any of these
+        // become an issue". That theory relied on the pre-hardening
+        // device-wide gate (`$hasAlertIssue` — any active alert at all
+        // blanked out every fallback on the device), which was exactly
+        // the false-negative bug this project's "no exact identity = no
+        // suppression" hardening exists to fix: an unrelated Alert Rule
+        // must never hide a real, different technical failure. With
+        // that gate removed, OperationalPolicy correctly generates its
+        // own fallback for each of these three genuinely-uncovered
+        // conditions (no exact device_id/sensor_id/service_id
+        // correlation ties any of the three unrelated alerts to any of
+        // them), so all three now correctly DO appear.
         $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => str_contains($issue['description'], '104')
                 && str_contains($issue['description'], '95')
-        ));
+        ), 'The uncovered CPU Temperature threshold breach must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
         $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['type'] === 'state'
                 && str_contains($issue['description'], 'failed')
-        ));
+        ), 'The uncovered System Status state-sensor failure must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
         $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'service'
-                && $issue['severity'] === 'critical'
-                && str_contains($issue['description'], 'Connection refused')
-        ));
+        ), 'The uncovered SQL Server service failure must surface as a fallback issue — three unrelated Alert Rules on this device must not hide it.');
+        // The full per-sensor telemetry array is no longer exposed to
+        // the frontend as chip data (see page.blade.php's own removal
+        // of $renderTelemetry/$metricIcon) — locking that in here.
+        $this->assertArrayNotHasKey('issue_telemetry', $sensorData);
         $this->assertTrue($sensorData['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'alert'
                 && $issue['severity'] === 'critical'
                 && str_contains($issue['description'], 'Vendor power alarm')
         ));
-        $this->assertFalse($sensorData['issues']->contains(
-            fn (array $issue): bool => str_contains($issue['description'], 'Sensor over limit')
+        // No idf_included_alert_rule_ids setting was saved for this
+        // request ($settings === []), so Support\AlertRules defaults to
+        // "every currently defined rule is included" — there is no more
+        // hardcoded exclusion of rules named "Sensor over limit"/
+        // "Device Down"; an administrator now has to explicitly
+        // uncheck a rule in Settings for it to disappear (see the
+        // dedicated exclusion assertions further below).
+        $this->assertTrue($sensorData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Sensor over limit')
         ));
-        $this->assertCount(1, $downData['issues']->where('type', 'device_down'));
-        $this->assertFalse($downData['issues']->contains(
-            fn (array $issue): bool => str_contains($issue['description'], 'Device Down')
+        $this->assertCount(0, $downData['issues']->where('type', 'device_down'), 'Native "device_down" issue type no longer exists at all — see buildDeviceIssues().');
+        $this->assertTrue($downData['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Device Down')
         ));
         $this->assertSame('warning', $warningAlertData['health']);
-        $this->assertFalse(collect($payload['priorityAttention']['items'])->contains(
+        // Priority Attention used to blanket-exclude every warning-severity
+        // alert issue — a conservative noise-reduction measure from before
+        // Support\AlertRules gave administrators explicit per-rule
+        // curation (see buildPriorityAttention()'s own updated comment).
+        // Now that severity comes only from administrator-selected Alert
+        // Rules, a device whose only cause is an included Warning Alert
+        // Rule must be able to appear here like any other actionable
+        // issue — hiding it would silently defeat the point of checking
+        // that rule in Settings in the first place.
+        $this->assertTrue(collect($payload['priorityAttention']['items'])->contains(
             'device_id',
             $warningAlertOnly->device_id
         ));
@@ -583,13 +628,24 @@ class DeviceAccessTest extends TestCase
                 $this->assertSame($deviceData['device_id'], $issue['device_id']);
             }
         }
-        $this->assertSame('device_down', $payload['priorityAttention']['items'][0]['type']);
-        $this->assertSame(IssueBuilder::PRIORITY_DEVICE_DOWN, $payload['priorityAttention']['items'][0]['priority']);
+        // PRIORITY_DEVICE_DOWN/PRIORITY_CRITICAL_SENSOR/PRIORITY_CRITICAL_SERVICE
+        // are all unreachable now (their issue sources were removed) —
+        // PRIORITY_CRITICAL_ALERT is deterministically the best priority
+        // any issue can have across this whole fixture, regardless of
+        // which specific device/alert wins the device_name tie-break in
+        // buildPriorityAttention()'s final cross-device sort.
+        $this->assertSame('alert', $payload['priorityAttention']['items'][0]['type']);
+        $this->assertSame(IssueBuilder::PRIORITY_CRITICAL_ALERT, $payload['priorityAttention']['items'][0]['priority']);
         $this->assertLessThan(80, $dataQueryCount, 'Phase 1 remains fixed-query and avoids N+1 behavior.');
         $this->assertLessThan(5000, $elapsedMs, 'Fixture Page::data() remains within a defensive local ceiling.');
         $this->assertLessThan(64 * 1024 * 1024, $memoryDelta, 'Fixture Page::data() memory delta remains bounded.');
         $this->assertLessThan(2 * 1024 * 1024, $htmlBytes, 'Fixture HTML remains within a defensive ceiling.');
-        $this->assertStringContainsString('Device down — unavailable for', $html);
+        // The native "Device down — unavailable for ..." description no
+        // longer exists at all (see buildDeviceIssues()'s own removal) —
+        // $down's rendered card now carries its alert-sourced description
+        // instead, matching the structured $downData['issues'] assertion
+        // above at the actual rendered-HTML level.
+        $this->assertStringContainsString('Active alert — Device Down', $html);
         $this->assertStringContainsString('No sensor installed', $html);
 
         fwrite(STDOUT, sprintf(
@@ -602,6 +658,94 @@ class DeviceAccessTest extends TestCase
             $memoryDelta,
             $htmlBytes
         ));
+    }
+
+    /**
+     * Support\AlertRules replaced the old hardcoded rule-*name*
+     * guessing (REDUNDANT_ALERT_RULE_NAMES / the device-down regex)
+     * with an explicit, administrator-chosen selection of real
+     * alert_rules.id values. This proves both halves: nothing is
+     * hidden until an administrator explicitly says so, and once they
+     * do, the exclusion is exact and reflected in both the issue list
+     * and the device's own computed health/problem_types.
+     */
+    public function testAlertRuleInclusionDefaultsToEverythingAndRespectsAnExplicitAdministratorSelection(): void
+    {
+        $device = Device::factory()->create([
+            'hostname' => 'alert-rule-selection.example.com',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        $keepRule = AlertRule::factory()->create([
+            'name' => 'Vendor power alarm',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $device->device_id,
+            'rule_id' => $keepRule->id,
+        ]);
+        $excludableRule = AlertRule::factory()->create([
+            'name' => 'Sensor over limit - Check Device Health Settings',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $device->device_id,
+            'rule_id' => $excludableRule->id,
+        ]);
+
+        $issuesFor = static function (array $payload, int $deviceId): \Illuminate\Support\Collection {
+            return collect($payload['otherLocations'])
+                ->flatMap(fn (array $group) => $group['devices'])
+                ->firstWhere('device_id', $deviceId)['issues'];
+        };
+
+        // No idf_included_alert_rule_ids setting has ever been saved
+        // ($settings === []) -- both rules are included by default,
+        // Support\AlertRules::resolveIncludedIds()'s documented
+        // behavior for "no explicit choice yet".
+        $defaultIssues = $issuesFor((new Page())->data([], $request), $device->device_id);
+        $this->assertTrue($defaultIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Vendor power alarm')
+        ));
+        $this->assertTrue($defaultIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Sensor over limit')
+        ));
+
+        // An administrator explicitly includes only $keepRule, exactly
+        // the shape settings.blade.php's checkbox list submits
+        // (settings[idf_included_alert_rule_ids][] per checked box).
+        $filteredIssues = $issuesFor((new Page())->data(
+            ['idf_included_alert_rule_ids' => [(string) $keepRule->id]],
+            $request
+        ), $device->device_id);
+        $this->assertTrue($filteredIssues->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+                && str_contains($issue['description'], 'Vendor power alarm')
+        ));
+        $this->assertFalse($filteredIssues->contains(
+            fn (array $issue): bool => str_contains($issue['description'], 'Sensor over limit')
+        ));
+
+        // An administrator explicitly excludes every rule -- submitted
+        // as the settings form's hidden-fallback placeholder value
+        // (an array containing only '') when every checkbox is left
+        // unchecked. The device has no other issue, so this must
+        // clear its health/problem_types entirely, not merely drop
+        // the alert-sourced issue rows while leaving it flagged.
+        $emptyPayload = (new Page())->data(['idf_included_alert_rule_ids' => ['']], $request);
+        $emptyDevice = collect($emptyPayload['otherLocations'])
+            ->flatMap(fn (array $group) => $group['devices'])
+            ->firstWhere('device_id', $device->device_id);
+        $this->assertSame('healthy', $emptyDevice['health']);
+        $this->assertTrue($emptyDevice['issues']->isEmpty());
     }
 
     public function testUserWithoutDevicePermissionGetsAnEmptyDeviceSet(): void
@@ -698,6 +842,21 @@ class DeviceAccessTest extends TestCase
             'behavior' => 1,
         ]);
         $futureSchedule->devices()->attach($future->device_id);
+
+        // $expired/$future both have status=0 like every other device
+        // fixture here, but native Device Down detection was removed
+        // entirely (see Page.php's buildDeviceIssues()) — a real
+        // critical-severity Alert Rule is now required for either to
+        // show as anything other than Healthy, so this test's actual
+        // subject (expired/future maintenance windows must not
+        // suppress a real Critical severity) stays meaningful.
+        $windowRule = AlertRule::factory()->create([
+            'name' => 'Maintenance window fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $expired->device_id, 'rule_id' => $windowRule->id]);
+        Alert::factory()->create(['device_id' => $future->device_id, 'rule_id' => $windowRule->id]);
+
         $hiddenSchedule = AlertSchedule::factory()->create(['title' => 'HIDDEN SCHEDULE'] + $activeValues);
         $hiddenSchedule->locations()->attach($hiddenLocation->id);
 
@@ -1038,6 +1197,15 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now(),
         ]);
+        // This sensor reading alone no longer produces any issue at all
+        // (native per-sensor threshold breach was removed — see Page.php's
+        // buildDeviceIssues()); a real critical-severity Alert Rule is what
+        // makes $critical actually 'critical' throughout every Caso below.
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'Caso critical fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $critical->device_id, 'rule_id' => $criticalRule->id]);
 
         $warning = Device::factory()->create([
             'display' => 'Caso Warning',
@@ -1057,6 +1225,11 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now(),
         ]);
+        $warningRule = AlertRule::factory()->create([
+            'name' => 'Caso warning fixture alert',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create(['device_id' => $warning->device_id, 'rule_id' => $warningRule->id]);
 
         $unknown = Device::factory()->create([
             'display' => 'Caso Unknown',
@@ -1145,6 +1318,18 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1,
             'lastupdate' => now()->subDays(2),
         ]);
+        // $staleCritical's old sensor reading alone no longer produces any
+        // issue either — its Critical severity below (which must survive
+        // even when Stale is toggled off in Caso F, since the two are
+        // independent conditions) comes entirely from this Alert. Alerts
+        // are not subject to the "stale data" staleness check at all
+        // (that check applies only to $stale's own PDU-freshness escalation,
+        // which stays native — see Config::FIELDS' default_problem_stale).
+        $staleCriticalRule = AlertRule::factory()->create([
+            'name' => 'Caso stale-critical fixture alert',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create(['device_id' => $staleCritical->device_id, 'rule_id' => $staleCriticalRule->id]);
 
         $healthy = Device::factory()->create([
             'display' => 'Caso Healthy',
@@ -1385,9 +1570,12 @@ class DeviceAccessTest extends TestCase
             $tvDevicesF->get($staleCritical->device_id)['health'],
             'Caso F: an old-but-critical reading still shows Critical even when Stale is off.'
         );
+        // $staleCritical's Critical issue is now alert-sourced (see the
+        // Alert Rule fixture above) — its type/source are 'alert', not
+        // the removed native 'temperature'/'sensor' shape.
         $this->assertTrue(
             $tvDevicesF->get($staleCritical->device_id)['issues']->contains(
-                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'temperature'
+                fn (array $issue): bool => $issue['severity'] === 'critical' && $issue['type'] === 'alert' && $issue['source'] === 'alert'
             )
         );
         // Priority Attention (both the persistent banner and the
@@ -1459,6 +1647,20 @@ class DeviceAccessTest extends TestCase
             ]);
         };
 
+        // Native per-sensor threshold breach was removed entirely (see
+        // Page.php's buildDeviceIssues()) — these sensor readings alone no
+        // longer produce any issue, so every Critical/Warning device below
+        // is given a matching Alert Rule fixture; the sensor rows stay
+        // (harmless, unused-for-severity) purely as realistic fixture data.
+        $criticalRule = AlertRule::factory()->create([
+            'name' => 'TV ceiling fixture critical alert',
+            'severity' => 'critical',
+        ]);
+        $warningRule = AlertRule::factory()->create([
+            'name' => 'TV ceiling fixture warning alert',
+            'severity' => 'warning',
+        ]);
+
         $criticalIds = [];
         for ($i = 1; $i <= 7; $i++) {
             $critical = $makeServer("tv-ceiling-critical-{$i}.example.com");
@@ -1467,6 +1669,7 @@ class DeviceAccessTest extends TestCase
                 'sensor_current' => 90 + $i, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
                 'sensor_alert' => 1, 'lastupdate' => now(),
             ]);
+            Alert::factory()->create(['device_id' => $critical->device_id, 'rule_id' => $criticalRule->id]);
             $criticalIds[] = $critical->device_id;
         }
 
@@ -1478,6 +1681,7 @@ class DeviceAccessTest extends TestCase
                 'sensor_current' => 75, 'sensor_limit' => 95, 'sensor_limit_warn' => 70,
                 'sensor_alert' => 1, 'lastupdate' => now(),
             ]);
+            Alert::factory()->create(['device_id' => $warning->device_id, 'rule_id' => $warningRule->id]);
             $warningIds[] = $warning->device_id;
         }
 
@@ -1799,6 +2003,893 @@ class DeviceAccessTest extends TestCase
 
             $this->assertGreaterThan($markerPosition['Other Locations'], $otherDevicePosition, "$viewLabel HTML: the Other-location fixture device must render after the Other Locations heading.");
         }
+    }
+
+    /**
+     * Gate E regression matrix for Support\OperationalPolicy (Layer 3
+     * fallback) — proves the core principle this redesign is built on:
+     * "a technical failure is not automatically an operationally
+     * critical incident". Every fixture here deliberately has NO
+     * matching Alert Rule, so the observed severity comes only from
+     * OperationalPolicy's own default policy, never from
+     * Support\AlertRules — the moment an administrator configures a
+     * real rule, that separate code path takes over entirely (already
+     * covered by testAlertRuleInclusionDefaultsToEverythingAndRespects
+     * AnExplicitAdministratorSelection and the Caso A-F test above).
+     */
+    public function testOperationalPolicyFallbackSeverityFollowsTheOperationalCriticalPolicyMatrix(): void
+    {
+        $location = Location::factory()->create(['location' => 'Policy Fallback Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Caso 1: a kitchen-printer-style peripheral going DOWN is a
+        // real technical failure and must stay visible, but is not
+        // automatically an operationally critical incident — the
+        // mission's own opening example.
+        $peripheralDown = $makeDevice('kitchen-printer.example.com', 0);
+
+        // Caso 2: the same raw condition (Device Down), but on a
+        // device the administrator has placed in the Operational
+        // Critical group — a production cluster being unreachable IS
+        // Critical.
+        $clusterDown = $makeDevice('production-cluster.example.com', 0);
+        $criticalGroup->devices()->attach($clusterDown->device_id);
+
+        // Caso 3: a critical server's own numeric sensor breaching a
+        // Critical threshold, with no Alert Rule covering it yet — the
+        // condition must not be silently hidden just because no rule
+        // exists, and its severity follows the device's Operational
+        // Critical membership.
+        $criticalServerSensor = $makeDevice('critical-db-server.example.com', 1);
+        $criticalGroup->devices()->attach($criticalServerSensor->device_id);
+        Sensor::factory()->for($criticalServerSensor)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Server Ambient',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        // Caso 4: "Cluster Power Supply 2 = Failed" — a state sensor
+        // LibreNMS itself decodes as Critical (state_generic_value=2),
+        // again with no Alert Rule attached, on an Operational Critical
+        // device.
+        $clusterStateSensorFailed = $makeDevice('cluster-psu.example.com', 1);
+        $criticalGroup->devices()->attach($clusterStateSensorFailed->device_id);
+        $psuSensor = Sensor::factory()->for($clusterStateSensorFailed)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 2',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $psuStateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'policy-fallback-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $psuSensor->sensor_id,
+            'state_index_id' => $psuStateIndexId,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $psuStateIndexId,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        // Caso 5: service_status=1 is Warning for every device, critical
+        // or not — the mission's policy matrix makes no distinction here.
+        $serviceWarningStandard = $makeDevice('manageengine-agent.example.com', 1);
+        Service::factory()->for($serviceWarningStandard)->create([
+            'service_name' => 'ManageEngine Patch Status',
+            'service_status' => 1,
+            'service_message' => '3 pending patches',
+        ]);
+
+        // Caso 6: service_status=2 is Critical for every device by
+        // default (unlike Device Down/sensor conditions) — a specific
+        // failing service check is a stronger signal than the device's
+        // own infrastructure tier. $serviceCriticalStandard is
+        // deliberately NOT in the Operational Critical group.
+        $serviceCriticalStandard = $makeDevice('sophos-agent.example.com', 1);
+        Service::factory()->for($serviceCriticalStandard)->create([
+            'service_name' => 'Sophos Tamper Protection',
+            'service_status' => 2,
+            'service_message' => 'Tamper protection disabled',
+        ]);
+
+        // Caso 7: service_status=3 (Unknown) must never become Critical
+        // on its own — proven here on an Operational Critical device
+        // specifically, the case most likely to accidentally leak into
+        // Critical if this were implemented as "any nonzero status on a
+        // critical device is Critical".
+        $serviceUnknownOnCritical = $makeDevice('critical-unknown-service.example.com', 1);
+        $criticalGroup->devices()->attach($serviceUnknownOnCritical->device_id);
+        Service::factory()->for($serviceUnknownOnCritical)->create([
+            'service_name' => 'Undetermined check',
+            'service_status' => 3,
+            'service_message' => 'Check could not determine state',
+        ]);
+
+        // Caso 8: a real Warning-severity Alert Rule on an Operational
+        // Critical, currently-DOWN device must fully replace the
+        // fallback, not merge/escalate with it — the device must show
+        // exactly what the administrator's rule says (Warning), never
+        // the Critical the Device Down fallback would otherwise produce.
+        $alertOutranksFallback = $makeDevice('alert-covered-critical.example.com', 0);
+        $criticalGroup->devices()->attach($alertOutranksFallback->device_id);
+        $outrankingRule = AlertRule::factory()->create([
+            'name' => 'Deliberately scoped down to Warning',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $alertOutranksFallback->device_id,
+            'rule_id' => $outrankingRule->id,
+        ]);
+
+        // Caso 9: an active LibreNMS maintenance window suppresses the
+        // fallback exactly as it already does for Alert Rule-sourced
+        // issues — proven on an Operational Critical, currently-DOWN
+        // device with zero Alert Rules at all, so only the fallback's
+        // own maintenance gate (not an Alert Rule's own suppression)
+        // could be responsible for the result.
+        $maintenanceSuppressesFallback = $makeDevice('maintained-critical-cluster.example.com', 0);
+        $criticalGroup->devices()->attach($maintenanceSuppressesFallback->device_id);
+        $maintenanceSchedule = AlertSchedule::factory()->create([
+            'title' => 'Policy fallback maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenanceSchedule->devices()->attach($maintenanceSuppressesFallback->device_id);
+
+        // Caso 10: an old Critical-looking event log entry must never
+        // elevate a device's CURRENT severity — Priority Attention
+        // ordering (Section 14) is explicit that EventLog is context
+        // only. $eventLogDevice's only current condition is a Warning
+        // service; if EventLog participated in severity at all, this
+        // would incorrectly resolve to critical.
+        $eventLogDevice = $makeDevice('old-critical-event.example.com', 1);
+        Service::factory()->for($eventLogDevice)->create([
+            'service_name' => 'Background Sync',
+            'service_status' => 1,
+            'service_message' => 'Retrying',
+        ]);
+        DB::table('eventlog')->insert([
+            'device_id' => $eventLogDevice->device_id,
+            'datetime' => now()->subHours(2),
+            'message' => 'CRITICAL: historical event, must not affect current severity',
+        ]);
+
+        // Case A (Gate B): an unrelated Warning Alert Rule on an
+        // Operational Critical device must NOT suppress a genuinely
+        // uncovered Critical hardware condition on that same device —
+        // this is the exact device-wide "any alert suppresses
+        // everything" bug this redesign exists to fix.
+        $unrelatedAlertUncoveredSensor = $makeDevice('unrelated-alert-uncovered-sensor.example.com', 1);
+        $criticalGroup->devices()->attach($unrelatedAlertUncoveredSensor->device_id);
+        $unrelatedRule = AlertRule::factory()->create([
+            'name' => 'ManageEngine Pending Patches',
+            'severity' => 'warning',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $unrelatedAlertUncoveredSensor->device_id,
+            'rule_id' => $unrelatedRule->id,
+        ]);
+        $psuSensorA = Sensor::factory()->for($unrelatedAlertUncoveredSensor)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $psuStateIndexIdA = DB::table('state_indexes')->insertGetId(['state_name' => 'case-a-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $psuSensorA->sensor_id,
+            'state_index_id' => $psuStateIndexIdA,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $psuStateIndexIdA,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        // Case B/C (final hardening): tagging a rule "Sensors" in
+        // Settings is administrative documentation ONLY — it must NEVER
+        // suppress a sensor fallback, because no exact per-sensor
+        // identity exists to confirm the rule actually covers a given
+        // sensor. Two different sensors on the same device, both
+        // "covered" only by category tag (never by exact identity):
+        // BOTH fallbacks must remain. Safe visual duplicate over a
+        // hidden incident.
+        //
+        // REGRESSION NOTE: the Power Supply and Fan sensors below are
+        // deliberately different LibreNMS sensor_class values ('state'
+        // vs 'fanspeed'), not two 'state'-class sensors. This is not
+        // about OperationalPolicy's own correlation logic — it is
+        // because Page::genericTelemetry()/sensorMetric() (pre-existing,
+        // unrelated telemetry curation, documented at length in
+        // buildTelemetry()) already summarizes ALL same-sensor_class
+        // instances into a single "worst of N" telemetry entry per
+        // device, by design (e.g. "Signal (worst of 82)") — a real,
+        // separate behavior this correlation-hardening pass does not
+        // touch. Two 'state'-class sensors here would collapse into one
+        // telemetry metric before OperationalPolicy ever sees them,
+        // which would test that pre-existing curation, not condition-
+        // level correlation. Using two distinct sensor classes gives
+        // each condition its own telemetry entry/sensor_id, which is
+        // exactly what this test needs to isolate.
+        $coveredSensorDevice = $makeDevice('covered-sensor.example.com', 1);
+        $criticalGroup->devices()->attach($coveredSensorDevice->device_id);
+        $sensorCoveringRule = AlertRule::factory()->create([
+            'name' => 'Hardware Sensor Alert Rule',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $coveredSensorDevice->device_id,
+            'rule_id' => $sensorCoveringRule->id,
+        ]);
+        $psuSensorB = Sensor::factory()->for($coveredSensorDevice)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $psuStateIndexIdB = DB::table('state_indexes')->insertGetId(['state_name' => 'case-b-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $psuSensorB->sensor_id,
+            'state_index_id' => $psuStateIndexIdB,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $psuStateIndexIdB,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+        $fanSensorB = Sensor::factory()->for($coveredSensorDevice)->create([
+            'sensor_class' => 'fanspeed',
+            'sensor_descr' => 'Fan 1',
+            'sensor_current' => 0,
+            'sensor_limit_low' => 500,
+            'sensor_limit_low_warn' => 1000,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        // Case C (Gate B): multiple genuinely uncovered conditions on
+        // the same device must ALL surface — an unrelated rule must
+        // not black out the rest, and "uncovered" must not collapse
+        // to only one fallback firing. Same distinct-sensor_class
+        // reasoning as Case B/C above.
+        $multiUncoveredDevice = $makeDevice('multi-uncovered.example.com', 1);
+        $criticalGroup->devices()->attach($multiUncoveredDevice->device_id);
+        Alert::factory()->create([
+            'device_id' => $multiUncoveredDevice->device_id,
+            'rule_id' => $unrelatedRule->id,
+        ]);
+        $psuSensorC = Sensor::factory()->for($multiUncoveredDevice)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $psuStateIndexIdC = DB::table('state_indexes')->insertGetId(['state_name' => 'case-c-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $psuSensorC->sensor_id,
+            'state_index_id' => $psuStateIndexIdC,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $psuStateIndexIdC,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+        $fanSensorC = Sensor::factory()->for($multiUncoveredDevice)->create([
+            'sensor_class' => 'fanspeed',
+            'sensor_descr' => 'Fan 1',
+            'sensor_current' => 0,
+            'sensor_limit_low' => 500,
+            'sensor_limit_low_warn' => 1000,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        // Case D (final hardening): a rule tagged "Services" must never
+        // hide a DIFFERENT failing service — same reasoning as sensors,
+        // no exact per-service identity exists to correlate against.
+        $serviceTagDevice = $makeDevice('service-tag-unrelated.example.com', 1);
+        $serviceCoveringRule = AlertRule::factory()->create([
+            'name' => 'Service Health Alert Rule',
+            'severity' => 'critical',
+        ]);
+        Alert::factory()->create([
+            'device_id' => $serviceTagDevice->device_id,
+            'rule_id' => $serviceCoveringRule->id,
+        ]);
+        Service::factory()->for($serviceTagDevice)->create([
+            'service_name' => 'Unrelated Failing Service',
+            'service_status' => 2,
+            'service_message' => 'Genuinely different service, not covered by the tagged rule',
+        ]);
+
+        // Case E (final hardening): a sensor/service-tagged Alert Rule
+        // must never hide Device Down — only a rule tagged "Device
+        // Down" itself may suppress that fallback.
+        $deviceDownNotHidden = $makeDevice('device-down-not-hidden.example.com', 0);
+        Alert::factory()->create([
+            'device_id' => $deviceDownNotHidden->device_id,
+            'rule_id' => $serviceCoveringRule->id,
+        ]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data(
+            [
+                'operational_critical_group_name' => 'Operational Critical',
+                AlertRules::CONDITION_SETTING_KEY => [
+                    (string) $outrankingRule->id => ['device_down'],
+                    (string) $sensorCoveringRule->id => ['sensor'],
+                    (string) $serviceCoveringRule->id => ['service'],
+                ],
+            ],
+            $request
+        );
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertSame('warning', $devices->get($peripheralDown->device_id)['health'], 'Caso 1: a non-critical device going down is Warning, not Critical.');
+        $this->assertFalse($devices->get($peripheralDown->device_id)['operationally_critical']);
+        $this->assertTrue($devices->get($peripheralDown->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'device' && $issue['severity'] === 'warning'
+        ));
+
+        $this->assertSame('critical', $devices->get($clusterDown->device_id)['health'], 'Caso 2: an Operational Critical device going down is Critical.');
+        $this->assertTrue($devices->get($clusterDown->device_id)['operationally_critical']);
+
+        $this->assertSame('critical', $devices->get($criticalServerSensor->device_id)['health'], 'Caso 3: a Critical numeric sensor on a critical server, no Alert Rule yet, is Critical.');
+        $this->assertTrue($devices->get($criticalServerSensor->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'sensor'
+                && $issue['severity'] === 'critical'
+                && str_contains($issue['description'], 'no active Alert Rule covers this')
+        ));
+
+        $this->assertSame('critical', $devices->get($clusterStateSensorFailed->device_id)['health'], 'Caso 4: a Critical state sensor (Power Supply 2 = Failed) on a critical cluster is Critical.');
+
+        $this->assertSame('warning', $devices->get($serviceWarningStandard->device_id)['health'], 'Caso 5: service_status=1 is Warning.');
+
+        $this->assertSame('critical', $devices->get($serviceCriticalStandard->device_id)['health'], 'Caso 6: service_status=2 (Sophos Tamper Protection disabled) is Critical for every device by default, not just Operational Critical ones.');
+        $this->assertFalse($devices->get($serviceCriticalStandard->device_id)['operationally_critical']);
+
+        $this->assertSame('warning', $devices->get($serviceUnknownOnCritical->device_id)['health'], 'Caso 7: service_status=3 (Unknown) never becomes Critical, even on an Operational Critical device.');
+
+        $this->assertSame('warning', $devices->get($alertOutranksFallback->device_id)['health'], 'Caso 8: a real Warning Alert Rule, tagged as covering Device Down, fully replaces the Critical the Device Down fallback would otherwise produce for that condition — it never merges/escalates.');
+        $this->assertFalse($devices->get($alertOutranksFallback->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'device',
+        ), 'Caso 8: the fallback device-down issue must not exist once the covering Alert Rule issue exists for that same condition.');
+
+        $this->assertSame('critical', $devices->get($unrelatedAlertUncoveredSensor->device_id)['health'], 'Case A: an unrelated Warning Alert Rule must not suppress an uncovered Critical hardware condition on the same device.');
+        $this->assertTrue($devices->get($unrelatedAlertUncoveredSensor->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'alert'
+        ), 'Case A: the unrelated alert issue itself must remain.');
+        $this->assertTrue($devices->get($unrelatedAlertUncoveredSensor->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'sensor' && $issue['severity'] === 'critical'
+        ), 'Case A: the uncovered PSU sensor fallback must coexist with the unrelated alert, not be hidden by it.');
+
+        $coveredSensorIssues = $devices->get($coveredSensorDevice->device_id)['issues'];
+        $this->assertTrue(
+            $coveredSensorIssues->contains(fn (array $issue): bool => $issue['source'] === 'alert'),
+            'Case B: the tagged Alert Rule issue remains present.'
+        );
+        $this->assertSame(
+            2,
+            $coveredSensorIssues->filter(fn (array $issue): bool => $issue['source'] === 'sensor' && $issue['severity'] === 'critical')->count(),
+            'Case B/C: a "Sensors" category tag must NEVER suppress a sensor fallback — no exact per-sensor identity exists to confirm the rule actually covers either sensor, so BOTH the Power Supply and Fan fallbacks remain alongside the tagged Alert Rule. A safe visual duplicate is required over a hidden incident.'
+        );
+
+        $multiIssues = $devices->get($multiUncoveredDevice->device_id)['issues'];
+        $this->assertTrue(
+            $multiIssues->contains(fn (array $issue): bool => $issue['source'] === 'alert'),
+            'Case C: the unrelated alert issue remains alongside both uncovered sensor fallbacks.'
+        );
+        $this->assertSame(
+            2,
+            $multiIssues->filter(fn (array $issue): bool => $issue['source'] === 'sensor' && $issue['severity'] === 'critical')->count(),
+            'Case C: both uncovered sensor fallbacks (Power Supply and Fan) coexist — being uncovered never collapses to only one.'
+        );
+
+        $serviceTagIssues = $devices->get($serviceTagDevice->device_id)['issues'];
+        $this->assertTrue(
+            $serviceTagIssues->contains(fn (array $issue): bool => $issue['source'] === 'alert'),
+            'Case D: the tagged Service Alert Rule issue remains present.'
+        );
+        $this->assertTrue(
+            $serviceTagIssues->contains(fn (array $issue): bool => $issue['source'] === 'service' && $issue['severity'] === 'critical'),
+            'Case D: a "Services" category tag must NEVER hide a DIFFERENT failing service — no exact per-service identity exists to confirm the rule actually covers this specific service.'
+        );
+
+        $deviceDownIssues = $devices->get($deviceDownNotHidden->device_id)['issues'];
+        $this->assertTrue(
+            $deviceDownIssues->contains(fn (array $issue): bool => $issue['source'] === 'device'),
+            'Case E: a Service-tagged Alert Rule must never suppress the Device Down fallback — only a rule tagged "Device Down" itself may.'
+        );
+
+        $this->assertSame('maintenance', $devices->get($maintenanceSuppressesFallback->device_id)['health'], 'Caso 9: an active maintenance window suppresses the fallback exactly as it does Alert Rule-sourced issues.');
+        $this->assertTrue($devices->get($maintenanceSuppressesFallback->device_id)['issues']->isEmpty());
+
+        $this->assertSame('warning', $devices->get($eventLogDevice->device_id)['health'], 'Caso 10: an old Critical-looking EventLog entry must never elevate current severity above what the live service status warrants.');
+        $this->assertGreaterThan(0, $devices->get($eventLogDevice->device_id)['recent_event_count'], 'Caso 10: the event is genuinely present as context, not silently dropped — it simply does not drive severity.');
+    }
+
+    /**
+     * Gate C — the administrator-configurable operational severity
+     * policy itself: severity overrides, per-category enable/disable,
+     * the maintenance-suppression toggle, and fail-safe handling of an
+     * invalid persisted value. Each scenario is intentionally isolated
+     * to its own device so one setting change cannot be mistaken for
+     * affecting another device's outcome.
+     */
+    public function testConfigurableOperationalSeverityPolicyOverridesAndFailSafeDefaults(): void
+    {
+        $location = Location::factory()->create(['location' => 'Policy Config Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Case F (configurability demo): a normal device's Device Down
+        // severity overridden to Disabled — a real, existing choice
+        // (never UNKNOWN/"Informational", which does not exist as a
+        // policy choice — see the dedicated UNKNOWN-semantics
+        // assertions below) — without touching any source code.
+        $configuredNormalDown = $makeDevice('configured-normal-down.example.com', 0);
+
+        // Case G: a disabled numeric sensor fallback must never
+        // generate an issue for an otherwise-Critical numeric sensor,
+        // while the sensor's own telemetry stays fully visible.
+        $disabledSensorFallback = $makeDevice('disabled-sensor-fallback.example.com', 1);
+        $criticalGroup->devices()->attach($disabledSensorFallback->device_id);
+        Sensor::factory()->for($disabledSensorFallback)->create([
+            'sensor_class' => 'temperature',
+            'sensor_descr' => 'Server Ambient',
+            'sensor_current' => 95,
+            'sensor_limit' => 80,
+            'sensor_limit_warn' => 70,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        // Case I (configurability demo): an UNKNOWN (status=3) service
+        // check overridden to Disabled instead of the default Warning.
+        $configuredUnknownService = $makeDevice('configured-unknown-service.example.com', 1);
+        Service::factory()->for($configuredUnknownService)->create([
+            'service_name' => 'Undetermined check',
+            'service_status' => 3,
+            'service_message' => 'Check could not determine state',
+        ]);
+
+        // Case K: an invalid persisted severity choice ("banana") must
+        // never reach OperationalPolicy — Support\Config::resolve()'s
+        // own choice-type validation is the single authority here, so
+        // this device must fall back to the documented safe default
+        // (Warning) exactly as if nothing had been configured at all.
+        // Uses a normal (non-Operational-Critical) device with a
+        // Critical STATE sensor (fallback_state_sensor_normal_severity
+        // is the one setting given the invalid value below) so this
+        // case is unaffected by Case G's numeric-sensor-fallback
+        // disable and by Case F's Device Down setting.
+        $invalidConfigDevice = $makeDevice('invalid-config-device.example.com', 1);
+        $invalidConfigPsu = Sensor::factory()->for($invalidConfigDevice)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $invalidConfigStateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'case-k-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $invalidConfigPsu->sensor_id,
+            'state_index_id' => $invalidConfigStateIndexId,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $invalidConfigStateIndexId,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        // Case F (UNKNOWN semantics): a legacy-persisted 'unknown'
+        // value (from before this hardening, when it was briefly
+        // offered as a fake "Informational") must fail safely to the
+        // documented default (Critical for an Operational Critical
+        // device's state sensor) exactly like any other invalid value
+        // — never treated as a real choice, since UNKNOWN is not (and
+        // must never become) a policy option.
+        $legacyUnknownConfigDevice = $makeDevice('legacy-unknown-config.example.com', 1);
+        $criticalGroup->devices()->attach($legacyUnknownConfigDevice->device_id);
+        $legacyUnknownPsu = Sensor::factory()->for($legacyUnknownConfigDevice)->create([
+            'sensor_class' => 'state',
+            'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        $legacyUnknownStateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'case-f-psu-state']);
+        DB::table('sensors_to_state_indexes')->insert([
+            'sensor_id' => $legacyUnknownPsu->sensor_id,
+            'state_index_id' => $legacyUnknownStateIndexId,
+        ]);
+        DB::table('state_translations')->insert([
+            'state_index_id' => $legacyUnknownStateIndexId,
+            'state_descr' => 'Failed',
+            'state_value' => 2,
+            'state_generic_value' => 2,
+        ]);
+
+        // Case J: maintenance suppression itself is configurable —
+        // with it turned off, an active maintenance window must no
+        // longer blank out the fallback.
+        //
+        // REGRESSION NOTE: this device is deliberately placed in the
+        // Operational Critical group so its Device Down severity
+        // resolves via fallback_device_down_critical_group_severity
+        // (left at its default 'critical' below), never via
+        // fallback_device_down_normal_severity — which Case F above
+        // deliberately sets to 'disabled' as part of a DIFFERENT
+        // scenario sharing this same settings payload. A normal
+        // (non-critical-group) device here would have its fallback
+        // suppressed by Case F's unrelated severity override, not by
+        // the maintenance-suppression setting this case actually
+        // exists to test — a real prior test bug that produced the
+        // exact "still suppressed" symptom of a genuine maintenance-
+        // override defect without one actually being present.
+        $maintenanceNotSuppressed = $makeDevice('maintenance-not-suppressed.example.com', 0);
+        $criticalGroup->devices()->attach($maintenanceNotSuppressed->device_id);
+        $maintenanceSchedule = AlertSchedule::factory()->create([
+            'title' => 'Gate C maintenance window',
+            'start' => now()->subHour(),
+            'end' => now()->addHour(),
+            'behavior' => 1,
+        ]);
+        $maintenanceSchedule->devices()->attach($maintenanceNotSuppressed->device_id);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+        $payload = (new Page())->data(
+            [
+                'operational_critical_group_name' => 'Operational Critical',
+                'fallback_device_down_normal_severity' => 'disabled',
+                'fallback_numeric_sensor_enabled' => '0',
+                'fallback_state_sensor_normal_severity' => 'banana',
+                'fallback_state_sensor_critical_group_severity' => 'unknown',
+                'fallback_service_unknown_severity' => 'disabled',
+                'fallback_suppress_during_maintenance' => '0',
+            ],
+            $request
+        );
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertFalse(
+            $devices->get($configuredNormalDown->device_id)['issues']->contains(fn (array $issue): bool => $issue['source'] === 'device'),
+            'Case F: an administrator-configured Disabled Device Down severity generates no issue.'
+        );
+
+        $disabledSensorFallbackDevice = $devices->get($disabledSensorFallback->device_id);
+        $this->assertFalse(
+            $disabledSensorFallbackDevice['issues']->contains(fn (array $issue): bool => $issue['source'] === 'sensor'),
+            'Case G: a disabled numeric sensor fallback must generate no issue at all.'
+        );
+        $this->assertTrue(
+            $disabledSensorFallbackDevice['telemetry']->contains(fn (array $metric): bool => $metric['state'] === 'critical'),
+            'Case G: the underlying sensor telemetry must remain visible even though no issue was generated for it.'
+        );
+
+        $this->assertFalse(
+            $devices->get($configuredUnknownService->device_id)['issues']->contains(fn (array $issue): bool => $issue['source'] === 'service'),
+            'Case I: an administrator-configured Disabled severity for service status UNKNOWN generates no issue.'
+        );
+
+        $this->assertSame('warning', $devices->get($invalidConfigDevice->device_id)['health'], 'Case K: an invalid persisted severity choice ("banana") safely falls back to the documented default (Warning), never an exception or a malformed severity.');
+
+        // Case F (UNKNOWN semantics): Config::FIELDS must never offer
+        // 'unknown' as a choice for any operational_severity_policy
+        // field — UNKNOWN is a real technical state (Needs Review),
+        // never a fake "Informational" policy severity.
+        foreach (Config::FIELDS as $key => $field) {
+            if (($field['group'] ?? null) !== 'operational_severity_policy' || $field['type'] !== 'choice') {
+                continue;
+            }
+
+            $this->assertArrayNotHasKey(
+                'unknown',
+                $field['options'],
+                "Case F: Settings must never offer 'unknown' as an Operational Severity Policy choice ($key) — no real Informational severity tier exists in this dashboard."
+            );
+        }
+
+        // A legacy-persisted 'unknown' value (saved before this
+        // hardening) must fail safely to the documented default
+        // (Critical for an Operational Critical device's state sensor),
+        // exactly like the "banana" case above — never treated as a
+        // real choice.
+        $this->assertSame(
+            'critical',
+            $devices->get($legacyUnknownConfigDevice->device_id)['health'],
+            'Case F: a legacy-persisted "unknown" severity value safely falls back to the documented default (Critical), never a fake Informational state.'
+        );
+
+        $this->assertSame(
+            'critical',
+            $devices->get($maintenanceNotSuppressed->device_id)['health'],
+            'Case J: with fallback_suppress_during_maintenance turned off, the Operational Critical Device Down fallback must be evaluated normally (Critical) despite the active maintenance window, not blanked out.'
+        );
+        $this->assertTrue(
+            $devices->get($maintenanceNotSuppressed->device_id)['issues']->contains(fn (array $issue): bool => $issue['source'] === 'device'),
+            'Case J: the Device Down fallback must be generated when maintenance suppression is disabled.'
+        );
+    }
+
+    /**
+     * Section 25's "Policy Health" panel. RefreshDatabase gives each
+     * test its own isolated, rolled-back transaction, so — unlike
+     * AlertRules::available()'s own docblock caveat about a shared
+     * instance — this fixture can safely assert exact counts for
+     * every one of PolicyHealth's six checks without any risk of
+     * leftover state from another test method's own Alert Rule/
+     * Device Group fixtures leaking in.
+     */
+    public function testPolicyHealthReflectsRealConfigurationAndIsAdminOnly(): void
+    {
+        $location = Location::factory()->create(['location' => 'Policy Health Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Group check: OK, exactly one member.
+        $groupMember = $makeDevice('policy-health-group-member.example.com', 1);
+        $criticalGroup->devices()->attach($groupMember->device_id);
+
+        // Rule-name checks (informational, name-substring heuristic
+        // only): both a "down" rule and a "service" rule exist, so
+        // both resolve OK — never parsed for whether they would
+        // actually fire, only whether a rule by that kind of name is
+        // present at all.
+        $downRule = AlertRule::factory()->create(['name' => 'Device Down — Critical Infrastructure']);
+        $serviceRule = AlertRule::factory()->create(['name' => 'Sophos Health Check Service']);
+
+        // Fallback-coverage check: exactly one device currently has a
+        // Critical/Warning condition with no Alert Rule attached at
+        // all (Device Down, no Alert Rule of any kind on this
+        // device_id) — must be counted, not silently absorbed.
+        $fallbackDevice = $makeDevice('policy-health-fallback-device.example.com', 0);
+
+        // Overlapping-alert check: exactly one device has two
+        // distinct Alert Rules firing at the same time.
+        $overlapDevice = $makeDevice('policy-health-overlap-device.example.com', 1);
+        Alert::factory()->create(['device_id' => $overlapDevice->device_id, 'rule_id' => $downRule->id]);
+        Alert::factory()->create(['device_id' => $overlapDevice->device_id, 'rule_id' => $serviceRule->id]);
+
+        $admin = User::factory()->create(['enabled' => 1]);
+        $admin->assignRole('admin');
+        $adminRequest = Request::create('/plugin/IdfDashboard');
+        $adminRequest->setUserResolver(fn (): User => $admin);
+        $adminPayload = (new Page())->data(
+            ['operational_critical_group_name' => 'Operational Critical'],
+            $adminRequest
+        );
+
+        $this->assertIsArray($adminPayload['policyHealth'], 'An admin request must receive the Policy Health payload.');
+        $this->assertCount(8, $adminPayload['policyHealth'], 'All eight PolicyHealth checks must be present, in a stable order (Gate D added condition-coverage and fallback-categories checks).');
+
+        $checks = $adminPayload['policyHealth'];
+
+        $this->assertSame('ok', $checks[0]['status']);
+        $this->assertStringContainsString('Operational Critical', $checks[0]['label']);
+        $this->assertStringContainsString('1 member', $checks[0]['label']);
+
+        $this->assertSame('ok', $checks[1]['status']);
+        $this->assertStringContainsString('2 of 2', $checks[1]['label'], 'Both rules are included by default — no explicit idf_included_alert_rule_ids setting was saved in this fixture.');
+
+        $this->assertSame('info', $checks[2]['status']);
+        $this->assertStringContainsString('has been tagged', $checks[2]['label'], 'Neither rule was tagged with a condition category in this fixture — informational, never hides the fallback.');
+
+        $this->assertSame('ok', $checks[3]['status']);
+        $this->assertStringContainsString('Device Down — Critical Infrastructure', $checks[3]['label']);
+
+        $this->assertSame('ok', $checks[4]['status']);
+        $this->assertStringContainsString('Sophos Health Check Service', $checks[4]['label']);
+
+        $this->assertSame('ok', $checks[5]['status']);
+        $this->assertStringContainsString('Every fallback category', $checks[5]['label'], 'No fallback_*_enabled setting was saved in this fixture, so every category defaults to enabled.');
+
+        $this->assertSame('info', $checks[6]['status']);
+        $this->assertStringContainsString('1 device', $checks[6]['label']);
+        $this->assertStringContainsString('default fallback policy', $checks[6]['label']);
+
+        $this->assertSame('warning', $checks[7]['status']);
+        $this->assertStringContainsString('1 device', $checks[7]['label']);
+        $this->assertStringContainsString('more than one active Alert Rule', $checks[7]['label']);
+
+        $adminHtml = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $adminPayload
+        )->render();
+        // Checked by the exact opening HTML tag, not a bare
+        // "infra-policy-health" class-name substring. Real CI (twice
+        // now) proved a plain substring is not safe here: this
+        // <style> block also unconditionally renders the CSS *rules*
+        // that style .infra-policy-health (background/border color,
+        // the summary color, and the body.tv-mode-active hide rule),
+        // every one of which contains that same class name as a CSS
+        // selector, for every visitor, admin or not — a class name
+        // has no special immunity to this any more than the earlier
+        // "Policy Health" text substring did. '<details
+        // class="infra-policy-health">' is the literal opening tag
+        // Blade only ever emits from inside the real
+        // @if($policyHealth !== null) block (page.blade.php ~line
+        // 2051) — it cannot appear in a CSS selector (those read
+        // ".infra-policy-health { ... }", never "<details
+        // class=..."), so this is the first check in this test that
+        // is genuinely unambiguous regardless of what any nearby
+        // comment or CSS rule happens to say.
+        $this->assertStringContainsString('<details class="infra-policy-health">', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
+        $this->assertStringContainsString('Sophos Health Check Service', $adminHtml);
+
+        $viewer = User::factory()->create(['enabled' => 1]);
+        $viewer->assignRole('global-read');
+        $viewerRequest = Request::create('/plugin/IdfDashboard');
+        $viewerRequest->setUserResolver(fn (): User => $viewer);
+        $viewerPayload = (new Page())->data(
+            ['operational_critical_group_name' => 'Operational Critical'],
+            $viewerRequest
+        );
+
+        $this->assertNull($viewerPayload['policyHealth'], 'A non-admin request must never receive the Policy Health diagnostic payload.');
+
+        $viewerHtml = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $viewerPayload
+        )->render();
+        // Same reasoning as the admin-positive check above, mirrored:
+        // the CSS *rules* for .infra-policy-health are legitimately
+        // present in this page's <style> block for every visitor
+        // regardless of role (that is normal, harmless stylesheet
+        // architecture, not an information leak — a CSS selector
+        // existing does not disclose that any element using it is
+        // actually on the page). What must genuinely be absent for a
+        // non-admin is the opening <details> tag itself; checking for
+        // the bare class name would incorrectly fail for every user,
+        // not just a non-admin, since the stylesheet is role-agnostic
+        // by design.
+        $this->assertStringNotContainsString('<details class="infra-policy-health">', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
+    }
+
+    /**
+     * Mission Section 30's two remaining "healthy — no false issue"
+     * scenarios: a healthy UPS's live telemetry must stay visible
+     * (not merely absent-of-an-issue, genuinely rendered), and a
+     * healthy Sophos service check must never itself become an issue.
+     * Both are proven true through the real Blade render, not just
+     * through Page::data()'s array shape — a metric/service that is
+     * correctly excluded from the *issue* list but never actually
+     * reaches the compiled HTML at all would still fail the mission's
+     * own "live telemetry remains visible" requirement.
+     */
+    public function testHealthyUpsTelemetryRemainsVisibleAndHealthySophosProducesNoIssue(): void
+    {
+        $location = Location::factory()->create(['location' => 'Healthy Telemetry Fixture']);
+
+        $healthyUps = Device::factory()->create([
+            'display' => 'Healthy UPS',
+            'hostname' => 'policy-health-ups.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        // buildTelemetry()'s 'ups' role curates exactly two readings —
+        // Input Voltage and Battery Charge (Page.php ~line 2017) — both
+        // are required for a genuinely, fully "healthy UPS" fixture.
+        // Real CI caught the gap this comment now documents: providing
+        // only Battery Charge left Input Voltage resolving through
+        // unavailableSensorMetric() to Severity::NO_SENSOR, and
+        // buildDeviceIssues()'s own pre-existing (not this session's)
+        // NO_SENSOR handling (~line 1624) correctly, intentionally
+        // pushes one informational 'missing sensor' issue for that —
+        // exactly the mission's own Section 6 "Missing required sensor
+        // -> Needs Review" policy, not a defect in either this fixture's
+        // battery reading or this session's OperationalPolicy/
+        // PolicyHealth work. A safely-healthy Input Voltage sensor
+        // (well below both threshold values, mirroring the explicit-
+        // threshold pattern already proven correct by Caso 3's Critical
+        // sensor fixture) closes that gap.
+        Sensor::factory()->for($healthyUps)->create([
+            'sensor_class' => 'voltage',
+            'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 120,
+            'sensor_limit' => 140,
+            'sensor_limit_warn' => 130,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($healthyUps)->create([
+            'sensor_class' => 'charge',
+            'sensor_descr' => 'Battery Charge',
+            'sensor_current' => 95,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $healthySophosDevice = Device::factory()->create([
+            'display' => 'Healthy Sophos Endpoint',
+            'hostname' => 'policy-health-sophos.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Service::factory()->for($healthySophosDevice)->create([
+            'service_name' => 'Sophos Tamper Protection',
+            'service_status' => 0,
+            'service_message' => 'Protected',
+        ]);
+
+        $admin = User::factory()->create(['enabled' => 1]);
+        $admin->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $admin);
+        $payload = (new Page())->data([], $request);
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertSame('healthy', $devices->get($healthyUps->device_id)['health'], 'A healthy UPS with no other condition must remain Healthy, not be turned into a false issue by its own telemetry.');
+        $this->assertTrue($devices->get($healthyUps->device_id)['issues']->isEmpty(), 'A healthy battery-charge reading must not itself become an issue.');
+
+        $this->assertSame('healthy', $devices->get($healthySophosDevice->device_id)['health'], 'A healthy Sophos service check must not make the device anything other than Healthy.');
+        $this->assertFalse($devices->get($healthySophosDevice->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'service'
+        ), 'service_status=0 must never itself produce a service issue — Sophos healthy means no issue, not a hidden one.');
+
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $this->assertStringContainsString('Battery Charge', $html, 'The healthy UPS\'s curated telemetry must genuinely render on the card, not just be absent from the issue list — Section 30\'s "live telemetry remains visible" requirement.');
+        $this->assertStringNotContainsString('Sophos Tamper Protection', $html, 'A healthy service check must not appear anywhere in the rendered issue markup.');
     }
 
     private function writeVisualFixture(string $name, string $html): void

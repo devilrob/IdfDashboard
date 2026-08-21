@@ -130,6 +130,144 @@ class Config
             'help' => 'Checks GitHub at most every six hours when an administrator opens this Settings page. Installation always requires the CLI command below.',
         ],
 
+        // --- Operational Priority Policy -------------------------------
+        // The single setting Support\OperationalPolicy needs (see its own
+        // class docblock and Page::loadOperationallyCriticalDeviceIds()).
+        // Deliberately not a per-device toggle inside this plugin —
+        // membership in the named LibreNMS Device Group is the actual
+        // criticality signal, managed entirely in LibreNMS's own admin UI.
+        'operational_critical_group_name' => [
+            'type' => 'string', 'default' => 'Operational Critical', 'max_length' => 191,
+            'label' => 'Operational Critical Device Group name',
+            'group' => 'policy',
+            'help' => 'Must exactly match a LibreNMS Device Group name (case-insensitive). Devices in this group get Critical severity for an otherwise-uncovered Device Down/Service/sensor condition; every other device gets Warning for the same condition.',
+        ],
+
+        // --- Operational Severity Policy (fallback safety net) ---------
+        // Every setting here governs Support\OperationalPolicy's
+        // fallback safety net ONLY — the severity this dashboard shows
+        // for a technical condition (device down / sensor / service)
+        // that no active, administrator-selected Alert Rule EXACTLY
+        // covers for that same device. "Exactly" matters: Device Down
+        // is the one condition where a rule tagged as covering it
+        // (AlertRules::CONDITION_SETTING_KEY, "Included LibreNMS Alert
+        // Rules" section below) shares a real, exact identifier
+        // (device_id) with the fallback it replaces. A sensor/service
+        // category tag is administrative documentation only — it is
+        // never used to suppress a sensor/service fallback, because no
+        // exact per-sensor/per-service identity exists on an Alert-
+        // Rule-sourced issue in this schema (see Support\
+        // OperationalPolicy's own docblock); an unrelated Alert Rule
+        // must never hide a real, different sensor/service failure.
+        // Defaults below intentionally reproduce this project's
+        // previously-hardcoded policy matrix exactly, so upgrading to
+        // this version changes zero effective behavior for an
+        // administrator who has not opened this section.
+        //
+        // Choices are deliberately only 'critical'/'warning'/'disabled'
+        // — Severity::UNKNOWN ("Needs Review") is a real, distinct
+        // technical state (an unreadable/undecoded sensor) and is
+        // never offered here as a stand-in for "Informational"; this
+        // dashboard has no real Informational severity tier, and one is
+        // not invented for this policy. 'disabled' means this specific
+        // fallback slot never generates an issue at all (the underlying
+        // technical telemetry/service state remains visible regardless
+        // — see Config::visibilityPolicy(), which is untouched by this
+        // group).
+        'fallback_device_down_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable Device Down fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes a Device Down issue on its own — rely entirely on your own Alert Rules for this condition.',
+        ],
+        'fallback_device_down_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Device Down severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+        ],
+        'fallback_device_down_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Device Down severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+        ],
+        'fallback_numeric_sensor_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable numeric sensor fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a numeric sensor threshold on its own — the sensor reading stays visible, just not flagged as an issue.',
+        ],
+        'fallback_numeric_sensor_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Numeric sensor severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+        ],
+        'fallback_numeric_sensor_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Numeric sensor severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+        ],
+        'fallback_state_sensor_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable state sensor fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a state/discrete sensor (e.g. "Power Supply Failed") on its own — the decoded state stays visible, just not flagged as an issue.',
+        ],
+        'fallback_state_sensor_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'State sensor severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+        ],
+        'fallback_state_sensor_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'State sensor severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+        ],
+        'fallback_service_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable service check fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a LibreNMS service check on its own — the service status stays visible, just not flagged as an issue.',
+        ],
+        'fallback_service_critical_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status CRITICAL',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applies to every device by default (a failing service check is a stronger, more specific signal than infrastructure tier) — a service-category Alert Rule tag never suppresses this (no exact per-service identity is available to correlate against).',
+        ],
+        'fallback_service_warning_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status WARNING',
+            'group' => 'operational_severity_policy',
+            'help' => '',
+        ],
+        'fallback_service_unknown_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status UNKNOWN',
+            'group' => 'operational_severity_policy',
+            'help' => 'A service check that could not determine its own state — never Critical by default, since that would manufacture an outage signal from a data-quality gap.',
+        ],
+        'fallback_suppress_during_maintenance' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Suppress fallback during active LibreNMS maintenance windows',
+            'group' => 'operational_severity_policy',
+            'help' => 'Does not change LibreNMS\'s own maintenance/schedule suppression of Alert Rules — only this dashboard\'s own fallback safety net.',
+        ],
+
         // --- Default Severity shown on load ----------------------------
         'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
         'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],
@@ -144,24 +282,44 @@ class Config
             'help' => 'Controls only the "No sensor installed" counter/callouts, not device severity — a device with no curated sensor is never Critical/Warning by itself.',
         ],
 
-        // --- Default Problem types shown on load -----------------------
+        // --- Sensor coverage & data-quality checks ----------------------
+        // Renamed from "Default Problem Types Shown on Load": severity
+        // (Critical/Warning) is no longer computed by this plugin at all
+        // — it comes only from the administrator-selected LibreNMS Alert
+        // Rules (see resources/views/settings.blade.php's "Included
+        // LibreNMS Alert Rules" section). These checkboxes now control a
+        // narrower, still-genuinely-native concern: whether a *missing*
+        // sensor of this type is flagged ("No sensor installed"), and
+        // whether an *unreadable/misconfigured* sensor of this type is
+        // flagged ("Needs Review" / Unknown) — neither of those is
+        // something a LibreNMS Alert Rule condition can express, since a
+        // rule can only evaluate a sensor that already exists and already
+        // has a numeric/decoded value. 'Device down' and 'Service issue'
+        // were removed entirely: LibreNMS already has real Alert Rules
+        // for both (see the screenshots this redesign was built from —
+        // "Cisco Switch Down", "Critical Devices - Device Down",
+        // "Service Critical/Warning"), and this plugin no longer keeps a
+        // second, independent copy of that same status check.
         'default_problem_temperature' => ['type' => 'bool', 'default' => true, 'label' => 'Temperature', 'group' => 'problem', 'help' => ''],
         'default_problem_humidity' => ['type' => 'bool', 'default' => true, 'label' => 'Humidity', 'group' => 'problem', 'help' => ''],
         'default_problem_battery' => ['type' => 'bool', 'default' => true, 'label' => 'Battery', 'group' => 'problem', 'help' => ''],
         'default_problem_voltage' => ['type' => 'bool', 'default' => true, 'label' => 'Voltage', 'group' => 'problem', 'help' => ''],
         'default_problem_fan' => ['type' => 'bool', 'default' => true, 'label' => 'Fan', 'group' => 'problem', 'help' => ''],
-        'default_problem_device' => ['type' => 'bool', 'default' => true, 'label' => 'Device down', 'group' => 'problem', 'help' => ''],
-        'default_problem_service' => ['type' => 'bool', 'default' => true, 'label' => 'Service issue', 'group' => 'problem', 'help' => ''],
-        'default_problem_alert' => ['type' => 'bool', 'default' => true, 'label' => 'Alert', 'group' => 'problem', 'help' => ''],
+        // 'Alert' is deliberately not a FIELDS entry here: which real
+        // LibreNMS Alert Rules feed this dashboard's Alert issues is
+        // now a dynamic, DB-driven multi-select (Support\AlertRules),
+        // not a static bool that could only ever mean "show every
+        // rule or none". See resources/views/settings.blade.php's
+        // dedicated "Included LibreNMS Alert Rules" section.
         'default_problem_state' => ['type' => 'bool', 'default' => true, 'label' => 'State sensor', 'group' => 'problem', 'help' => 'Discrete/enum sensors such as "System Status" or "Battery Status" — decoded via LibreNMS\'s state_translations table, not a numeric threshold.'],
-        'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table. A "crashinfo" partition full at 100% is common and often benign on some vendors\' switches, so it is capped at Warning here, never auto-Critical.'],
+        'default_problem_storage' => ['type' => 'bool', 'default' => true, 'label' => 'Storage', 'group' => 'problem', 'help' => 'Filesystem/flash usage from LibreNMS\'s storage table.'],
         'default_problem_memory' => ['type' => 'bool', 'default' => true, 'label' => 'Memory', 'group' => 'problem', 'help' => 'Memory pool usage from LibreNMS\'s mempools table.'],
         'default_problem_processor' => ['type' => 'bool', 'default' => true, 'label' => 'Processor', 'group' => 'problem', 'help' => 'CPU usage from LibreNMS\'s processors table.'],
         'default_problem_stale' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Stale data',
             'group' => 'problem',
-            'help' => 'When disabled, stale readings are excluded from telemetry, severity, counters, cards, filters, and Priority Attention.',
+            'help' => 'A curated power (PDU/UPS) reading that has stopped updating but was last seen healthy still elevates the device to "Stale" while this is on — see the "Stale" severity toggle above for whether that elevation itself is shown at all.',
         ],
         'default_problem_other' => ['type' => 'bool', 'default' => true, 'label' => 'Other', 'group' => 'problem', 'help' => ''],
 
@@ -221,6 +379,15 @@ class Config
                 continue;
             }
 
+            if ($field['type'] === 'string') {
+                $candidate = $raw === null ? '' : trim((string) $raw);
+                $resolved[$key] = $candidate !== ''
+                    ? substr($candidate, 0, $field['max_length'])
+                    : $field['default'];
+
+                continue;
+            }
+
             // int
             if ($raw === null || $raw === '' || ! is_numeric($raw)) {
                 $resolved[$key] = $field['default'];
@@ -269,9 +436,18 @@ class Config
             'battery' => (bool) $config['default_problem_battery'],
             'voltage' => (bool) $config['default_problem_voltage'],
             'fan' => (bool) $config['default_problem_fan'],
-            'device' => (bool) $config['default_problem_device'],
-            'service' => (bool) $config['default_problem_service'],
-            'alert' => (bool) $config['default_problem_alert'],
+            // Deliberately no 'device'/'service' keys anymore — native
+            // Device Down/Service Issue detection was removed from
+            // Page.php entirely (real LibreNMS Alert Rules cover both),
+            // so 'device'/'service' can never appear in a device's
+            // problem_types again; keeping dead keys here would be
+            // exactly the kind of redundancy this plugin is trying to
+            // remove. Deliberately no 'alert' key here either — see the
+            // FIELDS comment above. ProblemPolicy::deviceVisible() reads
+            // $policy[$key] ?? true, so an issue of type 'alert' (which
+            // only ever exists after Support\AlertRules' own per-rule
+            // inclusion filter already ran) is never re-gated by a
+            // second, redundant boolean here.
             'state' => (bool) $config['default_problem_state'],
             'storage' => (bool) $config['default_problem_storage'],
             'memory' => (bool) $config['default_problem_memory'],
@@ -330,8 +506,13 @@ class Config
             : '';
         $category = trim((string) ($input['category'] ?? ''));
         $category = in_array($category, DeviceClassifier::CATEGORIES, true) ? $category : '';
+        // 'device'/'service'/'temperature'/'humidity'/etc. were removed:
+        // a device's problem_types array can now only ever contain
+        // 'alert', 'stale' or 'other' (see Page.php's normalizeDevice()
+        // — native per-sensor-type/device/service issue generation was
+        // replaced by administrator-selected LibreNMS Alert Rules).
         $problem = strtolower(trim((string) ($input['problem'] ?? '')));
-        $problem = in_array($problem, ['device', 'service', 'alert', 'temperature', 'humidity', 'battery', 'voltage', 'fan', 'state', 'storage', 'memory', 'processor', 'stale', 'other'], true)
+        $problem = in_array($problem, ['alert', 'stale', 'other'], true)
             ? $problem
             : '';
         $sort = strtolower(trim((string) ($input['sort'] ?? 'severity')));

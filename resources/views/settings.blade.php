@@ -65,8 +65,10 @@
                 'visual' => 'Visual Effects',
                 'navigation' => 'Navigation & Lists',
                 'updates' => 'Updates',
+                'policy' => 'Operational Priority Policy',
+                'operational_severity_policy' => 'Operational Severity Policy',
                 'severity' => 'Default Severity Shown on Load',
-                'problem' => 'Default Problem Types Shown on Load',
+                'problem' => 'Sensor Coverage & Data-Quality Checks',
                 'section' => 'Default Sections Visible on Load',
                 'tv_restrict' => 'TV Mode Additional Restrictions',
             ];
@@ -75,6 +77,69 @@
         @foreach ($groupLabels as $groupKey => $groupLabel)
             <fieldset class="idf-settings-group">
                 <legend>{{ $groupLabel }}</legend>
+
+                @if ($groupKey === 'policy')
+                    <p class="idf-settings-group-intro">
+                        A technical failure is not automatically an
+                        operationally critical incident — a kitchen printer
+                        being down is not the same as a production cluster
+                        being unreachable. This dashboard prefers
+                        administrator-selected LibreNMS Alert Rules for
+                        Critical/Warning severity; the setting below only
+                        controls its bounded fallback for a condition no
+                        Alert Rule currently covers (a real technical
+                        failure must never be silently hidden, but not every
+                        failure should page someone). Create a LibreNMS
+                        Device Group with this exact name and add your
+                        clusters, virtualization hosts, critical servers,
+                        core/distribution switches, firewalls and critical
+                        UPS/PDUs to it — nothing else needs to change here;
+                        membership is managed entirely in LibreNMS's own
+                        Device Groups admin page. Leave blank (or point it
+                        at a group with no members) and every device
+                        defaults to Warning rather than Critical for
+                        fallback-covered conditions.
+                    </p>
+                @endif
+
+                @if ($groupKey === 'operational_severity_policy')
+                    <p class="idf-settings-group-intro">
+                        Alert Rules remain authoritative whenever they cover a
+                        condition with an exact match. Device Down is the one
+                        condition tag below ("Included LibreNMS Alert Rules")
+                        that can actually suppress its matching fallback,
+                        because a Device Down Alert Rule and the fallback it
+                        replaces always share the same device. Sensor and
+                        Service tags are recorded for documentation and
+                        Policy Health only — they are deliberately never used
+                        to suppress a sensor/service fallback, since no exact
+                        per-sensor/per-service identifier exists to confirm a
+                        given Alert Rule actually covers a given sensor or
+                        service. An unrelated Alert Rule must never hide a
+                        real, different failure; a harmless visual duplicate
+                        is always preferred over a hidden incident. These
+                        settings control only the safety-net fallback itself
+                        — never used to override or compete with a real Alert
+                        Rule's own severity.
+                    </p>
+                @endif
+
+                @if ($groupKey === 'problem')
+                    <p class="idf-settings-group-intro">
+                        Whether a reading is a real problem is decided only
+                        by the LibreNMS Alert Rules checked below under
+                        "Included LibreNMS Alert Rules" — this dashboard no
+                        longer evaluates sensor thresholds itself. These
+                        checkboxes control something narrower: whether a
+                        <em>missing</em> sensor of this type is flagged as
+                        "No sensor installed", and whether an
+                        <em>unreadable/unrecognized</em> reading of this
+                        type is flagged as "Needs Review" — neither of
+                        those is something an Alert Rule can express, since
+                        a rule can only evaluate a sensor that already
+                        exists and already has a decodable value.
+                    </p>
+                @endif
 
                 <div class="idf-settings-field-grid">
                     @foreach ($groups[$groupKey] ?? [] as $key => $field)
@@ -102,6 +167,16 @@
                                         @endforeach
                                     </select>
                                 </label>
+                            @elseif ($field['type'] === 'string')
+                                <label class="idf-settings-number-label">
+                                    <span>{{ $field['label'] }}</span>
+                                    <input
+                                        type="text"
+                                        name="settings[{{ $key }}]"
+                                        value="{{ $resolved[$key] }}"
+                                        maxlength="{{ $field['max_length'] }}"
+                                    >
+                                </label>
                             @else
                                 <label class="idf-settings-number-label">
                                     <span>{{ $field['label'] }}</span>
@@ -124,6 +199,88 @@
                 </div>
             </fieldset>
         @endforeach
+
+        <fieldset class="idf-settings-group">
+            <legend>Included LibreNMS Alert Rules</legend>
+
+            <p class="idf-settings-group-intro">
+                Every rule below is a real Alert Rule already configured in LibreNMS
+                (Alert Rules admin page). Checked rules feed this dashboard's "Alert"
+                issues; unchecked rules are simply not shown here — LibreNMS keeps
+                evaluating and notifying on them exactly as configured either way.
+                Nothing is hidden automatically anymore: a rule stays included the
+                first time you open this page, and stays exactly as you left it after
+                that.
+            </p>
+
+            @if (empty($availableAlertRules))
+                <div class="idf-settings-help">
+                    No LibreNMS Alert Rules were found (or this LibreNMS version's
+                    schema was not recognized). Every currently active alert is shown
+                    on the dashboard; there is nothing to select yet.
+                </div>
+            @else
+                <input type="hidden" name="settings[{{ $alertRuleSettingKey }}][]" value="">
+
+                <div class="idf-settings-field-grid idf-alert-rules-grid">
+                    @foreach ($availableAlertRules as $rule)
+                        <div class="idf-settings-field idf-settings-field-bool">
+                            <label class="idf-settings-checkbox-label">
+                                <input
+                                    type="checkbox"
+                                    class="idf-alert-rule-checkbox"
+                                    name="settings[{{ $alertRuleSettingKey }}][]"
+                                    value="{{ $rule['id'] }}"
+                                    @checked(in_array($rule['id'], $includedAlertRuleIds, true))
+                                >
+                                <span>
+                                    {{ $rule['name'] }}
+                                    @if ($rule['severity'] !== '')
+                                        <span class="idf-alert-rule-severity">{{ $rule['severity'] }}</span>
+                                    @endif
+                                </span>
+                            </label>
+                        </div>
+                    @endforeach
+                </div>
+
+                <p class="idf-settings-group-intro">
+                    For each rule above, record which technical condition
+                    category it covers. <strong>Tagging "Device Down" is the
+                    only tag that actually suppresses its matching
+                    fallback</strong> — a Device Down Alert Rule and the
+                    fallback it replaces always share the same device, so
+                    that correlation is exact. Tagging "Sensors" or
+                    "Services" does <strong>not</strong> suppress any
+                    sensor/service fallback by itself — it is recorded only
+                    for documentation and Policy Health visibility, because
+                    no exact per-sensor/per-service identifier exists to
+                    confirm a rule really covers a specific sensor or
+                    service. Leave every box unchecked for a rule unrelated
+                    to this dashboard's own fallback categories.
+                </p>
+
+                <div class="idf-settings-field-grid idf-alert-rule-conditions-grid">
+                    @foreach ($availableAlertRules as $rule)
+                        <div class="idf-settings-field idf-settings-field-bool">
+                            <span class="idf-alert-rule-condition-name">{{ $rule['name'] }}</span>
+                            <input type="hidden" name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]" value="">
+                            @foreach ($alertRuleConditionCategories as $categoryValue => $categoryLabel)
+                                <label class="idf-settings-checkbox-label">
+                                    <input
+                                        type="checkbox"
+                                        name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]"
+                                        value="{{ $categoryValue }}"
+                                        @checked(in_array($categoryValue, $alertRuleConditionCoverage[$rule['id']] ?? [], true))
+                                    >
+                                    {{ $categoryLabel }}
+                                </label>
+                            @endforeach
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+        </fieldset>
 
         <div class="idf-settings-actions">
             <button type="submit" class="idf-settings-save">Save Settings</button>
@@ -149,6 +306,24 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
                 input.value = value;
             }
         });
+    });
+
+    // Included LibreNMS Alert Rules has no FIELDS default of its own
+    // (it is a dynamic, DB-driven list, not a static bool/choice/int
+    // field) — "reset to defaults" for it means every rule included,
+    // matching Support\AlertRules::resolveIncludedIds()'s own default
+    // for "no explicit choice has ever been saved".
+    document.querySelectorAll('.idf-alert-rule-checkbox').forEach(function (input) {
+        input.checked = true;
+    });
+
+    // Condition coverage has no FIELDS default either — "reset to
+    // defaults" means "nothing declared", matching
+    // Support\AlertRules::resolveConditionCoverage()'s own safe
+    // default (the fallback keeps running for every category until an
+    // administrator explicitly confirms a rule covers it).
+    document.querySelectorAll('.idf-alert-rule-conditions-grid input[type="checkbox"]').forEach(function (input) {
+        input.checked = false;
     });
 });
 </script>
@@ -289,6 +464,28 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         display: grid;
         gap: 10px 24px;
         grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    }
+
+    .idf-settings-group-intro {
+        color: #666;
+        font-size: 12px;
+        margin: 0 0 12px;
+        max-width: 720px;
+    }
+
+    .idf-alert-rules-grid {
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    }
+
+    .idf-alert-rule-severity {
+        background: #eef2f5;
+        border-radius: 3px;
+        color: #5f6b76;
+        font-size: 10px;
+        margin-left: 6px;
+        padding: 1px 6px;
+        text-transform: uppercase;
+        letter-spacing: .02em;
     }
 
     .idf-settings-field {

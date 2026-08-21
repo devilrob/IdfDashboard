@@ -121,11 +121,27 @@ $assert([
     IssueBuilder::PRIORITY_CRITICAL_SENSOR,
     IssueBuilder::PRIORITY_CRITICAL_SERVICE,
     IssueBuilder::PRIORITY_CRITICAL_ALERT,
+    IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK,
+    IssueBuilder::PRIORITY_WARNING_ALERT,
+    IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
     IssueBuilder::PRIORITY_WARNING_SENSOR,
     IssueBuilder::PRIORITY_WARNING_SERVICE,
     IssueBuilder::PRIORITY_STALE,
     IssueBuilder::PRIORITY_UNKNOWN,
-] === [10, 20, 30, 40, 50, 60, 70, 80], 'Priority Attention order is exact');
+] === [10, 20, 30, 40, 42, 45, 47, 50, 60, 70, 80], 'Priority Attention order is exact, including the OperationalPolicy fallback tier ranked strictly below a real Alert Rule issue of the same severity');
+$warningAlertIssue = IssueBuilder::make([
+    'key' => 'alert:9:warning',
+    'device_id' => 9,
+    'severity' => Severity::WARNING,
+    'source' => 'alert',
+    'type' => 'alert',
+    'title' => 'Active alert',
+    'description' => 'Active alert — Vendor warning alarm',
+]);
+$assert(
+    $warningAlertIssue['priority'] === IssueBuilder::PRIORITY_WARNING_ALERT,
+    'a warning-severity alert-sourced issue ranks as PRIORITY_WARNING_ALERT, never falling through to the PRIORITY_INFORMATIONAL default — the exact regression that silently dropped a real Warning Alert Rule device out of Priority Attention'
+);
 $assert($sensorIssue['description'] !== '', 'critical issue always has a cause');
 $fallbackIssue = IssueBuilder::make(['severity' => 'warning', 'source' => 'sensor', 'value' => null]);
 $assert($fallbackIssue['description'] === 'Current value unavailable', 'warning issue explains an unavailable value');
@@ -1033,22 +1049,28 @@ $assert(
 
 // Tipo de problema deshabilitado + dispositivo con múltiples causas
 // donde solo una está habilitada — same deviceVisible() the summary
-// now uses, exercised with the exact multi-cause shape this section
-// names explicitly.
+// now uses. 'temperature'/'battery'/'service' can no longer appear in
+// a real device's problem_types at all (native per-sensor-type/
+// device/service issue generation was removed — see Page.php's
+// buildDeviceIssues() and normalizeDevice()'s $problemTypes
+// construction); 'other' and 'stale' are two of the only three values
+// ('alert' is the third, and is intentionally never gate-able here —
+// see Config::visibilityPolicy()'s own comment) a real device can
+// carry now, so this exercises the exact same OR-visibility behavior
+// with values Page.php can actually produce today.
 $p = $summaryPolicy([]);
 $mixed = Config::visibilityPolicy(Config::resolve([
     'default_severity_critical' => '1',
-    'default_problem_temperature' => '0',
-    'default_problem_battery' => '0',
-    'default_problem_service' => '1',
+    'default_problem_other' => '0',
+    'default_problem_stale' => '1',
 ]), 'global');
 $assert(
-    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'battery']], $mixed) === false,
-    'Summary Caso: a device whose only two causes are both disabled problem types is not counted'
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['other']], $mixed) === false,
+    'Summary Caso: a device whose only cause is a disabled problem type is not counted'
 );
 $assert(
-    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['temperature', 'battery', 'service']], $mixed) === true,
-    'Summary Caso: the same device is counted once one of its three causes (service) is an enabled problem type'
+    ProblemPolicy::deviceVisible(['health' => 'critical', 'problem_types' => ['other', 'stale']], $mixed) === true,
+    'Summary Caso: the same device is counted once one of its two causes (stale) is an enabled problem type'
 );
 
 // --- Section 4/12: every Config::FIELDS group must actually render in

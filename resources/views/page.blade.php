@@ -137,6 +137,80 @@
         color: #5c6bc0;
     }
 
+    /*
+     * Section 25's administrator-only self-check panel (rendered
+     * below, class .infra-policy-health — this comment deliberately
+     * avoids spelling out its own on-screen heading verbatim, since
+     * this <style> block renders unconditionally for every visitor
+     * and a later regression test asserting that heading is genuinely
+     * absent for a non-admin must not trip over this comment's own
+     * prose instead of the real, correctly-gated panel markup).
+     * Deliberately styled identically to .infra-legend just above it
+     * (same collapsed-by-default <details>, same background/border/
+     * font-size) — this is one more optional reference panel, not a
+     * louder/more urgent element than the legend it sits beside. The
+     * three status dots reuse the exact same three colors the legend
+     * already established for Critical/Warning/Needs-Review-adjacent
+     * meanings (#1c7a40 healthy-green, #8a5a00 warning-amber, #5c6bc0
+     * unknown-indigo) so an administrator never has to learn a second
+     * color vocabulary for this panel.
+     */
+    .infra-policy-health {
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 10px;
+        margin-bottom: 10px;
+        padding: 7px 9px;
+    }
+
+    .infra-policy-health summary {
+        color: #337ab7;
+        cursor: pointer;
+        font-weight: 700;
+        outline: none;
+    }
+
+    .policy-health-intro {
+        color: #777;
+        line-height: 1.4;
+        margin: 8px 0;
+    }
+
+    .policy-health-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+    }
+
+    .policy-health-item {
+        align-items: baseline;
+        display: flex;
+        gap: 6px;
+        line-height: 1.4;
+        padding: 3px 0;
+    }
+
+    .policy-health-dot {
+        border-radius: 50%;
+        flex: 0 0 auto;
+        height: 8px;
+        margin-top: 3px;
+        width: 8px;
+    }
+
+    .policy-health-ok .policy-health-dot {
+        background: #1c7a40;
+    }
+
+    .policy-health-warning .policy-health-dot {
+        background: #8a5a00;
+    }
+
+    .policy-health-info .policy-health-dot {
+        background: #5c6bc0;
+    }
+
     .coverage-panel,
     .summary-panel {
         display: grid;
@@ -657,52 +731,6 @@
         animation: downPulse 1s ease-in-out infinite;
     }
 
-    .telemetry {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-top: 5px;
-    }
-
-    .metric {
-        background: #f3f5f6;
-        border: 1px solid #dfe3e5;
-        border-radius: 3px;
-        font-size: 12px;
-        padding: 3px 5px;
-    }
-
-    .metric-warning {
-        background: #fff8e5;
-        border-color: #f0ad4e;
-    }
-
-    .metric-critical {
-        background: #fdeaea;
-        border-color: #d9534f;
-    }
-
-    .metric-unknown {
-        background: #eeeefa;
-        border-color: #5c6bc0;
-    }
-
-    .metric-missing {
-        color: #888;
-    }
-
-    .metric-no_sensor {
-        background: #f7f7f7;
-        border-style: dotted;
-        color: #666;
-    }
-
-    .metric-freshness {
-        display: inline-block;
-        margin-left: 4px;
-        opacity: .78;
-    }
-
     .health-maintenance {
         border-color: #607d8b !important;
     }
@@ -713,79 +741,61 @@
     }
 
     /*
-     * Freshness is layered on top of severity, never a replacement
-     * for it — a metric whose last known reading was critical stays
-     * visually critical (red) even when stale; this dashed outline +
-     * clock icon only adds "this may not be the current instant" on
-     * top of whatever severity color already applies. See
-     * AUDIT_NOTES.md for the incident this design corrects (a stale
-     * dead UPS battery was previously shown as a neutral gray badge
-     * instead of a critical one).
+     * Needs Review (Severity::UNKNOWN) and Stale get their own text
+     * color for the raw technical-state lines $renderIssues() now
+     * shows — matching .health-unknown's/.health-stale's own card
+     * border colors above, so the same condition reads consistently
+     * whether a viewer looks at the card border or the issue text.
+     * Bootstrap's own .text-danger/.text-warning/.text-info/
+     * .text-muted (already used throughout this file) cover Critical/
+     * Warning/Maintenance/no-data; these two are the only severities
+     * without an existing framework-provided text color.
      */
-    .metric-is-stale {
-        border-style: dashed;
+    .text-unknown {
+        color: #5c6bc0;
     }
 
-    .metric-is-stale::after {
-        content: "\f017";
-        font-family: FontAwesome;
-        margin-left: 4px;
-        opacity: .6;
-    }
-
-    .metric-filtered {
-        display: none !important;
-    }
-
-    .telemetry-empty-note {
-        color: #888;
-        display: none;
-        font-size: 9px;
-        font-style: italic;
-        margin-top: 5px;
-    }
-
-    .telemetry-empty-note.telemetry-empty-visible {
-        display: block;
-    }
-
-    .metric-icon {
-        margin-right: 3px;
-    }
-
-    .metric-temperature.metric-warning .metric-icon {
-        color: #e67e22;
-        animation: heatPulse 1.7s ease-in-out infinite;
-    }
-
-    .metric-temperature.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: heatCritical .9s ease-in-out infinite;
-    }
-
-    .metric-humidity.metric-warning .metric-icon {
-        color: #428bca;
-        animation: humidityPulse 1.7s ease-in-out infinite;
-    }
-
-    .metric-humidity.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: humidityCritical 1s ease-in-out infinite;
-    }
-
-    .metric-battery.metric-warning .metric-icon {
-        color: #e67e22;
-        animation: batteryPulse 1.4s ease-in-out infinite;
-    }
-
-    .metric-battery.metric-critical .metric-icon {
-        color: #d9534f;
-        animation: batteryCritical .75s ease-in-out infinite;
+    .text-stale {
+        color: #b8860b;
     }
 
     .service-summary {
         font-size: 12px;
         margin-top: 5px;
+    }
+
+    /*
+     * Deliberately plain/uncolored — restored current-value context
+     * (Section 11), never a second severity opinion layered on top of
+     * the card's own health-{severity} color or the Critical/Warning
+     * lines $renderIssues() already renders above it.
+     */
+    .telemetry-summary {
+        color: #777;
+        font-size: 11px;
+        margin-top: 5px;
+        overflow-wrap: anywhere;
+    }
+
+    /*
+     * Visibility into the administrator-controlled Operational
+     * Critical Device Group membership that actually drives
+     * Support\OperationalPolicy's fallback severity (Section 15) — a
+     * small always-visible label, never a severity color of its own
+     * (a healthy Operational Critical device must not look like it has
+     * a problem).
+     */
+    .op-critical-badge {
+        background: #37474f;
+        color: #fff;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        padding: 1px 5px;
+        border-radius: 3px;
+        margin-left: 4px;
+        white-space: nowrap;
+        vertical-align: middle;
     }
 
     .service-issue {
@@ -884,80 +894,6 @@
         50% {
             opacity: 1;
             text-shadow: 0 0 5px rgba(217, 83, 79, .7);
-        }
-    }
-
-    @keyframes heatPulse {
-        0%, 100% {
-            transform: translateY(0) scale(1);
-        }
-
-        50% {
-            transform: translateY(-2px) scale(1.16);
-        }
-    }
-
-    @keyframes heatCritical {
-        0%, 100% {
-            transform: translateY(0) rotate(-3deg) scale(1);
-        }
-
-        50% {
-            transform: translateY(-2px) rotate(3deg) scale(1.25);
-        }
-    }
-
-    @keyframes humidityPulse {
-        0%, 100% {
-            opacity: .65;
-            transform: translateY(0);
-        }
-
-        50% {
-            opacity: 1;
-            transform: translateY(2px);
-        }
-    }
-
-    @keyframes humidityCritical {
-        0%, 100% {
-            transform: scale(1);
-        }
-
-        50% {
-            transform: scale(1.3);
-        }
-    }
-
-    @keyframes batteryPulse {
-        0%, 100% {
-            opacity: .6;
-            transform: scale(1);
-        }
-
-        50% {
-            opacity: 1;
-            transform: scale(1.18);
-        }
-    }
-
-    @keyframes batteryCritical {
-        0%, 100% {
-            opacity: .45;
-            transform: translateX(0);
-        }
-
-        25% {
-            transform: translateX(-2px);
-        }
-
-        50% {
-            opacity: 1;
-            transform: translateX(0) scale(1.22);
-        }
-
-        75% {
-            transform: translateX(2px);
         }
     }
 
@@ -1213,6 +1149,7 @@
 
     body.tv-mode-active .infra-toolbar,
     body.tv-mode-active .infra-legend,
+    body.tv-mode-active .infra-policy-health,
     body.tv-mode-active .coverage-panel,
     body.tv-mode-active .summary-panel {
         display: none !important;
@@ -1294,7 +1231,6 @@
     body.tv-mode-active .device-meta,
     body.tv-mode-active .device-state,
     body.tv-mode-active .sensor-pill,
-    body.tv-mode-active .metric-freshness,
     body.tv-mode-active .service-summary,
     body.tv-mode-active .service-issue,
     body.tv-mode-active .service-message,
@@ -1457,15 +1393,6 @@
         padding: 4px 10px;
     }
 
-    body.tv-mode-active .metric {
-        font-size: 12px;
-        padding: 4px 7px;
-    }
-
-    body.tv-mode-active .metric-missing {
-        display: none;
-    }
-
     body.tv-mode-active .empty-filter-result {
         background: #131a29;
         border-color: #333f57;
@@ -1476,91 +1403,35 @@
 </style>
 
 @php
-    $metricIcon = function (array $metric): array {
-        $label = strtolower($metric['label']);
+    // The original severity-styled per-sensor value chips (colored
+    // pill per reading, implying a live per-sensor verdict) stay
+    // removed — severity is decided by administrator-selected
+    // LibreNMS Alert Rules first, Support\OperationalPolicy's bounded
+    // fallback second, never by re-coloring a raw reading a third way
+    // here. $renderTelemetrySummary() below is a deliberately
+    // different, narrower thing: one compact, uncolored, informational
+    // line naming each device's own curated primary readings (UPS
+    // Battery/Runtime/Load/Voltage/Temperature; PDU Temperature/
+    // Humidity/Voltage/Current/Power) so a technically healthy UPS/PDU
+    // still shows real current values, not just a green card with
+    // nothing to look at — restoring what the earlier chip removal
+    // over-corrected, without reintroducing a second severity opinion.
+    // The full uncurated per-sensor list remains on the single-device
+    // detail view (?view=device), unaffected by either change.
+    $renderTelemetrySummary = function (array $device): string {
+        $curated = $device['telemetry']->filter(fn (array $metric): bool => $metric['curated'] ?? false);
 
-        if (str_contains($label, 'temperature')) {
-            return ['temperature', 'fa-thermometer-full'];
-        }
-
-        if (str_contains($label, 'humidity')) {
-            return ['humidity', 'fa-tint'];
-        }
-
-        if (str_contains($label, 'battery')) {
-            return ['battery', 'fa-battery-quarter'];
-        }
-
-        if (str_contains($label, 'voltage')) {
-            return ['voltage', 'fa-bolt'];
-        }
-
-        if (str_contains($label, 'fan')) {
-            return ['fan', 'fa-refresh'];
-        }
-
-        if (str_contains($label, 'runtime')) {
-            return ['runtime', 'fa-clock-o'];
-        }
-
-        if (str_contains($label, 'state')) {
-            return ['state', 'fa-info-circle'];
-        }
-
-        if (str_contains($label, 'storage')) {
-            return ['storage', 'fa-hdd-o'];
-        }
-
-        if (str_contains($label, 'memory')) {
-            return ['memory', 'fa-microchip'];
-        }
-
-        if (str_contains($label, 'processor')) {
-            return ['processor', 'fa-tachometer'];
-        }
-
-        return ['other', 'fa-line-chart'];
-    };
-
-    $renderTelemetry = function ($telemetry) use ($metricIcon) {
-        if ($telemetry->isEmpty()) {
+        if ($curated->isEmpty()) {
             return '';
         }
 
-        $html = '<div class="telemetry">';
+        $parts = $curated->map(function (array $metric): string {
+            $value = trim((string) ($metric['value'] ?? ''));
 
-        foreach ($telemetry as $metric) {
-            [$metricType, $icon] = $metricIcon($metric);
+            return e((string) $metric['label']) . ': ' . e($value !== '' ? $value : '—');
+        })->implode(' · ');
 
-            $isStale = $metric['stale'] ?? false;
-
-            $title = e($metric['cause'] ?? $metric['description']);
-
-            if ($metric['lastupdate']) {
-                $title .= ' · ' . e($metric['lastupdate']);
-            }
-
-            $html .= '<span class="metric metric-' . e($metric['state']) . ' metric-' . e($metricType)
-                . ($isStale ? ' metric-is-stale' : '') . '"'
-                . ' data-metric-state="' . e($metric['state']) . '"'
-                . ' data-metric-type="' . e($metricType) . '"'
-                . ' data-metric-stale="' . ($isStale ? '1' : '0') . '"'
-                . ' title="' . $title . '">'
-                . '<i class="fa ' . e($icon) . ' metric-icon" aria-hidden="true"></i>'
-                . '<strong>' . e($metric['label']) . ':</strong> '
-                . e($metric['value'])
-                . (isset($metric['freshness']['label'])
-                    ? '<small class="metric-freshness">' . e($metric['freshness']['label']) . '</small>'
-                    : '')
-                . '</span>';
-        }
-
-        $html .= '</div>';
-        $html .= '<div class="telemetry-empty-note" data-telemetry-empty-note>'
-            . 'No sensors match the current filters'
-            . '</div>';
-
-        return $html;
+        return '<div class="telemetry-summary">' . $parts . '</div>';
     };
 
     $renderIssues = function (array $device, int $limit = 3) {
@@ -1598,6 +1469,45 @@
                 . '<strong>' . e(strtoupper($alert['severity_class'])) . ' ALERT</strong>'
                 . ' — ' . e($alert['name'])
                 . '</div>';
+        }
+
+        // Raw technical state must remain visible even when no Alert
+        // Rule covers it (source 'device'/'sensor' — Device Down and
+        // sensor conditions; 'service' is already rendered above via
+        // $device['service_problems'], 'alert' via $device['alerts']
+        // just above). Covers both Support\OperationalPolicy's own
+        // fallback issues and the pre-existing native Stale/Needs
+        // Review conditions, which had exactly the same gap: a card's
+        // color already reflected them, but nothing explained why.
+        // Needs Review (Severity::UNKNOWN) gets its own distinct
+        // text-unknown treatment, never folded into Critical/Warning
+        // styling — see settings.blade.php's own "Needs Review" label
+        // and Support\Severity::definitions().
+        $technicalIssues = $device['issues']->filter(
+            fn (array $issue): bool => $issue['actionable']
+                && in_array($issue['source'], ['device', 'sensor'], true)
+        );
+
+        foreach ($technicalIssues->take($limit) as $issue) {
+            $severityClass = match ($issue['severity']) {
+                'critical' => 'text-danger',
+                'warning' => 'text-warning',
+                'unknown' => 'text-unknown',
+                'stale' => 'text-stale',
+                default => 'text-muted',
+            };
+
+            $html .= '<div class="service-issue">'
+                . '<strong class="' . e($severityClass) . '">'
+                . e($issue['severity'] === 'unknown' ? 'NEEDS REVIEW' : strtoupper($issue['severity']))
+                . '</strong>'
+                . ' — ' . e($issue['title']);
+
+            if ($issue['description'] !== '') {
+                $html .= '<div class="service-message">' . e($issue['description']) . '</div>';
+            }
+
+            $html .= '</div>';
         }
 
         if ($device['recent_event_count'] > 0) {
@@ -1832,8 +1742,15 @@
     <div class="phase2-summary phase2-desktop" aria-label="Operational summary">
         <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'critical']) }}"><strong>{{ $visibleSummary['critical_devices'] }}</strong><span>Critical</span></a>
         <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'overview', 'severity' => 'warning']) }}"><strong>{{ $visibleSummary['warning_devices'] }}</strong><span>Warning</span></a>
-        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'device']) }}"><strong>{{ $visibleSummary['devices_down'] }}</strong><span>Devices Down</span></a>
-        <a class="phase2-counter phase2-counter-critical" href="{{ $dashboardLink(['view' => 'devices', 'problem' => 'service']) }}"><strong>{{ $visibleSummary['service_problems'] }}</strong><span>Services Down</span></a>
+        {{-- Plain (non-link) counters: raw LibreNMS device-status/service
+             counts, independent of severity/Alert Rules — a device can
+             read "Down: yes" here while showing Healthy on its card if
+             no matching Alert Rule is currently checked. There is no
+             more problem_types value to filter these by (see
+             Support\Config::normalizeDashboardRequest()), so these are
+             informational only, matching "Last Updated" below. --}}
+        <div class="phase2-counter phase2-counter-critical"><strong>{{ $visibleSummary['devices_down'] }}</strong><span>Devices Down</span></div>
+        <div class="phase2-counter phase2-counter-critical"><strong>{{ $visibleSummary['service_problems'] }}</strong><span>Services Down</span></div>
         <a class="phase2-counter phase2-counter-warning" href="{{ $dashboardLink(['view' => 'locations', 'problems_only' => 1]) }}"><strong>{{ $visibleSummary['locations_affected'] }}</strong><span>Locations Affected</span></a>
         <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'stale' => 1]) }}"><strong>{{ $visibleSummary['stale_sensor_devices'] }}</strong><span>Stale</span></a>
         <a class="phase2-counter" href="{{ $dashboardLink(['view' => 'devices', 'no_sensor' => 1]) }}"><strong>{{ $visibleSummary['no_sensor_installed'] }}</strong><span>No Sensor</span></a>
@@ -1847,7 +1764,14 @@
             <label class="phase2-field">Search<input type="search" name="search" maxlength="100" value="{{ $filters['search'] }}" placeholder="Name, host, IP, hardware or location"></label>
             <label class="phase2-field">Severity<select name="severity"><option value="">All severities</option>@foreach(['critical','warning','unknown','stale','maintenance','healthy'] as $option)<option value="{{ $option }}" @selected($filters['severity'] === $option)>{{ ucfirst($option) }}</option>@endforeach</select></label>
             <label class="phase2-field">Category<select name="category"><option value="">All categories</option>@foreach($categories as $option)<option value="{{ $option }}" @selected($filters['category'] === $option)>{{ $option }}</option>@endforeach</select></label>
-            <label class="phase2-field">Problem<select name="problem"><option value="">All problem types</option>@foreach(['device' => 'Device down', 'service' => 'Service', 'alert' => 'Alert', 'temperature' => 'Temperature', 'humidity' => 'Humidity', 'battery' => 'Battery', 'voltage' => 'Voltage', 'state' => 'State', 'storage' => 'Storage', 'memory' => 'Memory', 'processor' => 'Processor', 'other' => 'Other'] as $key => $label)<option value="{{ $key }}" @selected($filters['problem'] === $key)>{{ $label }}</option>@endforeach</select></label>
+            {{-- Device/Service/per-sensor-type options were removed: a
+                 device's problem_types can now only ever be 'alert',
+                 'stale' or 'other' (see Config::normalizeDashboardRequest()
+                 and Page.php's normalizeDevice() — severity/problem
+                 detection comes only from administrator-selected LibreNMS
+                 Alert Rules now). 'stale' keeps its own dedicated checkbox
+                 below, unchanged. --}}
+            <label class="phase2-field">Problem<select name="problem"><option value="">All problem types</option>@foreach(['alert' => 'Alert', 'other' => 'Other'] as $key => $label)<option value="{{ $key }}" @selected($filters['problem'] === $key)>{{ $label }}</option>@endforeach</select></label>
             @if($dashboardView !== 'location')
                 <label class="phase2-field">Location<select name="location"><option value="">All locations</option>@foreach($locationOptions as $option)<option value="{{ $option['id'] }}" @selected($filters['location'] === $option['id'])>{{ $option['name'] }}</option>@endforeach</select></label>
             @endif
@@ -2112,6 +2036,41 @@
             </div>
         </div>
     </details>
+
+    {{--
+        Section 25 — administrator-only, strictly read-only. $policyHealth
+        is null for any non-admin user (Page::data()'s own $user->hasRole(
+        'admin') gate), so this entire block simply does not exist in the
+        rendered HTML for a regular viewer — not hidden via CSS, absent
+        from the payload entirely. Never a control: nothing in this panel
+        submits a request, calls an endpoint, or otherwise creates/
+        modifies/deletes an Alert Rule, Device Group, or any other
+        LibreNMS resource — see Support\PolicyHealth's own docblock.
+    --}}
+    @if($policyHealth !== null)
+        <details class="infra-policy-health">
+            <summary>Policy Health — administrator diagnostic</summary>
+
+            <p class="policy-health-intro">
+                Read-only self-check: does your current Alert Rule /
+                Operational Critical Device Group configuration actually
+                explain what this dashboard is showing right now, or is
+                severity still coming from the default fallback policy for
+                a condition no one has configured a rule for yet? This
+                never creates, modifies or deletes an Alert Rule, Device
+                Group, or any other LibreNMS resource.
+            </p>
+
+            <ul class="policy-health-list">
+                @foreach($policyHealth as $check)
+                    <li class="policy-health-item policy-health-{{ $check['status'] }}">
+                        <span class="policy-health-dot" aria-hidden="true"></span>
+                        {{ e($check['label']) }}
+                    </li>
+                @endforeach
+            </ul>
+        </details>
+    @endif
 
     @if(count($priorityAttention['items']) > 0)
         {{--
@@ -2421,6 +2380,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2431,8 +2393,6 @@
                             {{ $device['hostname'] }} ·
                             {{ strtoupper($device['os']) }}
                         </div>
-
-                        {!! $renderTelemetry($device['telemetry']) !!}
 
                         <div class="service-summary">
                             @if($device['service_total'] === 0)
@@ -2455,6 +2415,7 @@
                         </div>
 
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2489,6 +2450,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2500,9 +2464,8 @@
                             {{ $device['hostname'] }}
                         </div>
 
-                        {!! $renderTelemetry($device['telemetry']) !!}
-
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2538,6 +2501,9 @@
                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                 {{ $device['name'] }}
                             </a>
+                            @if($device['operationally_critical'])
+                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                            @endif
 
                             <span class="{{ $device['maintenance'] ? 'text-info' : ($device['status'] ? 'status-up' : 'status-down') }}">
                                 {{ $device['maintenance'] ? 'MAINTENANCE' : ($device['status'] ? 'UP' : 'DOWN') }}
@@ -2550,9 +2516,8 @@
                             {{ $device['os'] }}
                         </div>
 
-                        {!! $renderTelemetry($device['telemetry']) !!}
-
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2622,6 +2587,9 @@
                                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                                 {{ $device['name'] }}
                                             </a>
+                                            @if($device['operationally_critical'])
+                                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                                            @endif
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
@@ -2635,9 +2603,8 @@
                                         </span>
                                     </div>
 
-                                    {!! $renderTelemetry($device['telemetry']) !!}
-
-                                    {!! $renderIssues($device, 2) !!}
+                                                {!! $renderIssues($device, 2) !!}
+                                                {!! $renderTelemetrySummary($device) !!}
                                 </li>
                             @endforeach
                         </ul>
@@ -2710,6 +2677,9 @@
                                             <a href="{{ url('device/device=' . $device['device_id']) }}">
                                                 {{ $device['name'] }}
                                             </a>
+                                            @if($device['operationally_critical'])
+                                                <span class="op-critical-badge" title="Member of the Operational Critical LibreNMS Device Group">CRITICAL INFRASTRUCTURE</span>
+                                            @endif
 
                                             <div class="device-meta">
                                                 {{ $device['hostname'] }} ·
@@ -2723,9 +2693,8 @@
                                         </span>
                                     </div>
 
-                                    {!! $renderTelemetry($device['telemetry']) !!}
-
-                                    {!! $renderIssues($device, 2) !!}
+                                                {!! $renderIssues($device, 2) !!}
+                                                {!! $renderTelemetrySummary($device) !!}
                                 </li>
                             @endforeach
                         </ul>
@@ -3101,6 +3070,18 @@ function initDashboard() {
         return problem === 'stale' ? 'problem_stale' : problem;
     }
 
+    // Mirrors ProblemPolicy::deviceVisible()'s own `$policy[$key] ?? true`
+    // fallback exactly: a problem type with no key at all in the policy
+    // object (currently only 'alert', which has no single global on/off
+    // setting anymore — see Support\AlertRules) must default to visible,
+    // never to hidden. A plain `Boolean(policy[key])` would silently
+    // read a missing key as false and hide every alert-having device —
+    // the same class of client/server policy drift the P1 severity-
+    // policy fix (v1.3.0) already root-caused and fixed once.
+    function policyAllows(policy, key) {
+        return key in policy ? Boolean(policy[key]) : true;
+    }
+
     function deviceMatches(device) {
         const health = device.dataset.health || 'healthy';
 
@@ -3119,116 +3100,8 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(state[problemPolicyKey(problem)]);
+            return policyAllows(state, problemPolicyKey(problem));
         });
-    }
-
-    const metricTypeFilterKey = {
-        temperature: 'temperature',
-        humidity: 'humidity',
-        battery: 'battery',
-        voltage: 'voltage',
-        fan: 'fan',
-        runtime: 'other',
-        state: 'state',
-        storage: 'storage',
-        memory: 'memory',
-        processor: 'processor',
-        other: 'other'
-    };
-
-    // `metricState` is always the real severity computed from the
-    // metric's last known value (critical/warning/healthy/missing) —
-    // Page.php never softens it just because the reading is old (a
-    // UPS battery last seen at 0% stays Critical). Staleness is a
-    // separate `data-metric-stale` flag, purely about how much to
-    // trust the timestamp, and only gates visibility for the one case
-    // where it is the *entire* story: a stale reading whose last
-    // known value was itself healthy (no evidence of a problem, just
-    // lost visibility). A stale Critical/Warning reading is a real
-    // problem and is never hidden by the "Stale data" checkbox — only
-    // by the normal Severity/Problem checkboxes, like any other one.
-    function metricMatches(metricEl) {
-        const metricState = metricEl.dataset.metricState;
-        const metricType = metricEl.dataset.metricType;
-        const isStale = metricEl.dataset.metricStale === '1';
-
-        // Legacy missing rows remain hidden. The explicit no_sensor
-        // state is intentionally visible and informational.
-        if (metricState === 'missing') {
-            return false;
-        }
-
-        const filterKey = metricTypeFilterKey[metricType] || 'other';
-
-        if (metricState === 'no_sensor') {
-            return Boolean(state[filterKey]);
-        }
-
-        if (isStale && metricState === 'healthy' && !state.problem_stale) {
-            return false;
-        }
-
-        if (!state[metricState]) {
-            return false;
-        }
-
-        return Boolean(state[filterKey]);
-    }
-
-    // Beyond deciding which whole devices appear, each visible card
-    // only shows the sensors whose severity (Critical/Warning/Healthy)
-    // AND type (Temperature/Humidity/.../Other) are both checked above
-    // — this is what stops a mostly-healthy PDU card from burying its
-    // one critical humidity reading under a wall of unrelated "No
-    // recent data" placeholders.
-    function applyMetricVisibility(device) {
-        const metrics = device.querySelectorAll('.metric');
-        let anyVisible = false;
-        const hiddenBySeverity = { critical: 0, warning: 0 };
-
-        metrics.forEach(function (metricEl) {
-            const show = metricMatches(metricEl);
-
-            metricEl.classList.toggle('metric-filtered', !show);
-
-            if (show) {
-                anyVisible = true;
-            } else if (metricEl.dataset.metricState in hiddenBySeverity) {
-                hiddenBySeverity[metricEl.dataset.metricState]++;
-            }
-        });
-
-        const emptyNote = device.querySelector('[data-telemetry-empty-note]');
-
-        if (emptyNote) {
-            const showEmptyNote = metrics.length > 0 && !anyVisible;
-
-            emptyNote.classList.toggle('telemetry-empty-visible', showEmptyNote);
-
-            // A card can show Critical/Warning even with zero visible
-            // metrics — the badge always reflects real severity,
-            // independent of what the viewer's filters currently show
-            // (see AUDIT_NOTES.md). Left as a bare "No sensors match"
-            // note, that reads as a bug ("why is this red with nothing
-            // shown?"); naming what's hidden makes the badge legible
-            // again without changing what the filters actually do.
-            if (showEmptyNote) {
-                const hidden = [];
-
-                if (hiddenBySeverity.critical > 0) {
-                    hidden.push(hiddenBySeverity.critical + ' Critical');
-                }
-
-                if (hiddenBySeverity.warning > 0) {
-                    hidden.push(hiddenBySeverity.warning + ' Warning');
-                }
-
-                emptyNote.textContent = hidden.length > 0
-                    ? 'No sensors match the current filters — hiding ' + hidden.join(', ')
-                    : 'No sensors match the current filters';
-            }
-        }
     }
 
     function filterStandaloneSection(sectionName) {
@@ -3253,7 +3126,6 @@ function initDashboard() {
             const show = deviceMatches(device);
 
             device.style.display = show ? '' : 'none';
-            applyMetricVisibility(device);
 
             if (show) {
                 visible += 1;
@@ -3292,7 +3164,6 @@ function initDashboard() {
                 const show = deviceMatches(device);
 
                 device.style.display = show ? '' : 'none';
-                applyMetricVisibility(device);
 
                 if (show) {
                     locationVisible += 1;
@@ -3474,7 +3345,7 @@ function initDashboard() {
         }
 
         return problems.some(function (problem) {
-            return Boolean(tvOnlyDefaults[problemPolicyKey(problem)]);
+            return policyAllows(tvOnlyDefaults, problemPolicyKey(problem));
         });
     }
 
