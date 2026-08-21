@@ -666,9 +666,41 @@
         border-style: dashed !important;
     }
 
+    /*
+     * Needs Review (Severity::UNKNOWN) and Stale get their own text
+     * color for the raw technical-state lines $renderIssues() now
+     * shows — matching .health-unknown's/.health-stale's own card
+     * border colors above, so the same condition reads consistently
+     * whether a viewer looks at the card border or the issue text.
+     * Bootstrap's own .text-danger/.text-warning/.text-info/
+     * .text-muted (already used throughout this file) cover Critical/
+     * Warning/Maintenance/no-data; these two are the only severities
+     * without an existing framework-provided text color.
+     */
+    .text-unknown {
+        color: #5c6bc0;
+    }
+
+    .text-stale {
+        color: #b8860b;
+    }
+
     .service-summary {
         font-size: 12px;
         margin-top: 5px;
+    }
+
+    /*
+     * Deliberately plain/uncolored — restored current-value context
+     * (Section 11), never a second severity opinion layered on top of
+     * the card's own health-{severity} color or the Critical/Warning
+     * lines $renderIssues() already renders above it.
+     */
+    .telemetry-summary {
+        color: #777;
+        font-size: 11px;
+        margin-top: 5px;
+        overflow-wrap: anywhere;
     }
 
     .service-issue {
@@ -1275,15 +1307,37 @@
 </style>
 
 @php
-    // Per-sensor value chips were removed entirely: severity is now
-    // decided only by administrator-selected LibreNMS Alert Rules (see
-    // Support\AlertRules), never by this plugin re-evaluating raw
-    // sensor_current/sensor_limit* values itself, so a chip strip
-    // implying a live per-sensor verdict would be misleading. The
-    // underlying $device['telemetry'] data still exists and still
-    // feeds the Coverage panel's aggregate max-temperature/max-
-    // humidity figures elsewhere on this page — only the per-device
-    // chip rendering is gone.
+    // The original severity-styled per-sensor value chips (colored
+    // pill per reading, implying a live per-sensor verdict) stay
+    // removed — severity is decided by administrator-selected
+    // LibreNMS Alert Rules first, Support\OperationalPolicy's bounded
+    // fallback second, never by re-coloring a raw reading a third way
+    // here. $renderTelemetrySummary() below is a deliberately
+    // different, narrower thing: one compact, uncolored, informational
+    // line naming each device's own curated primary readings (UPS
+    // Battery/Runtime/Load/Voltage/Temperature; PDU Temperature/
+    // Humidity/Voltage/Current/Power) so a technically healthy UPS/PDU
+    // still shows real current values, not just a green card with
+    // nothing to look at — restoring what the earlier chip removal
+    // over-corrected, without reintroducing a second severity opinion.
+    // The full uncurated per-sensor list remains on the single-device
+    // detail view (?view=device), unaffected by either change.
+    $renderTelemetrySummary = function (array $device): string {
+        $curated = $device['telemetry']->filter(fn (array $metric): bool => $metric['curated'] ?? false);
+
+        if ($curated->isEmpty()) {
+            return '';
+        }
+
+        $parts = $curated->map(function (array $metric): string {
+            $value = trim((string) ($metric['value'] ?? ''));
+
+            return e((string) $metric['label']) . ': ' . e($value !== '' ? $value : '—');
+        })->implode(' · ');
+
+        return '<div class="telemetry-summary">' . $parts . '</div>';
+    };
+
     $renderIssues = function (array $device, int $limit = 3) {
         $html = '';
 
@@ -1319,6 +1373,45 @@
                 . '<strong>' . e(strtoupper($alert['severity_class'])) . ' ALERT</strong>'
                 . ' — ' . e($alert['name'])
                 . '</div>';
+        }
+
+        // Raw technical state must remain visible even when no Alert
+        // Rule covers it (source 'device'/'sensor' — Device Down and
+        // sensor conditions; 'service' is already rendered above via
+        // $device['service_problems'], 'alert' via $device['alerts']
+        // just above). Covers both Support\OperationalPolicy's own
+        // fallback issues and the pre-existing native Stale/Needs
+        // Review conditions, which had exactly the same gap: a card's
+        // color already reflected them, but nothing explained why.
+        // Needs Review (Severity::UNKNOWN) gets its own distinct
+        // text-unknown treatment, never folded into Critical/Warning
+        // styling — see settings.blade.php's own "Needs Review" label
+        // and Support\Severity::definitions().
+        $technicalIssues = $device['issues']->filter(
+            fn (array $issue): bool => $issue['actionable']
+                && in_array($issue['source'], ['device', 'sensor'], true)
+        );
+
+        foreach ($technicalIssues->take($limit) as $issue) {
+            $severityClass = match ($issue['severity']) {
+                'critical' => 'text-danger',
+                'warning' => 'text-warning',
+                'unknown' => 'text-unknown',
+                'stale' => 'text-stale',
+                default => 'text-muted',
+            };
+
+            $html .= '<div class="service-issue">'
+                . '<strong class="' . e($severityClass) . '">'
+                . e($issue['severity'] === 'unknown' ? 'NEEDS REVIEW' : strtoupper($issue['severity']))
+                . '</strong>'
+                . ' — ' . e($issue['title']);
+
+            if ($issue['description'] !== '') {
+                $html .= '<div class="service-message">' . e($issue['description']) . '</div>';
+            }
+
+            $html .= '</div>';
         }
 
         if ($device['recent_event_count'] > 0) {
@@ -2188,6 +2281,7 @@
                         </div>
 
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2234,6 +2328,7 @@
                         </div>
 
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2282,6 +2377,7 @@
                         </div>
 
                         {!! $renderIssues($device) !!}
+                        {!! $renderTelemetrySummary($device) !!}
                     </article>
                 @endforeach
             </div>
@@ -2365,6 +2461,7 @@
                                     </div>
 
                                                 {!! $renderIssues($device, 2) !!}
+                                                {!! $renderTelemetrySummary($device) !!}
                                 </li>
                             @endforeach
                         </ul>
@@ -2451,6 +2548,7 @@
                                     </div>
 
                                                 {!! $renderIssues($device, 2) !!}
+                                                {!! $renderTelemetrySummary($device) !!}
                                 </li>
                             @endforeach
                         </ul>
