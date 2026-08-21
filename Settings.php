@@ -38,6 +38,10 @@ class Settings extends SettingsHook
             $settings[AlertRules::SETTING_KEY] ?? null,
             $availableAlertRules
         );
+        $alertRuleConditionCoverage = AlertRules::resolveConditionCoverage(
+            $settings[AlertRules::CONDITION_SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
 
         return [
             'settings' => $settings,
@@ -46,6 +50,13 @@ class Settings extends SettingsHook
             'availableAlertRules' => $availableAlertRules,
             'includedAlertRuleIds' => $includedAlertRuleIds,
             'alertRuleSettingKey' => AlertRules::SETTING_KEY,
+            'alertRuleConditionCoverage' => $alertRuleConditionCoverage,
+            'alertRuleConditionSettingKey' => AlertRules::CONDITION_SETTING_KEY,
+            'alertRuleConditionCategories' => [
+                AlertRules::CATEGORY_DEVICE_DOWN => 'Device Down',
+                AlertRules::CATEGORY_SENSOR => 'Sensors',
+                AlertRules::CATEGORY_SERVICE => 'Services',
+            ],
             'updateStatus' => UpdateStatus::get(
                 (bool) $resolved['update_check_enabled'],
                 $forceUpdateCheck

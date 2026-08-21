@@ -195,6 +195,36 @@ class Page extends PageHook
         );
 
         /*
+         * Which technical-condition categories (Support\AlertRules::
+         * CATEGORIES) an administrator has explicitly declared each
+         * included Alert Rule already covers — see
+         * OperationalPolicy::resolveFallbackIssues()'s own docblock for
+         * why this is condition-category, not device-wide, and why it
+         * is administrator-declared rather than auto-detected from the
+         * rule's own condition/query (Support\PolicyHealth's docblock
+         * already documents this project's standing decision not to
+         * re-implement LibreNMS's own rule-evaluation engine).
+         */
+        $alertRuleConditionCoverage = AlertRules::resolveConditionCoverage(
+            $settings[AlertRules::CONDITION_SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
+
+        /*
+         * Support\OperationalPolicy's own fallback safety net policy —
+         * see Support\Config::FIELDS' 'operational_severity_policy'
+         * group. Sliced out of $config here so OperationalPolicy never
+         * receives (or could accidentally depend on) any other setting.
+         */
+        $policyConfig = array_intersect_key(
+            $config,
+            array_flip(array_keys(array_filter(
+                Config::FIELDS,
+                static fn (array $field): bool => $field['group'] === 'operational_severity_policy'
+            )))
+        );
+
+        /*
          * The single centralized visibility decision (Support/
          * ProblemPolicy::deviceVisible()) both Priority Attention and
          * TV Mode's server-filtered collections now consult, instead of
@@ -410,7 +440,9 @@ class Page extends PageHook
                 $deviceOutages,
                 $deviceAvailability,
                 $maintenanceMap,
-                $operationalCriticalDeviceIds
+                $operationalCriticalDeviceIds,
+                $alertRuleConditionCoverage,
+                $policyConfig
             ): array {
                 $deviceId = (int) $device->device_id;
 
@@ -427,7 +459,9 @@ class Page extends PageHook
                     $deviceOutages['recovered']->get($deviceId),
                     $deviceAvailability->get($deviceId, collect()),
                     $maintenanceMap->get($deviceId),
-                    $operationalCriticalDeviceIds->contains($deviceId)
+                    $operationalCriticalDeviceIds->contains($deviceId),
+                    $alertRuleConditionCoverage,
+                    $policyConfig
                 );
             })
             ->values();
@@ -737,7 +771,9 @@ class Page extends PageHook
                 $this->operationalCriticalGroupName,
                 $this->operationalCriticalGroupExists(),
                 $operationalCriticalDeviceIds->count(),
-                $devices
+                $devices,
+                $alertRuleConditionCoverage,
+                $policyConfig
             )
             : null;
 
@@ -1219,7 +1255,9 @@ class Page extends PageHook
         ?object $recentRecovery = null,
         ?Collection $availability = null,
         ?object $maintenance = null,
-        bool $operationallyCritical = false
+        bool $operationallyCritical = false,
+        array $alertRuleConditionCoverage = [],
+        array $policyConfig = []
     ): array {
         $name = $this->deviceName($device);
 
@@ -1346,7 +1384,9 @@ class Page extends PageHook
             $staleIsUrgent,
             $serviceRows,
             $maintenanceActive,
-            $operationallyCritical
+            $operationallyCritical,
+            $alertRuleConditionCoverage,
+            $policyConfig
         );
 
         $health = Severity::worst(
@@ -1552,7 +1592,9 @@ class Page extends PageHook
         bool $staleIsUrgent,
         Collection $services,
         bool $maintenanceActive,
-        bool $operationallyCritical
+        bool $operationallyCritical,
+        array $alertRuleConditionCoverage,
+        array $policyConfig
     ): Collection {
         $deviceId = (int) $device->device_id;
         $locationId = $device->location_id !== null ? (int) $device->location_id : null;
@@ -1688,13 +1730,19 @@ class Page extends PageHook
             ]));
         }
 
-        // Layer 3 fallback — see this method's own docblock. Only ever
-        // runs when this device has zero active alert-sourced issues at
-        // all (never layered on top of a real Alert Rule's own
-        // opinion) and is not currently in an active LibreNMS
-        // maintenance window (the same "do not manufacture new
-        // Warning/Critical noise" reasoning a maintenance window
-        // already applies to Alert Rules).
+        // Layer 3 fallback — see this method's own docblock. Evaluated
+        // per condition CATEGORY, never once per device: only the
+        // categories an administrator has actually tagged one of this
+        // device's active alerts as covering (Support\AlertRules::
+        // resolveConditionCoverage()) are suppressed below — an
+        // unrelated active alert on this same device leaves every
+        // other category's fallback untouched.
+        $coveredCategories = $alerts
+            ->flatMap(fn (array $alert): array => $alertRuleConditionCoverage[(int) ($alert['rule_id'] ?? 0)] ?? [])
+            ->unique()
+            ->values()
+            ->all();
+
         $issues = $issues->concat(OperationalPolicy::resolveFallbackIssues(
             $deviceId,
             $locationId,
@@ -1702,9 +1750,10 @@ class Page extends PageHook
             (int) $device->status,
             $maintenanceActive,
             $operationallyCritical,
-            $alerts->isNotEmpty(),
+            $coveredCategories,
             $services,
-            $telemetry
+            $telemetry,
+            $policyConfig
         ));
 
         return $issues

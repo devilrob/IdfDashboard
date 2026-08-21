@@ -66,6 +66,7 @@
                 'navigation' => 'Navigation & Lists',
                 'updates' => 'Updates',
                 'policy' => 'Operational Priority Policy',
+                'operational_severity_policy' => 'Operational Severity Policy',
                 'severity' => 'Default Severity Shown on Load',
                 'problem' => 'Sensor Coverage & Data-Quality Checks',
                 'section' => 'Default Sections Visible on Load',
@@ -98,6 +99,28 @@
                         at a group with no members) and every device
                         defaults to Warning rather than Critical for
                         fallback-covered conditions.
+                    </p>
+                @endif
+
+                @if ($groupKey === 'operational_severity_policy')
+                    <p class="idf-settings-group-intro">
+                        Alert Rules remain authoritative whenever they cover a
+                        condition with an exact match. Device Down is the one
+                        condition tag below ("Included LibreNMS Alert Rules")
+                        that can actually suppress its matching fallback,
+                        because a Device Down Alert Rule and the fallback it
+                        replaces always share the same device. Sensor and
+                        Service tags are recorded for documentation and
+                        Policy Health only — they are deliberately never used
+                        to suppress a sensor/service fallback, since no exact
+                        per-sensor/per-service identifier exists to confirm a
+                        given Alert Rule actually covers a given sensor or
+                        service. An unrelated Alert Rule must never hide a
+                        real, different failure; a harmless visual duplicate
+                        is always preferred over a hidden incident. These
+                        settings control only the safety-net fallback itself
+                        — never used to override or compete with a real Alert
+                        Rule's own severity.
                     </p>
                 @endif
 
@@ -220,6 +243,42 @@
                         </div>
                     @endforeach
                 </div>
+
+                <p class="idf-settings-group-intro">
+                    For each rule above, record which technical condition
+                    category it covers. <strong>Tagging "Device Down" is the
+                    only tag that actually suppresses its matching
+                    fallback</strong> — a Device Down Alert Rule and the
+                    fallback it replaces always share the same device, so
+                    that correlation is exact. Tagging "Sensors" or
+                    "Services" does <strong>not</strong> suppress any
+                    sensor/service fallback by itself — it is recorded only
+                    for documentation and Policy Health visibility, because
+                    no exact per-sensor/per-service identifier exists to
+                    confirm a rule really covers a specific sensor or
+                    service. Leave every box unchecked for a rule unrelated
+                    to this dashboard's own fallback categories.
+                </p>
+
+                <div class="idf-settings-field-grid idf-alert-rule-conditions-grid">
+                    @foreach ($availableAlertRules as $rule)
+                        <div class="idf-settings-field idf-settings-field-bool">
+                            <span class="idf-alert-rule-condition-name">{{ $rule['name'] }}</span>
+                            <input type="hidden" name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]" value="">
+                            @foreach ($alertRuleConditionCategories as $categoryValue => $categoryLabel)
+                                <label class="idf-settings-checkbox-label">
+                                    <input
+                                        type="checkbox"
+                                        name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]"
+                                        value="{{ $categoryValue }}"
+                                        @checked(in_array($categoryValue, $alertRuleConditionCoverage[$rule['id']] ?? [], true))
+                                    >
+                                    {{ $categoryLabel }}
+                                </label>
+                            @endforeach
+                        </div>
+                    @endforeach
+                </div>
             @endif
         </fieldset>
 
@@ -256,6 +315,15 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
     // for "no explicit choice has ever been saved".
     document.querySelectorAll('.idf-alert-rule-checkbox').forEach(function (input) {
         input.checked = true;
+    });
+
+    // Condition coverage has no FIELDS default either — "reset to
+    // defaults" means "nothing declared", matching
+    // Support\AlertRules::resolveConditionCoverage()'s own safe
+    // default (the fallback keeps running for every category until an
+    // administrator explicitly confirms a rule covers it).
+    document.querySelectorAll('.idf-alert-rule-conditions-grid input[type="checkbox"]').forEach(function (input) {
+        input.checked = false;
     });
 });
 </script>

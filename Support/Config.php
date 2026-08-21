@@ -143,6 +143,131 @@ class Config
             'help' => 'Must exactly match a LibreNMS Device Group name (case-insensitive). Devices in this group get Critical severity for an otherwise-uncovered Device Down/Service/sensor condition; every other device gets Warning for the same condition.',
         ],
 
+        // --- Operational Severity Policy (fallback safety net) ---------
+        // Every setting here governs Support\OperationalPolicy's
+        // fallback safety net ONLY — the severity this dashboard shows
+        // for a technical condition (device down / sensor / service)
+        // that no active, administrator-selected Alert Rule EXACTLY
+        // covers for that same device. "Exactly" matters: Device Down
+        // is the one condition where a rule tagged as covering it
+        // (AlertRules::CONDITION_SETTING_KEY, "Included LibreNMS Alert
+        // Rules" section below) shares a real, exact identifier
+        // (device_id) with the fallback it replaces. A sensor/service
+        // category tag is administrative documentation only — it is
+        // never used to suppress a sensor/service fallback, because no
+        // exact per-sensor/per-service identity exists on an Alert-
+        // Rule-sourced issue in this schema (see Support\
+        // OperationalPolicy's own docblock); an unrelated Alert Rule
+        // must never hide a real, different sensor/service failure.
+        // Defaults below intentionally reproduce this project's
+        // previously-hardcoded policy matrix exactly, so upgrading to
+        // this version changes zero effective behavior for an
+        // administrator who has not opened this section.
+        //
+        // Choices are deliberately only 'critical'/'warning'/'disabled'
+        // — Severity::UNKNOWN ("Needs Review") is a real, distinct
+        // technical state (an unreadable/undecoded sensor) and is
+        // never offered here as a stand-in for "Informational"; this
+        // dashboard has no real Informational severity tier, and one is
+        // not invented for this policy. 'disabled' means this specific
+        // fallback slot never generates an issue at all (the underlying
+        // technical telemetry/service state remains visible regardless
+        // — see Config::visibilityPolicy(), which is untouched by this
+        // group).
+        'fallback_device_down_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable Device Down fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes a Device Down issue on its own — rely entirely on your own Alert Rules for this condition.',
+        ],
+        'fallback_device_down_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Device Down severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+        ],
+        'fallback_device_down_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Device Down severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied only when no active, selected Alert Rule already covers Device Down for this device.',
+        ],
+        'fallback_numeric_sensor_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable numeric sensor fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a numeric sensor threshold on its own — the sensor reading stays visible, just not flagged as an issue.',
+        ],
+        'fallback_numeric_sensor_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Numeric sensor severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+        ],
+        'fallback_numeric_sensor_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Numeric sensor severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against; see the "Included LibreNMS Alert Rules" tagging below).',
+        ],
+        'fallback_state_sensor_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable state sensor fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a state/discrete sensor (e.g. "Power Supply Failed") on its own — the decoded state stays visible, just not flagged as an issue.',
+        ],
+        'fallback_state_sensor_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'State sensor severity — Operational Critical Device Group',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+        ],
+        'fallback_state_sensor_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'State sensor severity — every other device',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applied whenever the state sensor itself already decoded to Critical — a sensor-category Alert Rule tag never suppresses this (no exact per-sensor identity is available to correlate against). UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
+        ],
+        'fallback_service_enabled' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Enable service check fallback',
+            'group' => 'operational_severity_policy',
+            'help' => 'When off, this dashboard never synthesizes an issue from a LibreNMS service check on its own — the service status stays visible, just not flagged as an issue.',
+        ],
+        'fallback_service_critical_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status CRITICAL',
+            'group' => 'operational_severity_policy',
+            'help' => 'Applies to every device by default (a failing service check is a stronger, more specific signal than infrastructure tier) — a service-category Alert Rule tag never suppresses this (no exact per-service identity is available to correlate against).',
+        ],
+        'fallback_service_warning_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status WARNING',
+            'group' => 'operational_severity_policy',
+            'help' => '',
+        ],
+        'fallback_service_unknown_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'label' => 'Service severity — status UNKNOWN',
+            'group' => 'operational_severity_policy',
+            'help' => 'A service check that could not determine its own state — never Critical by default, since that would manufacture an outage signal from a data-quality gap.',
+        ],
+        'fallback_suppress_during_maintenance' => [
+            'type' => 'bool', 'default' => true,
+            'label' => 'Suppress fallback during active LibreNMS maintenance windows',
+            'group' => 'operational_severity_policy',
+            'help' => 'Does not change LibreNMS\'s own maintenance/schedule suppression of Alert Rules — only this dashboard\'s own fallback safety net.',
+        ],
+
         // --- Default Severity shown on load ----------------------------
         'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
         'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],

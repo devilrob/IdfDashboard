@@ -33,6 +33,8 @@ final class PolicyHealth
     /**
      * @param  array<int, array{id: int, name: string, severity: string}>  $availableAlertRules
      * @param  array<int, int>  $includedAlertRuleIds
+     * @param  array<int, array<int, string>>  $alertRuleConditionCoverage  rule_id => covered categories, see Support\AlertRules::resolveConditionCoverage().
+     * @param  array<string, mixed>  $policyConfig  The 'operational_severity_policy' slice of Support\Config — see Support\Config::FIELDS.
      * @param  Collection<int, array<string, mixed>>  $devices  Every currently authorized, already-normalized device.
      * @return array<int, array{status: string, label: string}>
      */
@@ -42,7 +44,9 @@ final class PolicyHealth
         string $operationalCriticalGroupName,
         bool $operationalCriticalGroupResolved,
         int $operationalCriticalDeviceCount,
-        Collection $devices
+        Collection $devices,
+        array $alertRuleConditionCoverage = [],
+        array $policyConfig = []
     ): array {
         $checks = [];
 
@@ -53,8 +57,10 @@ final class PolicyHealth
         );
 
         $checks[] = self::alertRuleInventoryCheck($availableAlertRules, $includedAlertRuleIds);
+        $checks[] = self::conditionCoverageCheck($includedAlertRuleIds, $alertRuleConditionCoverage);
         $checks[] = self::deviceDownRuleCheck($availableAlertRules);
         $checks[] = self::serviceRuleCheck($availableAlertRules);
+        $checks[] = self::fallbackCategoriesCheck($policyConfig);
         $checks[] = self::fallbackCoverageCheck($devices);
         $checks[] = self::overlappingAlertCheck($devices);
 
@@ -152,6 +158,81 @@ final class PolicyHealth
         return [
             'status' => self::STATUS_OK,
             'label' => count($matches) . ' possible Service Alert Rule(s) found by name: ' . implode(', ', array_map(static fn (array $rule): string => $rule['name'], $matches)) . '.',
+        ];
+    }
+
+    /**
+     * Reports CONFIGURED CATEGORY COVERAGE — an administrator's declared
+     * intent (Settings > Included LibreNMS Alert Rules) — never EXACT
+     * RUNTIME CORRELATION. These are deliberately different things: a
+     * rule tagged "Sensors"/"Services" is documentation only and never
+     * suppresses a fallback (see Support\OperationalPolicy's own
+     * docblock — no exact per-sensor/per-service identity exists to
+     * confirm it). Only a rule tagged "Device Down" ever actually
+     * suppresses anything, because that tag shares a real, exact
+     * device_id with the fallback it replaces. This check never treats
+     * a tag as proof a rule actually fires for a condition (that would
+     * be re-simulating LibreNMS's own rule engine, see this class's own
+     * docblock) — it simply reports how many currently-included rules
+     * have been tagged at all, so an administrator can see declared
+     * intent at a glance without mistaking it for a suppression guarantee.
+     *
+     * @param  array<int, int>  $includedAlertRuleIds
+     * @param  array<int, array<int, string>>  $alertRuleConditionCoverage
+     */
+    private static function conditionCoverageCheck(array $includedAlertRuleIds, array $alertRuleConditionCoverage): array
+    {
+        if ($includedAlertRuleIds === []) {
+            return [
+                'status' => self::STATUS_INFO,
+                'label' => 'No Alert Rules are currently included, so there is nothing to tag with condition coverage yet.',
+            ];
+        }
+
+        $taggedCount = count(array_intersect($includedAlertRuleIds, array_keys($alertRuleConditionCoverage)));
+
+        if ($taggedCount === 0) {
+            return [
+                'status' => self::STATUS_INFO,
+                'label' => 'No included Alert Rule has been tagged with a condition category yet (Settings > Included LibreNMS Alert Rules) — configured category coverage, not exact runtime correlation; only a "Device Down" tag ever actually suppresses a fallback, and every other currently-uncovered condition still falls back to the default policy, never hidden.',
+            ];
+        }
+
+        return [
+            'status' => self::STATUS_OK,
+            'label' => $taggedCount . ' of ' . count($includedAlertRuleIds) . ' included Alert Rule' . (count($includedAlertRuleIds) === 1 ? '' : 's') . ' currently declared as covering a specific condition category (configured coverage, not exact runtime correlation — only "Device Down" tags actually suppress a fallback).',
+        ];
+    }
+
+    /**
+     * The effective enabled/disabled state of each fallback category —
+     * an administrator relying entirely on their own Alert Rules for a
+     * category (Section 9) should be able to confirm that choice took
+     * effect without reading Settings a second time.
+     *
+     * @param  array<string, mixed>  $policyConfig
+     */
+    private static function fallbackCategoriesCheck(array $policyConfig): array
+    {
+        $categories = [
+            'Device Down' => $policyConfig['fallback_device_down_enabled'] ?? true,
+            'Numeric sensors' => $policyConfig['fallback_numeric_sensor_enabled'] ?? true,
+            'State sensors' => $policyConfig['fallback_state_sensor_enabled'] ?? true,
+            'Services' => $policyConfig['fallback_service_enabled'] ?? true,
+        ];
+
+        $disabled = array_keys(array_filter($categories, static fn ($enabled): bool => ! $enabled));
+
+        if ($disabled === []) {
+            return [
+                'status' => self::STATUS_OK,
+                'label' => 'Every fallback category (Device Down, Numeric sensors, State sensors, Services) is enabled.',
+            ];
+        }
+
+        return [
+            'status' => self::STATUS_INFO,
+            'label' => 'Fallback disabled for: ' . implode(', ', $disabled) . ' — this dashboard relies entirely on your own Alert Rules for ' . (count($disabled) === 1 ? 'this category' : 'these categories') . '; the underlying technical telemetry remains visible either way.',
         ];
     }
 

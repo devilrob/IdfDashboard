@@ -11,21 +11,36 @@ use Illuminate\Support\Collection;
  * Layer 3 — Operational Policy. This class exists to answer exactly one
  * question, and nothing else: "given a technical condition LibreNMS has
  * already observed (Layer 1/2), and given that no administrator-selected
- * LibreNMS Alert Rule already explains it, what operational severity
- * should this dashboard show — without inventing a Critical that was
- * never asked for, and without ever hiding a real technical failure?"
+ * LibreNMS Alert Rule already covers THIS SAME CONDITION for this
+ * device, what operational severity should this dashboard show —
+ * without inventing a Critical that was never asked for, and without
+ * ever hiding a real technical failure?"
  *
  * This is deliberately NOT a second severity engine competing with
  * Support\AlertRules. It is the opposite: a narrow, clearly-labeled
- * safety net that only ever activates for a device with zero currently
- * active, administrator-included Alert Rule issues (see
- * Page::buildDeviceIssues()'s call site — $hasAlertIssue). The moment an
- * administrator configures the two Alert Rules this project recommends
- * ("Device Down — Critical Infrastructure" / "Device Down — Standard
- * Infrastructure", mapped to the Operational Critical Device Group and
- * to everyone else respectively — see docs on the "Operational Critical"
- * group below) this class stops having anything to do for that
- * condition at all; its output disappears in favor of the real alert.
+ * safety net, evaluated independently per technical CONDITION rather
+ * than once per device or once per category.
+ *
+ * Suppression requires EXACT structured identity, never a category
+ * label. Device Down is the one condition where that exact identity is
+ * trivially available: there is only one "device unreachable" condition
+ * per device, and an Alert-Rule-sourced issue already carries that same
+ * real device_id — see $coveredCategories/AlertRules::CATEGORY_DEVICE_DOWN
+ * below. A numeric/state sensor condition and a service condition each
+ * have their OWN identity (a specific sensor_id / service_id), but an
+ * Alert-Rule-sourced issue in this schema carries none of those (see
+ * Page::buildDeviceIssues() — no sensor_id/service_id survives onto an
+ * alert issue, only device_id and the rule's own name/severity). An
+ * administrator can still tag a rule as "covers Sensors" or "covers
+ * Services" in Settings (AlertRules::resolveConditionCoverage()) — that
+ * tag remains useful for Settings/Policy Health as a documented,
+ * administrative statement of INTENT — but it is deliberately never
+ * used here to suppress a sensor/service fallback, because a category
+ * tag is not an exact identity: an unrelated Temperature Alert Rule
+ * tagged "Sensors" must never hide a failed Power Supply on the same
+ * device. Without a real per-entity identifier on both sides, this
+ * class always prefers a safe, clearly-labeled visual duplicate over a
+ * hidden incident.
  *
  * "Operationally critical" is intentionally NOT re-derived from device
  * type/role/hostname pattern-matching (that was tried once already, in
@@ -47,6 +62,19 @@ final class OperationalPolicy
      * has its own, separate "Needs Review" handling in
      * Page::buildDeviceIssues() — this class does not need a matching
      * catch-all, because Severity::UNKNOWN already IS that catch-all.
+     *
+     * @param  array<int, string>  $coveredCategories  The subset of
+     *     Support\AlertRules::CATEGORIES an active, administrator-
+     *     selected Alert Rule is tagged as covering for this device.
+     *     Only AlertRules::CATEGORY_DEVICE_DOWN is ever used to
+     *     suppress anything here — see this class's own docblock for
+     *     why 'sensor'/'service' tags are read elsewhere (Settings,
+     *     Policy Health) but never here.
+     * @param  array<string, mixed>  $policyConfig  The resolved
+     *     'operational_severity_policy' slice of Support\Config — see
+     *     Support\Config::FIELDS. Every severity/enabled decision below
+     *     reads only from here, never a hardcoded literal, so an
+     *     administrator can change this policy without editing code.
      */
     public static function resolveFallbackIssues(
         int $deviceId,
@@ -55,101 +83,129 @@ final class OperationalPolicy
         int $deviceStatus,
         bool $maintenanceActive,
         bool $operationallyCritical,
-        bool $hasAlertIssue,
+        array $coveredCategories,
         Collection $serviceRows,
-        Collection $telemetry
+        Collection $telemetry,
+        array $policyConfig
     ): Collection {
         $issues = collect();
 
-        // An administrator-selected Alert Rule is the preferred
-        // authority (Section 3 of this redesign's own brief) — once one
-        // is actively firing for this device, this dashboard trusts it
-        // completely rather than layering a second, independently-
-        // computed opinion on top. A maintenance window is LibreNMS's
-        // own explicit "do not treat this device's current state as an
-        // incident" signal; the fallback stays silent for the same
-        // reason real Alert Rules are expected to (via LibreNMS's own
-        // maintenance/schedule suppression) — this dashboard must not
-        // manufacture new Warning/Critical noise a NOC operator did not
-        // ask for during an already-acknowledged maintenance window.
-        if ($hasAlertIssue || $maintenanceActive) {
+        // A maintenance window is LibreNMS's own explicit "do not treat
+        // this device's current state as an incident" signal; the
+        // fallback stays silent for the same reason real Alert Rules
+        // are expected to (via LibreNMS's own maintenance/schedule
+        // suppression) — this dashboard must not manufacture new
+        // Warning/Critical noise a NOC operator did not ask for during
+        // an already-acknowledged maintenance window. Administrator-
+        // configurable (fallback_suppress_during_maintenance) — default
+        // true preserves this project's original behavior exactly.
+        if ($maintenanceActive && ($policyConfig['fallback_suppress_during_maintenance'] ?? true)) {
             return $issues;
         }
 
-        if ($deviceStatus === 0) {
-            $issues->push(IssueBuilder::make([
-                'key' => 'policy:' . $deviceId . ':device_down',
-                'device_id' => $deviceId,
-                'location_id' => $locationId,
-                'severity' => $operationallyCritical ? Severity::CRITICAL : Severity::WARNING,
-                'priority' => $operationallyCritical
-                    ? IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK
-                    : IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
-                'source' => 'device',
-                'type' => 'device',
-                'title' => 'Device unreachable',
-                'description' => self::describeFallback(
-                    'Device unreachable',
-                    $operationallyCritical ? 'Operational Critical device' : 'standard device'
-                ),
-                'actionable' => true,
-                'device_url' => $deviceUrl,
-            ]));
-        }
+        // Device Down is the only condition category with a real,
+        // shared exact identity (device_id) on both sides — see this
+        // class's own docblock. 'sensor'/'service' tags are
+        // deliberately never consulted here: a category label is not
+        // an exact per-sensor/per-service identity, and suppressing on
+        // one would risk hiding an unrelated device's real failure.
+        $deviceDownCovered = in_array(AlertRules::CATEGORY_DEVICE_DOWN, $coveredCategories, true);
 
-        foreach ($serviceRows as $service) {
-            $status = (int) ($service['status'] ?? 0);
+        if ($deviceStatus === 0
+            && ! $deviceDownCovered
+            && ($policyConfig['fallback_device_down_enabled'] ?? true)
+        ) {
+            $severity = self::resolveSeverity($policyConfig, $operationallyCritical
+                ? 'fallback_device_down_critical_group_severity'
+                : 'fallback_device_down_normal_severity');
 
-            if ($status === 0) {
-                continue;
+            if ($severity !== null) {
+                $issues->push(IssueBuilder::make([
+                    'key' => 'policy:' . $deviceId . ':device_down',
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => $severity,
+                    'priority' => $severity === Severity::CRITICAL
+                        ? IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK
+                        : IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
+                    'source' => 'device',
+                    'type' => 'device',
+                    'title' => 'Device unreachable',
+                    'description' => self::describeFallback(
+                        'Device unreachable',
+                        $operationallyCritical ? 'Operational Critical device' : 'standard device'
+                    ),
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
             }
-
-            // service_status: 1=Warning, 2=Critical, 3=Unknown (the same
-            // validated Nagios mapping Page::serviceStatusClass() already
-            // encodes). Unknown deliberately never becomes Critical on
-            // its own — a service check that could not determine its own
-            // state is a real "needs a human to look" signal, not
-            // evidence of an outage.
-            //
-            // Deliberately NOT gated on $operationallyCritical the way
-            // Device Down and sensor conditions are: a service check
-            // that has already classified itself Critical (a specific
-            // failing application/health-check, not raw ICMP/SNMP
-            // reachability) is Critical for every device by default —
-            // this is a stronger, more specific signal than the
-            // device's own infrastructure-tier Device Group membership,
-            // matching this design's own policy matrix. A device stops
-            // paging for this the same way anything else does: an
-            // administrator configures a real Alert Rule that reaches
-            // this specific device/condition, or explicitly excludes
-            // it via the affected Alert Rule's own targeting — this
-            // fallback never invents that exclusion on its own.
-            $severity = $status === 2 ? Severity::CRITICAL : Severity::WARNING;
-
-            $name = trim((string) ($service['name'] ?? 'Service'));
-            $message = trim((string) ($service['message'] ?? ''));
-
-            $issues->push(IssueBuilder::make([
-                'key' => 'policy:' . $deviceId . ':service:' . ($service['service_id'] ?? $name),
-                'device_id' => $deviceId,
-                'location_id' => $locationId,
-                'severity' => $severity,
-                'priority' => $severity === Severity::CRITICAL
-                    ? IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK
-                    : IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
-                'source' => 'service',
-                'type' => 'service',
-                'title' => 'Service ' . $name,
-                'description' => self::describeFallback(
-                    $name . ($message !== '' ? ' — ' . $message : ''),
-                    'a service check reporting ' . ($severity === Severity::CRITICAL ? 'Critical' : 'Warning') . ' applies to every device by default'
-                ),
-                'timestamp' => isset($service['changed']) ? (string) $service['changed'] : null,
-                'actionable' => true,
-                'device_url' => $deviceUrl,
-            ]));
         }
 
+        // No exact per-service identity exists on an Alert-Rule-sourced
+        // issue (see this class's own docblock) — a 'service' category
+        // tag can never suppress this loop; only the enable/disable
+        // toggle and each service's own status govern whether an issue
+        // is generated here.
+        if ($policyConfig['fallback_service_enabled'] ?? true) {
+            foreach ($serviceRows as $service) {
+                $status = (int) ($service['status'] ?? 0);
+
+                if ($status === 0) {
+                    continue;
+                }
+
+                // service_status: 1=Warning, 2=Critical, 3=Unknown (the
+                // same validated Nagios mapping
+                // Page::serviceStatusClass() already encodes).
+                //
+                // Deliberately NOT gated on $operationallyCritical the
+                // way Device Down and sensor conditions are: a service
+                // check that has already classified itself Critical (a
+                // specific failing application/health-check, not raw
+                // ICMP/SNMP reachability) is Critical for every device
+                // by default — this is a stronger, more specific signal
+                // than the device's own infrastructure-tier Device
+                // Group membership. Administrator-configurable per
+                // status via fallback_service_*_severity.
+                $severity = self::resolveSeverity($policyConfig, match ($status) {
+                    2 => 'fallback_service_critical_severity',
+                    1 => 'fallback_service_warning_severity',
+                    default => 'fallback_service_unknown_severity',
+                });
+
+                if ($severity === null) {
+                    continue;
+                }
+
+                $name = trim((string) ($service['name'] ?? 'Service'));
+                $message = trim((string) ($service['message'] ?? ''));
+
+                $issues->push(IssueBuilder::make([
+                    'key' => 'policy:' . $deviceId . ':service:' . ($service['service_id'] ?? $name),
+                    'device_id' => $deviceId,
+                    'location_id' => $locationId,
+                    'severity' => $severity,
+                    'priority' => $severity === Severity::CRITICAL
+                        ? IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK
+                        : IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
+                    'source' => 'service',
+                    'type' => 'service',
+                    'title' => 'Service ' . $name,
+                    'description' => self::describeFallback(
+                        $name . ($message !== '' ? ' — ' . $message : ''),
+                        'a service check reporting status ' . $status . ' applies to every device by default'
+                    ),
+                    'timestamp' => isset($service['changed']) ? (string) $service['changed'] : null,
+                    'actionable' => true,
+                    'device_url' => $deviceUrl,
+                ]));
+            }
+        }
+
+        // No exact per-sensor identity exists on an Alert-Rule-sourced
+        // issue either — a 'sensor' category tag can never suppress
+        // this loop. Each metric's own per-type enable/disable toggle
+        // is the only gate.
         foreach ($telemetry as $metric) {
             $state = Severity::normalize($metric['state'] ?? null);
 
@@ -157,9 +213,25 @@ final class OperationalPolicy
                 continue;
             }
 
-            $severity = $state === Severity::CRITICAL
-                ? ($operationallyCritical ? Severity::CRITICAL : Severity::WARNING)
-                : Severity::WARNING;
+            $isStateSensor = Page::metricProblemType($metric) === 'state';
+            $enabledKey = $isStateSensor ? 'fallback_state_sensor_enabled' : 'fallback_numeric_sensor_enabled';
+
+            if (! ($policyConfig[$enabledKey] ?? true)) {
+                continue;
+            }
+
+            if ($state === Severity::WARNING) {
+                $severity = Severity::WARNING;
+            } else {
+                $settingKey = $operationallyCritical
+                    ? ($isStateSensor ? 'fallback_state_sensor_critical_group_severity' : 'fallback_numeric_sensor_critical_group_severity')
+                    : ($isStateSensor ? 'fallback_state_sensor_normal_severity' : 'fallback_numeric_sensor_normal_severity');
+                $severity = self::resolveSeverity($policyConfig, $settingKey);
+            }
+
+            if ($severity === null) {
+                continue;
+            }
 
             $sensorId = (int) ($metric['sensor_id'] ?? 0);
             $description = trim((string) ($metric['cause'] ?? ''));
@@ -198,6 +270,38 @@ final class OperationalPolicy
         }
 
         return $issues;
+    }
+
+    /**
+     * Fail-safe severity-choice resolution (Section 15's own
+     * requirement): reads one 'critical'/'warning'/'disabled' choice
+     * out of the already-typed/validated $policyConfig (Support\
+     * Config::resolve() already rejected anything outside FIELDS'
+     * declared options — this is defense in depth, never trusting a
+     * raw/untyped value here). 'disabled' resolves to null, meaning
+     * "generate no issue for this slot"; any unrecognized value falls
+     * back to Severity::WARNING rather than silently producing a
+     * malformed severity string.
+     *
+     * Deliberately does NOT offer Severity::UNKNOWN as a policy choice:
+     * UNKNOWN means "technically indeterminate / Needs Review" — a real,
+     * distinct technical state (an unreadable/undecoded sensor, see
+     * Page::buildDeviceIssues()'s own UNKNOWN handling) — not a
+     * synonym for "low-urgency but confirmed". This dashboard has no
+     * real "Informational" severity tier; rather than invent one or
+     * silently borrow UNKNOWN's meaning, the only choices offered are
+     * severities that already mean what they say.
+     */
+    private static function resolveSeverity(array $policyConfig, string $settingKey): ?string
+    {
+        $choice = (string) ($policyConfig[$settingKey] ?? Severity::WARNING);
+
+        return match ($choice) {
+            Severity::CRITICAL => Severity::CRITICAL,
+            Severity::WARNING => Severity::WARNING,
+            'disabled' => null,
+            default => Severity::WARNING,
+        };
     }
 
     /**
