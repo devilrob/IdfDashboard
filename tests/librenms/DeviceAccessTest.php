@@ -2290,15 +2290,25 @@ class DeviceAccessTest extends TestCase
             app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
             $adminPayload
         )->render();
-        // Checked by the structural class, not a loose "Policy Health"
-        // text substring — that text also legitimately appears inside
-        // this <style> block's own explanatory CSS comment (rendered
-        // unconditionally for every visitor, admin or not), so a plain
-        // string match would be a false signal either way: a false
-        // pass here (the comment alone would satisfy it with the real
-        // panel still broken) and, as real CI caught below, a false
-        // failure on the non-admin assertion.
-        $this->assertStringContainsString('infra-policy-health', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
+        // Checked by the exact opening HTML tag, not a bare
+        // "infra-policy-health" class-name substring. Real CI (twice
+        // now) proved a plain substring is not safe here: this
+        // <style> block also unconditionally renders the CSS *rules*
+        // that style .infra-policy-health (background/border color,
+        // the summary color, and the body.tv-mode-active hide rule),
+        // every one of which contains that same class name as a CSS
+        // selector, for every visitor, admin or not — a class name
+        // has no special immunity to this any more than the earlier
+        // "Policy Health" text substring did. '<details
+        // class="infra-policy-health">' is the literal opening tag
+        // Blade only ever emits from inside the real
+        // @if($policyHealth !== null) block (page.blade.php ~line
+        // 2051) — it cannot appear in a CSS selector (those read
+        // ".infra-policy-health { ... }", never "<details
+        // class=..."), so this is the first check in this test that
+        // is genuinely unambiguous regardless of what any nearby
+        // comment or CSS rule happens to say.
+        $this->assertStringContainsString('<details class="infra-policy-health">', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
         $this->assertStringContainsString('Sophos Health Check Service', $adminHtml);
 
         $viewer = User::factory()->create(['enabled' => 1]);
@@ -2316,7 +2326,18 @@ class DeviceAccessTest extends TestCase
             app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
             $viewerPayload
         )->render();
-        $this->assertStringNotContainsString('infra-policy-health', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
+        // Same reasoning as the admin-positive check above, mirrored:
+        // the CSS *rules* for .infra-policy-health are legitimately
+        // present in this page's <style> block for every visitor
+        // regardless of role (that is normal, harmless stylesheet
+        // architecture, not an information leak — a CSS selector
+        // existing does not disclose that any element using it is
+        // actually on the page). What must genuinely be absent for a
+        // non-admin is the opening <details> tag itself; checking for
+        // the bare class name would incorrectly fail for every user,
+        // not just a non-admin, since the stylesheet is role-agnostic
+        // by design.
+        $this->assertStringNotContainsString('<details class="infra-policy-health">', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
     }
 
     /**
