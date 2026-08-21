@@ -2311,6 +2311,78 @@ class DeviceAccessTest extends TestCase
         $this->assertStringNotContainsString('Policy Health', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
     }
 
+    /**
+     * Mission Section 30's two remaining "healthy — no false issue"
+     * scenarios: a healthy UPS's live telemetry must stay visible
+     * (not merely absent-of-an-issue, genuinely rendered), and a
+     * healthy Sophos service check must never itself become an issue.
+     * Both are proven true through the real Blade render, not just
+     * through Page::data()'s array shape — a metric/service that is
+     * correctly excluded from the *issue* list but never actually
+     * reaches the compiled HTML at all would still fail the mission's
+     * own "live telemetry remains visible" requirement.
+     */
+    public function testHealthyUpsTelemetryRemainsVisibleAndHealthySophosProducesNoIssue(): void
+    {
+        $location = Location::factory()->create(['location' => 'Healthy Telemetry Fixture']);
+
+        $healthyUps = Device::factory()->create([
+            'display' => 'Healthy UPS',
+            'hostname' => 'policy-health-ups.example.com',
+            'location_id' => $location->id,
+            'type' => 'network',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Sensor::factory()->for($healthyUps)->create([
+            'sensor_class' => 'charge',
+            'sensor_descr' => 'Battery Charge',
+            'sensor_current' => 95,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
+        ]);
+
+        $healthySophosDevice = Device::factory()->create([
+            'display' => 'Healthy Sophos Endpoint',
+            'hostname' => 'policy-health-sophos.example.com',
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => 1,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+        Service::factory()->for($healthySophosDevice)->create([
+            'service_name' => 'Sophos Tamper Protection',
+            'service_status' => 0,
+            'service_message' => 'Protected',
+        ]);
+
+        $admin = User::factory()->create(['enabled' => 1]);
+        $admin->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $admin);
+        $payload = (new Page())->data([], $request);
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertSame('healthy', $devices->get($healthyUps->device_id)['health'], 'A healthy UPS with no other condition must remain Healthy, not be turned into a false issue by its own telemetry.');
+        $this->assertTrue($devices->get($healthyUps->device_id)['issues']->isEmpty(), 'A healthy battery-charge reading must not itself become an issue.');
+
+        $this->assertSame('healthy', $devices->get($healthySophosDevice->device_id)['health'], 'A healthy Sophos service check must not make the device anything other than Healthy.');
+        $this->assertFalse($devices->get($healthySophosDevice->device_id)['issues']->contains(
+            fn (array $issue): bool => $issue['source'] === 'service'
+        ), 'service_status=0 must never itself produce a service issue — Sophos healthy means no issue, not a hidden one.');
+
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $payload
+        )->render();
+        $this->assertStringContainsString('Battery Charge', $html, 'The healthy UPS\'s curated telemetry must genuinely render on the card, not just be absent from the issue list — Section 30\'s "live telemetry remains visible" requirement.');
+        $this->assertStringNotContainsString('Sophos Tamper Protection', $html, 'A healthy service check must not appear anywhere in the rendered issue markup.');
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
