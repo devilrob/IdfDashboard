@@ -161,7 +161,7 @@ coverage as limited instead of reporting a misleading percentage.
 ## Releases
 
 Update `Support/Version.php` and `CHANGELOG.md`, commit, then create a matching
-tag such as `v1.3.0`. GitHub Actions validates the tag/version match, runs the
+tag such as `v1.4.0`. GitHub Actions validates the tag/version match, runs the
 PHP 8.2/8.3/8.4 standalone matrix, the real LibreNMS 26.8 + MariaDB integration
 test, and the small/medium/large performance matrix; the release job only
 publishes once all of those succeed. It then builds the minimal plugin ZIP,

@@ -22,25 +22,21 @@ use Illuminate\Support\Collection;
  * than once per device or once per category.
  *
  * Suppression requires EXACT structured identity, never a category
- * label. Device Down is the one condition where that exact identity is
- * trivially available: there is only one "device unreachable" condition
+ * label. Device Down is the only condition where that exact identity is
+ * available at all: there is only one "device unreachable" condition
  * per device, and an Alert-Rule-sourced issue already carries that same
- * real device_id — see $coveredCategories/AlertRules::CATEGORY_DEVICE_DOWN
- * below. A numeric/state sensor condition and a service condition each
- * have their OWN identity (a specific sensor_id / service_id), but an
- * Alert-Rule-sourced issue in this schema carries none of those (see
- * Page::buildDeviceIssues() — no sensor_id/service_id survives onto an
- * alert issue, only device_id and the rule's own name/severity). An
- * administrator can still tag a rule as "covers Sensors" or "covers
- * Services" in Settings (AlertRules::resolveConditionCoverage()) — that
- * tag remains useful for Settings/Policy Health as a documented,
- * administrative statement of INTENT — but it is deliberately never
- * used here to suppress a sensor/service fallback, because a category
- * tag is not an exact identity: an unrelated Temperature Alert Rule
- * tagged "Sensors" must never hide a failed Power Supply on the same
- * device. Without a real per-entity identifier on both sides, this
- * class always prefers a safe, clearly-labeled visual duplicate over a
- * hidden incident.
+ * real device_id — see $deviceDownCovered below and
+ * AlertRules::DEVICE_DOWN_SETTING_KEY. A numeric/state sensor condition
+ * and a service condition each have their OWN identity (a specific
+ * sensor_id / service_id), but an Alert-Rule-sourced issue in this
+ * schema carries none of those (see Page::buildDeviceIssues() — no
+ * sensor_id/service_id survives onto an alert issue, only device_id and
+ * the rule's own name/severity) — so this plugin does not offer a tag
+ * for them at all (a control a user could reasonably read as
+ * functional, but that could never safely suppress anything, is worse
+ * than no control). Without a real per-entity identifier on both sides,
+ * this class always prefers a safe, clearly-labeled visual duplicate
+ * over a hidden incident.
  *
  * "Operationally critical" is intentionally NOT re-derived from device
  * type/role/hostname pattern-matching (that was tried once already, in
@@ -48,10 +44,10 @@ use Illuminate\Support\Collection;
  * positives/negatives this redesign exists to fix — a printer is not
  * "technically a printer therefore never critical", a server is not
  * "technically a server therefore always critical"). It is read from
- * one real, administrator-controlled LibreNMS Device Group membership
- * (device_group_device), exactly matching how a real NOC already
- * decides "which of my devices actually page someone at 3am" — see
- * Page::loadOperationallyCriticalDeviceIds().
+ * one or more real, administrator-selected LibreNMS Device Group
+ * memberships (device_group_device), exactly matching how a real NOC
+ * already decides "which of my devices actually page someone at 3am" —
+ * see Support\DeviceGroups::memberDeviceIds().
  */
 final class OperationalPolicy
 {
@@ -63,15 +59,16 @@ final class OperationalPolicy
      * Page::buildDeviceIssues() — this class does not need a matching
      * catch-all, because Severity::UNKNOWN already IS that catch-all.
      *
-     * @param  array<int, string>  $coveredCategories  The subset of
-     *     Support\AlertRules::CATEGORIES an active, administrator-
-     *     selected Alert Rule is tagged as covering for this device.
-     *     Only AlertRules::CATEGORY_DEVICE_DOWN is ever used to
-     *     suppress anything here — see this class's own docblock for
-     *     why 'sensor'/'service' tags are read elsewhere (Settings,
-     *     Policy Health) but never here.
+     * @param  bool  $deviceDownCovered  Whether an active, administrator-
+     *     selected Alert Rule is tagged "Device Down" for this device
+     *     (Support\AlertRules::DEVICE_DOWN_SETTING_KEY) — the only
+     *     condition with a real exact identity to correlate against
+     *     (see this class's own docblock). Sensor/service conditions
+     *     have no equivalent parameter at all: this plugin does not
+     *     offer a tag for them, so there is nothing to suppress them
+     *     with.
      * @param  array<string, mixed>  $policyConfig  The resolved
-     *     'operational_severity_policy' slice of Support\Config — see
+     *     Operational Priority policy slice of Support\Config — see
      *     Support\Config::FIELDS. Every severity/enabled decision below
      *     reads only from here, never a hardcoded literal, so an
      *     administrator can change this policy without editing code.
@@ -83,7 +80,7 @@ final class OperationalPolicy
         int $deviceStatus,
         bool $maintenanceActive,
         bool $operationallyCritical,
-        array $coveredCategories,
+        bool $deviceDownCovered,
         Collection $serviceRows,
         Collection $telemetry,
         array $policyConfig
@@ -102,14 +99,6 @@ final class OperationalPolicy
         if ($maintenanceActive && ($policyConfig['fallback_suppress_during_maintenance'] ?? true)) {
             return $issues;
         }
-
-        // Device Down is the only condition category with a real,
-        // shared exact identity (device_id) on both sides — see this
-        // class's own docblock. 'sensor'/'service' tags are
-        // deliberately never consulted here: a category label is not
-        // an exact per-sensor/per-service identity, and suppressing on
-        // one would risk hiding an unrelated device's real failure.
-        $deviceDownCovered = in_array(AlertRules::CATEGORY_DEVICE_DOWN, $coveredCategories, true);
 
         if ($deviceStatus === 0
             && ! $deviceDownCovered
@@ -301,6 +290,71 @@ final class OperationalPolicy
             Severity::WARNING => Severity::WARNING,
             'disabled' => null,
             default => Severity::WARNING,
+        };
+    }
+
+    /**
+     * A compact, resolved-config-driven summary of the effective
+     * fallback policy — used by Settings' "Operational Priority"
+     * section so the main page can show real, live severities instead
+     * of duplicating them as hardcoded Blade prose that could drift
+     * from actual behavior. Reads only $policyConfig, the exact same
+     * resolved slice resolveFallbackIssues() itself consumes, so this
+     * can never disagree with runtime behavior. Numeric and state
+     * sensor rows collapse into one "Sensor Failure" row when both
+     * currently resolve to the same severities (true for the defaults,
+     * and for most real configurations); they split into two labeled
+     * rows only when an administrator has actually configured them
+     * differently in Advanced.
+     *
+     * @param  array<string, mixed>  $policyConfig
+     * @return array<int, array{condition: string, critical_groups: string, other_devices: string}>
+     */
+    public static function effectivePolicySummary(array $policyConfig): array
+    {
+        $rows = [[
+            'condition' => 'Device Down',
+            'critical_groups' => self::severityLabel($policyConfig, 'fallback_device_down_critical_group_severity'),
+            'other_devices' => self::severityLabel($policyConfig, 'fallback_device_down_normal_severity'),
+        ]];
+
+        $numericCritical = self::severityLabel($policyConfig, 'fallback_numeric_sensor_critical_group_severity');
+        $numericNormal = self::severityLabel($policyConfig, 'fallback_numeric_sensor_normal_severity');
+        $stateCritical = self::severityLabel($policyConfig, 'fallback_state_sensor_critical_group_severity');
+        $stateNormal = self::severityLabel($policyConfig, 'fallback_state_sensor_normal_severity');
+
+        if ($numericCritical === $stateCritical && $numericNormal === $stateNormal) {
+            $rows[] = [
+                'condition' => 'Sensor Failure',
+                'critical_groups' => $numericCritical,
+                'other_devices' => $numericNormal,
+            ];
+        } else {
+            $rows[] = ['condition' => 'Numeric Sensor Failure', 'critical_groups' => $numericCritical, 'other_devices' => $numericNormal];
+            $rows[] = ['condition' => 'State Sensor Failure', 'critical_groups' => $stateCritical, 'other_devices' => $stateNormal];
+        }
+
+        // Service severity is deliberately not gated by Operational
+        // Critical membership (see resolveFallbackIssues()'s own
+        // comment) — both columns always show the same value, which
+        // honestly reflects that this row does not vary by group.
+        $serviceCritical = self::severityLabel($policyConfig, 'fallback_service_critical_severity');
+        $rows[] = [
+            'condition' => 'Service Critical',
+            'critical_groups' => $serviceCritical,
+            'other_devices' => $serviceCritical,
+        ];
+
+        return $rows;
+    }
+
+    /** Human-readable label for one resolved severity choice — see resolveSeverity(). */
+    private static function severityLabel(array $policyConfig, string $settingKey): string
+    {
+        return match (self::resolveSeverity($policyConfig, $settingKey)) {
+            Severity::CRITICAL => 'Critical',
+            Severity::WARNING => 'Warning',
+            default => 'Disabled',
         };
     }
 

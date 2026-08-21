@@ -3,13 +3,13 @@
 namespace App\Plugins\IdfDashboard;
 
 use App\Models\AlertSchedule;
-use App\Models\DeviceGroup;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
+use App\Plugins\IdfDashboard\Support\DeviceGroups;
 use App\Plugins\IdfDashboard\Support\Freshness;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use App\Plugins\IdfDashboard\Support\OperationalPolicy;
@@ -65,18 +65,22 @@ class Page extends PageHook
     private array $enabledProblemTypes;
 
     /**
-     * The name of the LibreNMS Device Group an administrator uses to
-     * mark a device "operationally critical" — clusters, virtualization
-     * hosts, critical servers, core/distribution switches, firewalls,
-     * critical UPS/PDU, critical infrastructure controllers. This is
-     * deliberately the ONLY new setting Support\OperationalPolicy needs:
-     * criticality itself lives entirely in LibreNMS's own Device
-     * Groups admin UI (device_group_device), never duplicated as a
-     * second per-device toggle inside this plugin. See
-     * loadOperationallyCriticalDeviceIds() and Support\OperationalPolicy's
-     * own class docblock.
+     * The real LibreNMS Device Group IDs an administrator has selected
+     * as "operationally critical" — clusters, virtualization hosts,
+     * critical servers, core/distribution switches, firewalls, critical
+     * UPS/PDU, critical infrastructure controllers. Resolved once in
+     * data() via Support\DeviceGroups::resolveEffectiveGroupIds() (new
+     * multi-select, falling back to the legacy single-name setting only
+     * when the multi-select was never saved). This is deliberately the
+     * ONLY new setting Support\OperationalPolicy needs: criticality
+     * itself lives entirely in LibreNMS's own Device Groups admin UI
+     * (device_group_device), never duplicated as a second per-device
+     * toggle inside this plugin. See Support\DeviceGroups::memberDeviceIds()
+     * and Support\OperationalPolicy's own class docblock.
+     *
+     * @var array<int, int>
      */
-    private string $operationalCriticalGroupName;
+    private array $operationalCriticalGroupIds = [];
 
     /**
      * Device roles whose power telemetry is mission critical. Stale
@@ -134,7 +138,12 @@ class Page extends PageHook
         $this->processorCriticalPercent = $config['processor_critical_percent'];
         $this->refreshSeconds = $config['refresh_seconds'];
         $this->staleEnabled = (bool) $config['default_problem_stale'];
-        $this->operationalCriticalGroupName = trim((string) $config['operational_critical_group_name']);
+        $availableDeviceGroups = DeviceGroups::available();
+        $this->operationalCriticalGroupIds = DeviceGroups::resolveEffectiveGroupIds(
+            $settings,
+            $availableDeviceGroups,
+            (string) $config['operational_critical_group_name']
+        );
 
         /*
          * Reported directly by a user of this dashboard: turning a
@@ -195,32 +204,33 @@ class Page extends PageHook
         );
 
         /*
-         * Which technical-condition categories (Support\AlertRules::
-         * CATEGORIES) an administrator has explicitly declared each
-         * included Alert Rule already covers — see
+         * Which included Alert Rules an administrator has explicitly
+         * tagged "Device Down" — see
          * OperationalPolicy::resolveFallbackIssues()'s own docblock for
-         * why this is condition-category, not device-wide, and why it
-         * is administrator-declared rather than auto-detected from the
-         * rule's own condition/query (Support\PolicyHealth's docblock
-         * already documents this project's standing decision not to
+         * why Device Down is the only condition with a real exact
+         * identity to correlate against, and why it is administrator-
+         * declared rather than auto-detected from the rule's own
+         * condition/query (Support\PolicyHealth's docblock already
+         * documents this project's standing decision not to
          * re-implement LibreNMS's own rule-evaluation engine).
          */
-        $alertRuleConditionCoverage = AlertRules::resolveConditionCoverage(
-            $settings[AlertRules::CONDITION_SETTING_KEY] ?? null,
+        $deviceDownTaggedIds = AlertRules::resolveDeviceDownTaggedIds(
+            $settings[AlertRules::DEVICE_DOWN_SETTING_KEY] ?? null,
             $availableAlertRules
         );
 
         /*
          * Support\OperationalPolicy's own fallback safety net policy —
-         * see Support\Config::FIELDS' 'operational_severity_policy'
-         * group. Sliced out of $config here so OperationalPolicy never
-         * receives (or could accidentally depend on) any other setting.
+         * the 'policy' (Operational Priority) and 'advanced' groups of
+         * Support\Config::FIELDS together. Sliced out of $config here
+         * so OperationalPolicy never receives (or could accidentally
+         * depend on) any other setting.
          */
         $policyConfig = array_intersect_key(
             $config,
             array_flip(array_keys(array_filter(
                 Config::FIELDS,
-                static fn (array $field): bool => $field['group'] === 'operational_severity_policy'
+                static fn (array $field): bool => in_array($field['group'], ['policy', 'advanced'], true)
             )))
         );
 
@@ -423,7 +433,7 @@ class Page extends PageHook
         $deviceOutages = $this->loadDeviceOutages($allDeviceIds);
         $deviceAvailability = $this->loadAvailability($allDeviceIds);
         $maintenanceMap = $this->loadMaintenanceDevices($allDeviceIds);
-        $operationalCriticalDeviceIds = $this->loadOperationallyCriticalDeviceIds($allDeviceIds);
+        $operationalCriticalDeviceIds = DeviceGroups::memberDeviceIds($this->operationalCriticalGroupIds, $allDeviceIds);
 
         /*
          * Normalize every active device exactly once.
@@ -441,7 +451,7 @@ class Page extends PageHook
                 $deviceAvailability,
                 $maintenanceMap,
                 $operationalCriticalDeviceIds,
-                $alertRuleConditionCoverage,
+                $deviceDownTaggedIds,
                 $policyConfig
             ): array {
                 $deviceId = (int) $device->device_id;
@@ -460,7 +470,7 @@ class Page extends PageHook
                     $deviceAvailability->get($deviceId, collect()),
                     $maintenanceMap->get($deviceId),
                     $operationalCriticalDeviceIds->contains($deviceId),
-                    $alertRuleConditionCoverage,
+                    $deviceDownTaggedIds,
                     $policyConfig
                 );
             })
@@ -757,22 +767,27 @@ class Page extends PageHook
         // Section 25 — administrator-only, strictly read-only. Never
         // computed (let alone shown) for a regular user; never creates,
         // modifies or deletes any LibreNMS resource — see
-        // Support\PolicyHealth's own docblock. One extra indexed lookup
-        // only for an admin request, not a per-device/per-sensor cost
-        // (Section 28) — loadOperationallyCriticalDeviceIds() already
-        // resolved the group internally but its existing, already-
-        // tested contract only returns member IDs, not group
-        // existence, so that one fact is confirmed here separately
-        // rather than reshaping an already-verified function.
+        // Support\PolicyHealth's own docblock. $availableDeviceGroups is
+        // already loaded above for $operationalCriticalGroupIds
+        // resolution, so naming the selected groups here is a plain
+        // in-memory filter, not a per-device/per-sensor cost
+        // (Section 28).
+        $selectedGroupNames = array_values(array_map(
+            static fn (array $group): string => $group['name'],
+            array_filter(
+                $availableDeviceGroups,
+                fn (array $group): bool => in_array($group['id'], $this->operationalCriticalGroupIds, true)
+            )
+        ));
+
         $policyHealth = $user->hasRole('admin')
             ? PolicyHealth::evaluate(
                 $availableAlertRules,
                 $includedAlertRuleIds,
-                $this->operationalCriticalGroupName,
-                $this->operationalCriticalGroupExists(),
+                $selectedGroupNames,
                 $operationalCriticalDeviceIds->count(),
                 $devices,
-                $alertRuleConditionCoverage,
+                $deviceDownTaggedIds,
                 $policyConfig
             )
             : null;
@@ -1256,7 +1271,7 @@ class Page extends PageHook
         ?Collection $availability = null,
         ?object $maintenance = null,
         bool $operationallyCritical = false,
-        array $alertRuleConditionCoverage = [],
+        array $deviceDownTaggedIds = [],
         array $policyConfig = []
     ): array {
         $name = $this->deviceName($device);
@@ -1385,7 +1400,7 @@ class Page extends PageHook
             $serviceRows,
             $maintenanceActive,
             $operationallyCritical,
-            $alertRuleConditionCoverage,
+            $deviceDownTaggedIds,
             $policyConfig
         );
 
@@ -1593,7 +1608,7 @@ class Page extends PageHook
         Collection $services,
         bool $maintenanceActive,
         bool $operationallyCritical,
-        array $alertRuleConditionCoverage,
+        array $deviceDownTaggedIds,
         array $policyConfig
     ): Collection {
         $deviceId = (int) $device->device_id;
@@ -1730,18 +1745,16 @@ class Page extends PageHook
             ]));
         }
 
-        // Layer 3 fallback — see this method's own docblock. Evaluated
-        // per condition CATEGORY, never once per device: only the
-        // categories an administrator has actually tagged one of this
-        // device's active alerts as covering (Support\AlertRules::
-        // resolveConditionCoverage()) are suppressed below — an
-        // unrelated active alert on this same device leaves every
-        // other category's fallback untouched.
-        $coveredCategories = $alerts
-            ->flatMap(fn (array $alert): array => $alertRuleConditionCoverage[(int) ($alert['rule_id'] ?? 0)] ?? [])
-            ->unique()
-            ->values()
-            ->all();
+        // Layer 3 fallback — see this method's own docblock. The Device
+        // Down fallback alone is ever suppressed, and only when one of
+        // this device's currently active alerts is sourced from a rule
+        // an administrator has explicitly tagged "Device Down"
+        // (Support\AlertRules::resolveDeviceDownTaggedIds()) — the only
+        // condition with a real, exact device_id shared between the
+        // rule and the fallback it replaces.
+        $deviceDownCovered = $alerts->contains(
+            fn (array $alert): bool => in_array((int) ($alert['rule_id'] ?? 0), $deviceDownTaggedIds, true)
+        );
 
         $issues = $issues->concat(OperationalPolicy::resolveFallbackIssues(
             $deviceId,
@@ -1750,7 +1763,7 @@ class Page extends PageHook
             (int) $device->status,
             $maintenanceActive,
             $operationallyCritical,
-            $coveredCategories,
+            $deviceDownCovered,
             $services,
             $telemetry,
             $policyConfig
@@ -3462,84 +3475,6 @@ class Page extends PageHook
                 ->keyBy('device_id');
         } catch (\Throwable) {
             return collect();
-        }
-    }
-
-    /**
-     * Resolves which of $deviceIds are members of the administrator-
-     * controlled LibreNMS "Operational Critical" Device Group (see
-     * Support\OperationalPolicy's own docblock for the full reasoning).
-     * `device_groups.rules`-based dynamic membership is deliberately
-     * never evaluated here — LibreNMS's own poller already materializes
-     * BOTH static and rule-based dynamic membership into
-     * `device_group_device`, so one plain join is sufficient and this
-     * plugin never re-implements LibreNMS's own dynamic-group rule
-     * engine. If the configured group name is blank, or the group does
-     * not exist yet (an administrator hasn't created it), this
-     * degrades safely to "no device is operationally critical" — never
-     * to "every device is" — matching the minimal onboarding workflow:
-     * a fresh install with no group configured falls back to Warning
-     * severity for every device until an administrator opts specific
-     * devices in.
-     */
-    private function loadOperationallyCriticalDeviceIds(Collection $deviceIds): Collection
-    {
-        if ($deviceIds->isEmpty()
-            || $this->operationalCriticalGroupName === ''
-            || ! $this->tableExists('device_groups')
-            || ! $this->tableExists('device_group_device')
-        ) {
-            return collect();
-        }
-
-        try {
-            // Resolved through the real Eloquent DeviceGroup model
-            // (App\Models\DeviceGroup — the same model the test suite's
-            // own DeviceGroup::factory() fixtures already use) rather
-            // than a raw DB::table('device_groups')->value('id') guess
-            // at the primary-key column name: Eloquent's own
-            // ->getKey()/->getKeyName() resolve that correctly whatever
-            // it is, and production code + test fixtures now share the
-            // exact same resolution path by construction.
-            $group = DeviceGroup::query()
-                ->whereRaw('LOWER(name) = ?', [Str::lower($this->operationalCriticalGroupName)])
-                ->first();
-
-            if ($group === null) {
-                return collect();
-            }
-
-            return DB::table('device_group_device')
-                ->where('device_group_id', $group->getKey())
-                ->whereIn('device_id', $deviceIds)
-                ->pluck('device_id')
-                ->map(fn (mixed $id): int => (int) $id)
-                ->values();
-        } catch (\Throwable) {
-            return collect();
-        }
-    }
-
-    /**
-     * Whether the configured Operational Critical group name actually
-     * resolves to a real LibreNMS Device Group — distinct from "does
-     * it have any authorized-visible members right now" (see
-     * loadOperationallyCriticalDeviceIds(), whose own return value
-     * cannot tell those two states apart). Used only by the
-     * administrator-only Section 25 Policy Health panel.
-     */
-    private function operationalCriticalGroupExists(): bool
-    {
-        if ($this->operationalCriticalGroupName === '' || ! $this->tableExists('device_groups')) {
-            return false;
-        }
-
-        try {
-            return DeviceGroup::query()
-                ->whereRaw('LOWER(name) = ?', [Str::lower($this->operationalCriticalGroupName)])
-                ->exists();
-        } catch (\Throwable) {
-            return false;
         }
     }
 

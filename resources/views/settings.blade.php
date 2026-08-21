@@ -59,158 +59,145 @@
         @csrf
 
         @php
-            $groupLabels = [
+            $mainGroupLabels = [
                 'timing' => 'Refresh & Timing',
-                'thresholds' => 'Battery Charge Thresholds',
-                'visual' => 'Visual Effects',
-                'navigation' => 'Navigation & Lists',
+                'display' => 'Dashboard Display',
+            ];
+            $tailGroupLabels = [
+                'problem' => 'Sensor/Data Quality',
+                'tv' => 'TV Mode',
                 'updates' => 'Updates',
-                'policy' => 'Operational Priority Policy',
-                'operational_severity_policy' => 'Operational Severity Policy',
-                'severity' => 'Default Severity Shown on Load',
-                'problem' => 'Sensor Coverage & Data-Quality Checks',
-                'section' => 'Default Sections Visible on Load',
-                'tv_restrict' => 'TV Mode Additional Restrictions',
             ];
         @endphp
 
-        @foreach ($groupLabels as $groupKey => $groupLabel)
-            <fieldset class="idf-settings-group">
-                <legend>{{ $groupLabel }}</legend>
+        @foreach ($mainGroupLabels as $groupKey => $groupLabel)
+            @include('IdfDashboard::resources.views.settings-field-group', ['groupKey' => $groupKey, 'groupLabel' => $groupLabel])
+        @endforeach
 
-                @if ($groupKey === 'policy')
-                    <p class="idf-settings-group-intro">
-                        A technical failure is not automatically an
-                        operationally critical incident — a kitchen printer
-                        being down is not the same as a production cluster
-                        being unreachable. This dashboard prefers
-                        administrator-selected LibreNMS Alert Rules for
-                        Critical/Warning severity; the setting below only
-                        controls its bounded fallback for a condition no
-                        Alert Rule currently covers (a real technical
-                        failure must never be silently hidden, but not every
-                        failure should page someone). Create a LibreNMS
-                        Device Group with this exact name and add your
-                        clusters, virtualization hosts, critical servers,
-                        core/distribution switches, firewalls and critical
-                        UPS/PDUs to it — nothing else needs to change here;
-                        membership is managed entirely in LibreNMS's own
-                        Device Groups admin page. Leave blank (or point it
-                        at a group with no members) and every device
-                        defaults to Warning rather than Critical for
-                        fallback-covered conditions.
-                    </p>
-                @endif
+        {{-- Operational Priority: real Device Groups multi-select, the
+             Maintenance suppression toggle, and a read-only effective
+             policy summary sourced from Support\OperationalPolicy so it
+             can never drift from actual runtime behavior. Detailed
+             per-condition severity overrides live in Advanced below. --}}
+        <fieldset class="idf-settings-group">
+            <legend>Operational Priority</legend>
 
-                @if ($groupKey === 'operational_severity_policy')
-                    <p class="idf-settings-group-intro">
-                        Alert Rules remain authoritative whenever they cover a
-                        condition with an exact match. Device Down is the one
-                        condition tag below ("Included LibreNMS Alert Rules")
-                        that can actually suppress its matching fallback,
-                        because a Device Down Alert Rule and the fallback it
-                        replaces always share the same device. Sensor and
-                        Service tags are recorded for documentation and
-                        Policy Health only — they are deliberately never used
-                        to suppress a sensor/service fallback, since no exact
-                        per-sensor/per-service identifier exists to confirm a
-                        given Alert Rule actually covers a given sensor or
-                        service. An unrelated Alert Rule must never hide a
-                        real, different failure; a harmless visual duplicate
-                        is always preferred over a hidden incident. These
-                        settings control only the safety-net fallback itself
-                        — never used to override or compete with a real Alert
-                        Rule's own severity.
-                    </p>
-                @endif
+            <p class="idf-settings-group-intro">
+                A technical failure is not automatically an operationally
+                critical incident — a kitchen printer being down is not the
+                same as a production cluster being unreachable. Alert Rules
+                below are the preferred, explicit source of Critical/Warning
+                severity; the policy here only governs this dashboard's own
+                bounded fallback for a condition no included Alert Rule
+                already covers for that device.
+            </p>
 
-                @if ($groupKey === 'problem')
-                    <p class="idf-settings-group-intro">
-                        Whether a reading is a real problem is decided only
-                        by the LibreNMS Alert Rules checked below under
-                        "Included LibreNMS Alert Rules" — this dashboard no
-                        longer evaluates sensor thresholds itself. These
-                        checkboxes control something narrower: whether a
-                        <em>missing</em> sensor of this type is flagged as
-                        "No sensor installed", and whether an
-                        <em>unreadable/unrecognized</em> reading of this
-                        type is flagged as "Needs Review" — neither of
-                        those is something an Alert Rule can express, since
-                        a rule can only evaluate a sensor that already
-                        exists and already has a decodable value.
-                    </p>
-                @endif
+            <h4 class="idf-settings-subheading">Operational Critical Device Groups</h4>
+            <p class="idf-settings-group-intro">
+                Select every real LibreNMS Device Group (static or dynamic)
+                whose members should use the Critical-tier fallback
+                severities below. A device belongs to Operational Critical if
+                it is a member of <strong>any</strong> selected group.
+                Membership itself is still managed entirely on LibreNMS's own
+                Device Groups admin page — nothing here creates, renames, or
+                deletes a group.
+            </p>
 
-                <div class="idf-settings-field-grid">
-                    @foreach ($groups[$groupKey] ?? [] as $key => $field)
-                        <div class="idf-settings-field idf-settings-field-{{ $field['type'] }}">
-                            @if ($field['type'] === 'bool')
-                                <label class="idf-settings-checkbox-label">
-                                    <input type="hidden" name="settings[{{ $key }}]" value="0">
-                                    <input
-                                        type="checkbox"
-                                        name="settings[{{ $key }}]"
-                                        value="1"
-                                        @checked($resolved[$key])
-                                    >
-                                    {{ $field['label'] }}
-                                </label>
-                            @elseif ($field['type'] === 'choice')
-                                <label class="idf-settings-number-label">
-                                    <span>{{ $field['label'] }}</span>
-                                    <select name="settings[{{ $key }}]">
-                                        @foreach ($field['options'] as $optionValue => $optionLabel)
-                                            <option
-                                                value="{{ $optionValue }}"
-                                                @selected((string) $resolved[$key] === (string) $optionValue)
-                                            >{{ $optionLabel }}</option>
-                                        @endforeach
-                                    </select>
-                                </label>
-                            @elseif ($field['type'] === 'string')
-                                <label class="idf-settings-number-label">
-                                    <span>{{ $field['label'] }}</span>
-                                    <input
-                                        type="text"
-                                        name="settings[{{ $key }}]"
-                                        value="{{ $resolved[$key] }}"
-                                        maxlength="{{ $field['max_length'] }}"
-                                    >
-                                </label>
-                            @else
-                                <label class="idf-settings-number-label">
-                                    <span>{{ $field['label'] }}</span>
-                                    <input
-                                        type="number"
-                                        name="settings[{{ $key }}]"
-                                        value="{{ $resolved[$key] }}"
-                                        min="{{ $field['min'] }}"
-                                        max="{{ $field['max'] }}"
-                                        step="1"
-                                    >
-                                </label>
-                            @endif
+            @if (empty($availableDeviceGroups))
+                <div class="idf-settings-help">
+                    No LibreNMS Device Groups were found. Create one under
+                    Devices &gt; Device Groups, then return here to select it.
+                </div>
+            @else
+                <input type="hidden" name="settings[{{ $deviceGroupSettingKey }}][]" value="">
 
-                            @if ($field['help'] !== '')
-                                <div class="idf-settings-help">{{ $field['help'] }}</div>
-                            @endif
+                <div class="idf-settings-field-grid idf-device-groups-grid">
+                    @foreach ($availableDeviceGroups as $group)
+                        <div class="idf-settings-field idf-settings-field-bool">
+                            <label class="idf-settings-checkbox-label">
+                                <input
+                                    type="checkbox"
+                                    class="idf-device-group-checkbox"
+                                    name="settings[{{ $deviceGroupSettingKey }}][]"
+                                    value="{{ $group['id'] }}"
+                                    @checked(in_array($group['id'], $selectedDeviceGroupIds, true))
+                                >
+                                <span>
+                                    {{ $group['name'] }}
+                                    @if ($group['type'] !== '')
+                                        <span class="idf-alert-rule-severity">{{ $group['type'] }}</span>
+                                    @endif
+                                </span>
+                            </label>
                         </div>
                     @endforeach
                 </div>
-            </fieldset>
-        @endforeach
+            @endif
 
+            <h4 class="idf-settings-subheading">Maintenance</h4>
+            <div class="idf-settings-field-grid">
+                <div class="idf-settings-field idf-settings-field-bool">
+                    <label class="idf-settings-checkbox-label">
+                        <input type="hidden" name="settings[fallback_suppress_during_maintenance]" value="0">
+                        <input
+                            type="checkbox"
+                            name="settings[fallback_suppress_during_maintenance]"
+                            value="1"
+                            @checked($resolved['fallback_suppress_during_maintenance'])
+                        >
+                        Suppress fallback during active LibreNMS maintenance
+                    </label>
+                    <div class="idf-settings-help">Does not change LibreNMS's own maintenance/schedule suppression of Alert Rules — only this dashboard's own fallback safety net.</div>
+                </div>
+            </div>
+
+            <h4 class="idf-settings-subheading">Effective policy</h4>
+            <p class="idf-settings-group-intro">
+                Read-only — reflects the resolved configuration exactly,
+                including any Advanced overrides below. Never hand-edited
+                text, so it can never drift from actual behavior.
+            </p>
+            <table class="idf-policy-summary-table">
+                <thead>
+                    <tr>
+                        <th>Condition</th>
+                        <th>Critical Groups</th>
+                        <th>Other Devices</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($effectivePolicySummary as $row)
+                        <tr>
+                            <td>{{ $row['condition'] }}</td>
+                            <td>{{ $row['critical_groups'] }}</td>
+                            <td>{{ $row['other_devices'] }}</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        </fieldset>
+
+        {{-- Alert Rules: one table only — real LibreNMS Alert Rules,
+             whether each feeds this dashboard, and which one (if any) is
+             the exact Device Down correlation hint. No Sensors/Services
+             tagging — see Support\AlertRules' own docblock for why no
+             such tag could ever safely suppress anything. --}}
         <fieldset class="idf-settings-group">
-            <legend>Included LibreNMS Alert Rules</legend>
+            <legend>Alert Rules</legend>
 
             <p class="idf-settings-group-intro">
-                Every rule below is a real Alert Rule already configured in LibreNMS
-                (Alert Rules admin page). Checked rules feed this dashboard's "Alert"
-                issues; unchecked rules are simply not shown here — LibreNMS keeps
-                evaluating and notifying on them exactly as configured either way.
-                Nothing is hidden automatically anymore: a rule stays included the
-                first time you open this page, and stays exactly as you left it after
-                that.
+                Every rule below is a real Alert Rule already configured in
+                LibreNMS (Alert Rules admin page). <strong>Include</strong>
+                controls whether the rule feeds this dashboard's own "Alert"
+                issues — LibreNMS keeps evaluating and notifying on it
+                exactly as configured either way.
+                <strong>Device Down</strong> is the only exact-correlation
+                hint this dashboard offers: tagging a rule Device Down lets
+                it suppress this dashboard's own Device Down fallback for
+                the same device, because both share a real, exact
+                device_id. No other condition (a specific sensor or
+                service) has an equivalent exact identifier available on a
+                fired LibreNMS alert, so no tag is offered for them.
             </p>
 
             @if (empty($availableAlertRules))
@@ -221,66 +208,74 @@
                 </div>
             @else
                 <input type="hidden" name="settings[{{ $alertRuleSettingKey }}][]" value="">
+                <input type="hidden" name="settings[{{ $deviceDownSettingKey }}][]" value="">
 
-                <div class="idf-settings-field-grid idf-alert-rules-grid">
-                    @foreach ($availableAlertRules as $rule)
-                        <div class="idf-settings-field idf-settings-field-bool">
-                            <label class="idf-settings-checkbox-label">
-                                <input
-                                    type="checkbox"
-                                    class="idf-alert-rule-checkbox"
-                                    name="settings[{{ $alertRuleSettingKey }}][]"
-                                    value="{{ $rule['id'] }}"
-                                    @checked(in_array($rule['id'], $includedAlertRuleIds, true))
-                                >
-                                <span>
-                                    {{ $rule['name'] }}
+                <table class="idf-alert-rules-table">
+                    <thead>
+                        <tr>
+                            <th>Alert Rule</th>
+                            <th>Severity</th>
+                            <th>Include</th>
+                            <th>Device Down</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach ($availableAlertRules as $rule)
+                            <tr>
+                                <td>{{ $rule['name'] }}</td>
+                                <td>
                                     @if ($rule['severity'] !== '')
                                         <span class="idf-alert-rule-severity">{{ $rule['severity'] }}</span>
                                     @endif
-                                </span>
-                            </label>
-                        </div>
-                    @endforeach
-                </div>
-
-                <p class="idf-settings-group-intro">
-                    For each rule above, record which technical condition
-                    category it covers. <strong>Tagging "Device Down" is the
-                    only tag that actually suppresses its matching
-                    fallback</strong> — a Device Down Alert Rule and the
-                    fallback it replaces always share the same device, so
-                    that correlation is exact. Tagging "Sensors" or
-                    "Services" does <strong>not</strong> suppress any
-                    sensor/service fallback by itself — it is recorded only
-                    for documentation and Policy Health visibility, because
-                    no exact per-sensor/per-service identifier exists to
-                    confirm a rule really covers a specific sensor or
-                    service. Leave every box unchecked for a rule unrelated
-                    to this dashboard's own fallback categories.
-                </p>
-
-                <div class="idf-settings-field-grid idf-alert-rule-conditions-grid">
-                    @foreach ($availableAlertRules as $rule)
-                        <div class="idf-settings-field idf-settings-field-bool">
-                            <span class="idf-alert-rule-condition-name">{{ $rule['name'] }}</span>
-                            <input type="hidden" name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]" value="">
-                            @foreach ($alertRuleConditionCategories as $categoryValue => $categoryLabel)
-                                <label class="idf-settings-checkbox-label">
+                                </td>
+                                <td>
                                     <input
                                         type="checkbox"
-                                        name="settings[{{ $alertRuleConditionSettingKey }}][{{ $rule['id'] }}][]"
-                                        value="{{ $categoryValue }}"
-                                        @checked(in_array($categoryValue, $alertRuleConditionCoverage[$rule['id']] ?? [], true))
+                                        class="idf-alert-rule-checkbox"
+                                        name="settings[{{ $alertRuleSettingKey }}][]"
+                                        value="{{ $rule['id'] }}"
+                                        @checked(in_array($rule['id'], $includedAlertRuleIds, true))
                                     >
-                                    {{ $categoryLabel }}
-                                </label>
-                            @endforeach
-                        </div>
-                    @endforeach
-                </div>
+                                </td>
+                                <td>
+                                    <input
+                                        type="checkbox"
+                                        class="idf-device-down-checkbox"
+                                        name="settings[{{ $deviceDownSettingKey }}][]"
+                                        value="{{ $rule['id'] }}"
+                                        @checked(in_array($rule['id'], $deviceDownTaggedIds, true))
+                                    >
+                                </td>
+                            </tr>
+                        @endforeach
+                    </tbody>
+                </table>
             @endif
         </fieldset>
+
+        @foreach ($tailGroupLabels as $groupKey => $groupLabel)
+            @include('IdfDashboard::resources.views.settings-field-group', ['groupKey' => $groupKey, 'groupLabel' => $groupLabel])
+        @endforeach
+
+        <details class="idf-settings-group idf-settings-advanced">
+            <summary>Advanced</summary>
+            <p class="idf-settings-group-intro">
+                Detailed per-condition fallback overrides. Defaults here
+                reproduce this plugin's original policy matrix exactly, so
+                opening this section changes nothing until you edit a value.
+                There is deliberately no single global "Fallback Safety Net
+                enabled" switch — the *_enabled toggles below already let
+                you disable each category independently, and a second
+                master switch would just be a second, competing authority
+                over the same decision.
+            </p>
+            <div class="idf-settings-field-grid">
+                @foreach ($groups['advanced'] ?? [] as $key => $field)
+                    @continue(($field['hidden'] ?? false))
+                    @include('IdfDashboard::resources.views.settings-field', ['key' => $key, 'field' => $field])
+                @endforeach
+            </div>
+        </details>
 
         <div class="idf-settings-actions">
             <button type="submit" class="idf-settings-save">Save Settings</button>
@@ -317,12 +312,19 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         input.checked = true;
     });
 
-    // Condition coverage has no FIELDS default either — "reset to
-    // defaults" means "nothing declared", matching
-    // Support\AlertRules::resolveConditionCoverage()'s own safe
-    // default (the fallback keeps running for every category until an
-    // administrator explicitly confirms a rule covers it).
-    document.querySelectorAll('.idf-alert-rule-conditions-grid input[type="checkbox"]').forEach(function (input) {
+    // Device Down tagging has no FIELDS default either — "reset to
+    // defaults" means "nothing tagged", matching
+    // Support\AlertRules::resolveDeviceDownTaggedIds()'s own safe
+    // default (the fallback keeps running until an administrator
+    // explicitly tags a rule as covering it).
+    document.querySelectorAll('.idf-device-down-checkbox').forEach(function (input) {
+        input.checked = false;
+    });
+
+    // Operational Critical Device Groups likewise has no FIELDS
+    // default — "reset to defaults" means "nothing selected", matching
+    // the fail-safe default of Support\DeviceGroups::resolveSelectedIds().
+    document.querySelectorAll('.idf-device-group-checkbox').forEach(function (input) {
         input.checked = false;
     });
 });
@@ -451,13 +453,31 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         padding: 12px 16px 16px;
     }
 
-    .idf-settings-group legend {
+    .idf-settings-group legend,
+    .idf-settings-advanced summary {
         color: #337ab7;
         font-size: 13px;
         font-weight: 700;
         padding: 0 6px;
         text-transform: uppercase;
         letter-spacing: .03em;
+    }
+
+    .idf-settings-advanced summary {
+        cursor: pointer;
+        padding: 4px 6px;
+    }
+
+    .idf-settings-subheading {
+        color: #444;
+        font-size: 12px;
+        letter-spacing: .02em;
+        margin: 14px 0 6px;
+        text-transform: uppercase;
+    }
+
+    .idf-settings-subheading:first-of-type {
+        margin-top: 4px;
     }
 
     .idf-settings-field-grid {
@@ -473,8 +493,33 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
         max-width: 720px;
     }
 
-    .idf-alert-rules-grid {
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    .idf-alert-rules-table,
+    .idf-policy-summary-table {
+        border-collapse: collapse;
+        margin-bottom: 8px;
+        width: 100%;
+    }
+
+    .idf-alert-rules-table th,
+    .idf-alert-rules-table td,
+    .idf-policy-summary-table th,
+    .idf-policy-summary-table td {
+        border-bottom: 1px solid #e6e9ec;
+        padding: 6px 10px;
+        text-align: left;
+    }
+
+    .idf-alert-rules-table th,
+    .idf-policy-summary-table th {
+        color: #5f6b76;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: .02em;
+    }
+
+    .idf-device-groups-grid {
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        margin-bottom: 8px;
     }
 
     .idf-alert-rule-severity {

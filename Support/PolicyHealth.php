@@ -33,31 +33,30 @@ final class PolicyHealth
     /**
      * @param  array<int, array{id: int, name: string, severity: string}>  $availableAlertRules
      * @param  array<int, int>  $includedAlertRuleIds
-     * @param  array<int, array<int, string>>  $alertRuleConditionCoverage  rule_id => covered categories, see Support\AlertRules::resolveConditionCoverage().
-     * @param  array<string, mixed>  $policyConfig  The 'operational_severity_policy' slice of Support\Config — see Support\Config::FIELDS.
+     * @param  array<int, string>  $selectedOperationalCriticalGroupNames  Names of the currently selected Operational Critical Device Groups that still resolve to a real group — see Support\DeviceGroups::resolveEffectiveGroupIds().
+     * @param  array<string, mixed>  $policyConfig  The resolved Operational Priority policy slice of Support\Config — see Support\Config::FIELDS.
      * @param  Collection<int, array<string, mixed>>  $devices  Every currently authorized, already-normalized device.
+     * @param  array<int, int>  $deviceDownTaggedIds  See Support\AlertRules::resolveDeviceDownTaggedIds().
      * @return array<int, array{status: string, label: string}>
      */
     public static function evaluate(
         array $availableAlertRules,
         array $includedAlertRuleIds,
-        string $operationalCriticalGroupName,
-        bool $operationalCriticalGroupResolved,
+        array $selectedOperationalCriticalGroupNames,
         int $operationalCriticalDeviceCount,
         Collection $devices,
-        array $alertRuleConditionCoverage = [],
+        array $deviceDownTaggedIds = [],
         array $policyConfig = []
     ): array {
         $checks = [];
 
         $checks[] = self::operationalCriticalGroupCheck(
-            $operationalCriticalGroupName,
-            $operationalCriticalGroupResolved,
+            $selectedOperationalCriticalGroupNames,
             $operationalCriticalDeviceCount
         );
 
         $checks[] = self::alertRuleInventoryCheck($availableAlertRules, $includedAlertRuleIds);
-        $checks[] = self::conditionCoverageCheck($includedAlertRuleIds, $alertRuleConditionCoverage);
+        $checks[] = self::deviceDownCoverageCheck($includedAlertRuleIds, $deviceDownTaggedIds);
         $checks[] = self::deviceDownRuleCheck($availableAlertRules);
         $checks[] = self::serviceRuleCheck($availableAlertRules);
         $checks[] = self::fallbackCategoriesCheck($policyConfig);
@@ -67,35 +66,30 @@ final class PolicyHealth
         return $checks;
     }
 
+    /** @param array<int, string> $selectedGroupNames */
     private static function operationalCriticalGroupCheck(
-        string $name,
-        bool $resolved,
+        array $selectedGroupNames,
         int $memberCount
     ): array {
-        if ($name === '') {
+        if ($selectedGroupNames === []) {
             return [
                 'status' => self::STATUS_INFO,
-                'label' => 'No Operational Critical Device Group name is configured — every device currently uses the standard-device default policy.',
+                'label' => 'No Operational Critical Device Groups are selected — every device currently uses the standard-device default policy.',
             ];
         }
 
-        if (! $resolved) {
-            return [
-                'status' => self::STATUS_WARNING,
-                'label' => 'Operational Critical Device Group "' . $name . '" is configured but does not currently exist in LibreNMS — create it under Devices > Device Groups, or every device will keep using the standard-device default policy.',
-            ];
-        }
+        $names = implode(', ', $selectedGroupNames);
 
         if ($memberCount === 0) {
             return [
                 'status' => self::STATUS_WARNING,
-                'label' => 'Operational Critical Device Group "' . $name . '" exists but has no members — add your clusters, critical servers and other must-page infrastructure to it.',
+                'label' => 'Operational Critical Device Group(s) ' . $names . ' are selected but have no authorized members — add your clusters, critical servers and other must-page infrastructure to them.',
             ];
         }
 
         return [
             'status' => self::STATUS_OK,
-            'label' => 'Operational Critical Device Group "' . $name . '" exists with ' . $memberCount . ' member device' . ($memberCount === 1 ? '' : 's') . '.',
+            'label' => 'Operational Critical Device Group(s) ' . $names . ' resolve to ' . $memberCount . ' member device' . ($memberCount === 1 ? '' : 's') . '.',
         ];
     }
 
@@ -162,45 +156,39 @@ final class PolicyHealth
     }
 
     /**
-     * Reports CONFIGURED CATEGORY COVERAGE — an administrator's declared
-     * intent (Settings > Included LibreNMS Alert Rules) — never EXACT
-     * RUNTIME CORRELATION. These are deliberately different things: a
-     * rule tagged "Sensors"/"Services" is documentation only and never
-     * suppresses a fallback (see Support\OperationalPolicy's own
-     * docblock — no exact per-sensor/per-service identity exists to
-     * confirm it). Only a rule tagged "Device Down" ever actually
-     * suppresses anything, because that tag shares a real, exact
-     * device_id with the fallback it replaces. This check never treats
-     * a tag as proof a rule actually fires for a condition (that would
-     * be re-simulating LibreNMS's own rule engine, see this class's own
-     * docblock) — it simply reports how many currently-included rules
-     * have been tagged at all, so an administrator can see declared
-     * intent at a glance without mistaking it for a suppression guarantee.
+     * Reports how many currently-included Alert Rules an administrator
+     * has tagged "Device Down" — the only tag this plugin offers, and
+     * the only one that ever suppresses a fallback, because it shares a
+     * real, exact device_id with the fallback it replaces (see
+     * Support\OperationalPolicy's own docblock). This check never
+     * treats the tag as proof a rule actually fires for a given device
+     * (that would be re-simulating LibreNMS's own rule engine, see this
+     * class's own docblock) — it simply reports declared intent.
      *
      * @param  array<int, int>  $includedAlertRuleIds
-     * @param  array<int, array<int, string>>  $alertRuleConditionCoverage
+     * @param  array<int, int>  $deviceDownTaggedIds
      */
-    private static function conditionCoverageCheck(array $includedAlertRuleIds, array $alertRuleConditionCoverage): array
+    private static function deviceDownCoverageCheck(array $includedAlertRuleIds, array $deviceDownTaggedIds): array
     {
         if ($includedAlertRuleIds === []) {
             return [
                 'status' => self::STATUS_INFO,
-                'label' => 'No Alert Rules are currently included, so there is nothing to tag with condition coverage yet.',
+                'label' => 'No Alert Rules are currently included, so there is nothing to tag "Device Down" yet.',
             ];
         }
 
-        $taggedCount = count(array_intersect($includedAlertRuleIds, array_keys($alertRuleConditionCoverage)));
+        $taggedCount = count(array_intersect($includedAlertRuleIds, $deviceDownTaggedIds));
 
         if ($taggedCount === 0) {
             return [
                 'status' => self::STATUS_INFO,
-                'label' => 'No included Alert Rule has been tagged with a condition category yet (Settings > Included LibreNMS Alert Rules) — configured category coverage, not exact runtime correlation; only a "Device Down" tag ever actually suppresses a fallback, and every other currently-uncovered condition still falls back to the default policy, never hidden.',
+                'label' => 'No included Alert Rule is tagged "Device Down" yet — the Device Down fallback still runs for every device until one is tagged, never hidden.',
             ];
         }
 
         return [
             'status' => self::STATUS_OK,
-            'label' => $taggedCount . ' of ' . count($includedAlertRuleIds) . ' included Alert Rule' . (count($includedAlertRuleIds) === 1 ? '' : 's') . ' currently declared as covering a specific condition category (configured coverage, not exact runtime correlation — only "Device Down" tags actually suppress a fallback).',
+            'label' => $taggedCount . ' included Alert Rule' . ($taggedCount === 1 ? '' : 's') . ' currently tagged "Device Down".',
         ];
     }
 

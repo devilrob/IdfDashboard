@@ -33,40 +33,20 @@ final class AlertRules
     public const SETTING_KEY = 'idf_included_alert_rule_ids';
 
     /**
-     * Persisted setting for administrator-declared condition coverage —
-     * see resolveConditionCoverage()'s own docblock for why this is
-     * declared rather than auto-detected.
+     * Persisted setting for the one Alert Rule tag with a real runtime
+     * effect: an administrator marking a rule as covering "Device
+     * Down". Device Down is the only technical condition whose "entity"
+     * is the device itself, so this tag shares a real, exact device_id
+     * with the fallback it replaces (see Support\OperationalPolicy's
+     * own docblock) — every other condition (a specific sensor or
+     * service) has no such exact identifier available on a fired
+     * LibreNMS alert in this schema (see Page::loadActiveAlerts()), so
+     * this plugin does not offer a tag for them: a tag a user could
+     * reasonably read as functional, but that could never safely
+     * suppress anything, is worse than no tag at all. Plain list of
+     * rule IDs, same shape/semantics as SETTING_KEY above.
      */
-    public const CONDITION_SETTING_KEY = 'idf_alert_rule_condition_categories';
-
-    /**
-     * The technical-condition categories an administrator can tag a
-     * rule with — Settings and Support\PolicyHealth display and count
-     * these as declared administrative INTENT, documentation of what a
-     * rule is meant to cover. This is deliberately NOT the same thing
-     * as exact runtime correlation: a fired LibreNMS alert carries no
-     * sensor_id/service_id in this schema (see Page::loadActiveAlerts()),
-     * and this plugin has already made the deliberate choice
-     * (Support\PolicyHealth's own docblock) not to re-parse an Alert
-     * Rule's condition/query to simulate exact entity-level firing —
-     * that would be re-implementing LibreNMS's own rule-evaluation
-     * engine a second time.
-     *
-     * Only CATEGORY_DEVICE_DOWN is ever used by Support\OperationalPolicy
-     * to actually suppress a fallback (see its own docblock): Device
-     * Down is the one category whose "entity" is the device itself, so
-     * the tag and the fallback already share a real, exact device_id.
-     * CATEGORY_SENSOR/CATEGORY_SERVICE tags are never used to suppress
-     * anything — a category label is not an exact per-sensor/
-     * per-service identity, and suppressing an entire category on that
-     * basis would risk an unrelated rule hiding a real, different
-     * failure. A safe, clearly-labeled visual duplicate is always
-     * preferred over a hidden incident.
-     */
-    public const CATEGORY_DEVICE_DOWN = 'device_down';
-    public const CATEGORY_SENSOR = 'sensor';
-    public const CATEGORY_SERVICE = 'service';
-    public const CATEGORIES = [self::CATEGORY_DEVICE_DOWN, self::CATEGORY_SENSOR, self::CATEGORY_SERVICE];
+    public const DEVICE_DOWN_SETTING_KEY = 'idf_device_down_alert_rule_ids';
 
     /**
      * Every real alert rule currently defined in LibreNMS, ordered by
@@ -149,20 +129,20 @@ final class AlertRules
     }
 
     /**
-     * The administrator-declared condition coverage map: rule_id (as a
-     * string, matching how Laravel/LibreNMS's plugin settings form
-     * posts array keys) => the subset of self::CATEGORIES that rule
-     * covers. Absent/malformed input resolves to "declares nothing" —
-     * the fail-safe direction here is "OperationalPolicy still
-     * generates a fallback" (a harmless, clearly-labeled duplicate),
+     * The administrator-declared set of rule IDs tagged "Device Down" —
+     * absent/malformed input resolves to "none tagged" (the fail-safe
+     * direction here is "OperationalPolicy still generates its own
+     * Device Down fallback", a harmless, clearly-labeled duplicate,
      * never "OperationalPolicy silently stays quiet about a rule that
-     * was never actually confirmed to cover it".
+     * was never actually confirmed to cover it"). Same shape and
+     * validation as resolveIncludedIds() above, deliberately: a
+     * deleted rule's stale ID cannot linger.
      *
      * @param  mixed  $rawSetting
      * @param  array<int, array{id: int, name: string, severity: string}>  $availableRules
-     * @return array<int, array<int, string>> rule_id => covered categories
+     * @return array<int, int>
      */
-    public static function resolveConditionCoverage(mixed $rawSetting, array $availableRules): array
+    public static function resolveDeviceDownTaggedIds(mixed $rawSetting, array $availableRules): array
     {
         $availableIds = array_map(static fn (array $rule): int => $rule['id'], $availableRules);
 
@@ -170,30 +150,15 @@ final class AlertRules
             return [];
         }
 
-        $coverage = [];
+        $selected = [];
 
-        foreach ($rawSetting as $ruleId => $categories) {
-            if (! is_numeric($ruleId) || ! is_array($categories)) {
-                continue;
-            }
-
-            $ruleId = (int) $ruleId;
-
-            if (! in_array($ruleId, $availableIds, true)) {
-                continue;
-            }
-
-            $validCategories = array_values(array_unique(array_filter(
-                array_map(static fn ($category): string => (string) $category, $categories),
-                static fn (string $category): bool => in_array($category, self::CATEGORIES, true)
-            )));
-
-            if ($validCategories !== []) {
-                $coverage[$ruleId] = $validCategories;
+        foreach ($rawSetting as $value) {
+            if (is_numeric($value)) {
+                $selected[] = (int) $value;
             }
         }
 
-        return $coverage;
+        return array_values(array_intersect($availableIds, array_unique($selected)));
     }
 
     private static function tableExists(string $table): bool

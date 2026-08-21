@@ -23,6 +23,7 @@ use App\Plugins\IdfDashboard\Settings;
 use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
+use App\Plugins\IdfDashboard\Support\DeviceGroups;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -2204,14 +2205,13 @@ class DeviceAccessTest extends TestCase
             'state_generic_value' => 2,
         ]);
 
-        // Case B/C (final hardening): tagging a rule "Sensors" in
-        // Settings is administrative documentation ONLY — it must NEVER
-        // suppress a sensor fallback, because no exact per-sensor
-        // identity exists to confirm the rule actually covers a given
-        // sensor. Two different sensors on the same device, both
-        // "covered" only by category tag (never by exact identity):
-        // BOTH fallbacks must remain. Safe visual duplicate over a
-        // hidden incident.
+        // Case B/C (final hardening): no Sensors tag exists at all — an
+        // active alert of any kind must NEVER suppress a sensor
+        // fallback, because no exact per-sensor identity exists to
+        // confirm the rule actually covers a given sensor. Two
+        // different sensors on the same device, alongside an unrelated
+        // active alert: BOTH fallbacks must remain. Safe visual
+        // duplicate over a hidden incident.
         //
         // REGRESSION NOTE: the Power Supply and Fan sensors below are
         // deliberately different LibreNMS sensor_class values ('state'
@@ -2306,9 +2306,10 @@ class DeviceAccessTest extends TestCase
             'lastupdate' => now(),
         ]);
 
-        // Case D (final hardening): a rule tagged "Services" must never
-        // hide a DIFFERENT failing service — same reasoning as sensors,
-        // no exact per-service identity exists to correlate against.
+        // Case D (final hardening): no Services tag exists at all — an
+        // unrelated active alert must never hide a DIFFERENT failing
+        // service, same reasoning as sensors: no exact per-service
+        // identity exists to correlate against.
         $serviceTagDevice = $makeDevice('service-tag-unrelated.example.com', 1);
         $serviceCoveringRule = AlertRule::factory()->create([
             'name' => 'Service Health Alert Rule',
@@ -2324,9 +2325,9 @@ class DeviceAccessTest extends TestCase
             'service_message' => 'Genuinely different service, not covered by the tagged rule',
         ]);
 
-        // Case E (final hardening): a sensor/service-tagged Alert Rule
-        // must never hide Device Down — only a rule tagged "Device
-        // Down" itself may suppress that fallback.
+        // Case E (final hardening): an Alert Rule not tagged "Device
+        // Down" must never hide Device Down — only a rule explicitly
+        // tagged "Device Down" itself may suppress that fallback.
         $deviceDownNotHidden = $makeDevice('device-down-not-hidden.example.com', 0);
         Alert::factory()->create([
             'device_id' => $deviceDownNotHidden->device_id,
@@ -2339,12 +2340,8 @@ class DeviceAccessTest extends TestCase
         $request->setUserResolver(fn (): User => $user);
         $payload = (new Page())->data(
             [
-                'operational_critical_group_name' => 'Operational Critical',
-                AlertRules::CONDITION_SETTING_KEY => [
-                    (string) $outrankingRule->id => ['device_down'],
-                    (string) $sensorCoveringRule->id => ['sensor'],
-                    (string) $serviceCoveringRule->id => ['service'],
-                ],
+                DeviceGroups::SETTING_KEY => [(string) $criticalGroup->getKey()],
+                AlertRules::DEVICE_DOWN_SETTING_KEY => [(string) $outrankingRule->id],
             ],
             $request
         );
@@ -2398,7 +2395,7 @@ class DeviceAccessTest extends TestCase
         $this->assertSame(
             2,
             $coveredSensorIssues->filter(fn (array $issue): bool => $issue['source'] === 'sensor' && $issue['severity'] === 'critical')->count(),
-            'Case B/C: a "Sensors" category tag must NEVER suppress a sensor fallback — no exact per-sensor identity exists to confirm the rule actually covers either sensor, so BOTH the Power Supply and Fan fallbacks remain alongside the tagged Alert Rule. A safe visual duplicate is required over a hidden incident.'
+            'Case B/C: no Sensors tag exists to suppress a sensor fallback — no exact per-sensor identity exists to confirm any rule actually covers either sensor, so BOTH the Power Supply and Fan fallbacks remain alongside the unrelated Alert Rule. A safe visual duplicate is required over a hidden incident.'
         );
 
         $multiIssues = $devices->get($multiUncoveredDevice->device_id)['issues'];
@@ -2419,7 +2416,7 @@ class DeviceAccessTest extends TestCase
         );
         $this->assertTrue(
             $serviceTagIssues->contains(fn (array $issue): bool => $issue['source'] === 'service' && $issue['severity'] === 'critical'),
-            'Case D: a "Services" category tag must NEVER hide a DIFFERENT failing service — no exact per-service identity exists to confirm the rule actually covers this specific service.'
+            'Case D: no Services tag exists to hide a DIFFERENT failing service — no exact per-service identity exists to confirm any rule actually covers this specific service.'
         );
 
         $deviceDownIssues = $devices->get($deviceDownNotHidden->device_id)['issues'];
@@ -2616,18 +2613,19 @@ class DeviceAccessTest extends TestCase
         $this->assertSame('warning', $devices->get($invalidConfigDevice->device_id)['health'], 'Case K: an invalid persisted severity choice ("banana") safely falls back to the documented default (Warning), never an exception or a malformed severity.');
 
         // Case F (UNKNOWN semantics): Config::FIELDS must never offer
-        // 'unknown' as a choice for any operational_severity_policy
-        // field — UNKNOWN is a real technical state (Needs Review),
-        // never a fake "Informational" policy severity.
+        // 'unknown' as a choice for any Operational Priority ('policy')
+        // or Advanced ('advanced') fallback field — UNKNOWN is a real
+        // technical state (Needs Review), never a fake "Informational"
+        // policy severity.
         foreach (Config::FIELDS as $key => $field) {
-            if (($field['group'] ?? null) !== 'operational_severity_policy' || $field['type'] !== 'choice') {
+            if (! in_array($field['group'] ?? null, ['policy', 'advanced'], true) || $field['type'] !== 'choice') {
                 continue;
             }
 
             $this->assertArrayNotHasKey(
                 'unknown',
                 $field['options'],
-                "Case F: Settings must never offer 'unknown' as an Operational Severity Policy choice ($key) — no real Informational severity tier exists in this dashboard."
+                "Case F: Settings must never offer 'unknown' as an Operational Priority choice ($key) — no real Informational severity tier exists in this dashboard."
             );
         }
 
@@ -2722,7 +2720,7 @@ class DeviceAccessTest extends TestCase
         $this->assertStringContainsString('2 of 2', $checks[1]['label'], 'Both rules are included by default — no explicit idf_included_alert_rule_ids setting was saved in this fixture.');
 
         $this->assertSame('info', $checks[2]['status']);
-        $this->assertStringContainsString('has been tagged', $checks[2]['label'], 'Neither rule was tagged with a condition category in this fixture — informational, never hides the fallback.');
+        $this->assertStringContainsString('tagged "Device Down"', $checks[2]['label'], 'Neither rule was tagged "Device Down" in this fixture — informational, never hides the fallback.');
 
         $this->assertSame('ok', $checks[3]['status']);
         $this->assertStringContainsString('Device Down — Critical Infrastructure', $checks[3]['label']);
@@ -2890,6 +2888,90 @@ class DeviceAccessTest extends TestCase
         )->render();
         $this->assertStringContainsString('Battery Charge', $html, 'The healthy UPS\'s curated telemetry must genuinely render on the card, not just be absent from the issue list — Section 30\'s "live telemetry remains visible" requirement.');
         $this->assertStringNotContainsString('Sophos Tamper Protection', $html, 'A healthy service check must not appear anywhere in the rendered issue markup.');
+    }
+
+    /**
+     * Gate B3/UI render test — proves the restructured Settings page
+     * (Support\Settings::data() + resources/views/settings.blade.php)
+     * actually renders the redesigned UI, not just that the payload
+     * shape is correct: real Device Groups listed and multi-selectable,
+     * the legacy free-text textbox gone, Alert Rules collapsed into one
+     * table with no Sensors/Services tagging matrix, the old duplicate
+     * Operational Priority/Severity Policy sections gone, and an
+     * Advanced section present.
+     */
+    public function testSettingsPageRendersRedesignedOperationalPriorityAndAlertRulesUi(): void
+    {
+        $groupOne = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+        $groupTwo = DeviceGroup::factory()->create(['name' => 'Core Switches']);
+
+        $rule = AlertRule::factory()->create(['name' => 'Device Down — Critical Infrastructure', 'severity' => 'critical']);
+
+        $settings = [
+            DeviceGroups::SETTING_KEY => [(string) $groupOne->getKey(), (string) $groupTwo->getKey()],
+            AlertRules::DEVICE_DOWN_SETTING_KEY => [(string) $rule->id],
+        ];
+
+        $payload = (new Settings())->data($settings);
+        $html = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/settings.blade.php'),
+            $payload
+        )->render();
+
+        $this->assertStringContainsString('Operational Critical', $html, 'A real LibreNMS Device Group must be listed by name.');
+        $this->assertStringContainsString('Core Switches', $html, 'Multiple real Device Groups must be listed — this is a multi-select, not a single choice.');
+        $this->assertSame(
+            2,
+            substr_count($html, 'class="idf-device-group-checkbox"'),
+            'Both available Device Groups render as independently selectable checkboxes (checked by the full class attribute, not a bare class-name substring — that also matches this page\'s own JS querySelectorAll(\'.idf-device-group-checkbox\') reset-to-defaults handler).'
+        );
+        // The bare setting-name string still legitimately appears once,
+        // inside the reset-to-defaults JS's @json(...Config::FIELDS...)
+        // dump of every FIELDS default (including hidden ones) — a
+        // harmless no-op for a name no <input> in the page actually
+        // carries. What must genuinely be absent is the rendered
+        // form control itself.
+        $this->assertStringNotContainsString(
+            'name="settings[operational_critical_group_name]"',
+            $html,
+            'The legacy free-text Operational Critical Device Group name textbox must not render as a form control.'
+        );
+
+        $this->assertSame(
+            1,
+            substr_count($html, '<table class="idf-alert-rules-table">'),
+            'Alert Rules render as exactly one unified table.'
+        );
+        $this->assertStringNotContainsString(
+            'idf-alert-rule-conditions-grid',
+            $html,
+            'The old second Sensors/Services checkbox matrix must not render.'
+        );
+        $this->assertStringContainsString('Device Down — Critical Infrastructure', $html);
+        $this->assertStringContainsString('>Include<', $html);
+        $this->assertStringContainsString('>Device Down<', $html);
+
+        $this->assertSame(
+            1,
+            substr_count($html, '>Operational Priority<'),
+            'Exactly one Operational Priority section — the old separate "Operational Priority Policy" and "Operational Severity Policy" sections must be merged, not both present.'
+        );
+        $this->assertStringNotContainsString('Operational Severity Policy', $html);
+
+        $this->assertStringContainsString('>Advanced<', $html, 'A collapsed Advanced section must exist for detailed fallback overrides.');
+        $this->assertStringContainsString('fallback_device_down_critical_group_severity', $html, 'Advanced still exposes the detailed per-condition severity overrides.');
+
+        $this->assertStringNotContainsString(
+            'this dashboard no longer evaluates sensor thresholds',
+            $html,
+            'The contradictory claim that the dashboard never evaluates sensor thresholds must be gone — the fallback still does, when enabled.'
+        );
+
+        // Effective policy summary — read-only, sourced live from
+        // Support\OperationalPolicy::effectivePolicySummary(), never
+        // hardcoded Blade prose.
+        $this->assertStringContainsString('Device Down', $html);
+        $this->assertStringContainsString('Sensor Failure', $html);
     }
 
     private function writeVisualFixture(string $name, string $html): void
