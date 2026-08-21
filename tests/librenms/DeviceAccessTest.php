@@ -2925,10 +2925,16 @@ class DeviceAccessTest extends TestCase
             substr_count($html, 'class="idf-device-group-checkbox"'),
             'Both available Device Groups render as independently selectable checkboxes (checked by the full class attribute, not a bare class-name substring — that also matches this page\'s own JS querySelectorAll(\'.idf-device-group-checkbox\') reset-to-defaults handler).'
         );
+        // The bare setting-name string still legitimately appears once,
+        // inside the reset-to-defaults JS's @json(...Config::FIELDS...)
+        // dump of every FIELDS default (including hidden ones) — a
+        // harmless no-op for a name no <input> in the page actually
+        // carries. What must genuinely be absent is the rendered
+        // form control itself.
         $this->assertStringNotContainsString(
-            'operational_critical_group_name',
+            'name="settings[operational_critical_group_name]"',
             $html,
-            'The legacy free-text Operational Critical Device Group name textbox must not render.'
+            'The legacy free-text Operational Critical Device Group name textbox must not render as a form control.'
         );
 
         $this->assertSame(
