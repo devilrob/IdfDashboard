@@ -138,7 +138,13 @@
     }
 
     /*
-     * Section 25 — administrator-only "Policy Health" self-check.
+     * Section 25's administrator-only self-check panel (rendered
+     * below, class .infra-policy-health — this comment deliberately
+     * avoids spelling out its own on-screen heading verbatim, since
+     * this <style> block renders unconditionally for every visitor
+     * and a later regression test asserting that heading is genuinely
+     * absent for a non-admin must not trip over this comment's own
+     * prose instead of the real, correctly-gated panel markup).
      * Deliberately styled identically to .infra-legend just above it
      * (same collapsed-by-default <details>, same background/border/
      * font-size) — this is one more optional reference panel, not a

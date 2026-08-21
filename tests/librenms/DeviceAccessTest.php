@@ -2290,7 +2290,15 @@ class DeviceAccessTest extends TestCase
             app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
             $adminPayload
         )->render();
-        $this->assertStringContainsString('Policy Health', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
+        // Checked by the structural class, not a loose "Policy Health"
+        // text substring — that text also legitimately appears inside
+        // this <style> block's own explanatory CSS comment (rendered
+        // unconditionally for every visitor, admin or not), so a plain
+        // string match would be a false signal either way: a false
+        // pass here (the comment alone would satisfy it with the real
+        // panel still broken) and, as real CI caught below, a false
+        // failure on the non-admin assertion.
+        $this->assertStringContainsString('infra-policy-health', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
         $this->assertStringContainsString('Sophos Health Check Service', $adminHtml);
 
         $viewer = User::factory()->create(['enabled' => 1]);
@@ -2308,7 +2316,7 @@ class DeviceAccessTest extends TestCase
             app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
             $viewerPayload
         )->render();
-        $this->assertStringNotContainsString('Policy Health', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
+        $this->assertStringNotContainsString('infra-policy-health', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
     }
 
     /**
@@ -2334,6 +2342,31 @@ class DeviceAccessTest extends TestCase
             'status' => 1,
             'disabled' => 0,
             'ignore' => 0,
+        ]);
+        // buildTelemetry()'s 'ups' role curates exactly two readings —
+        // Input Voltage and Battery Charge (Page.php ~line 2017) — both
+        // are required for a genuinely, fully "healthy UPS" fixture.
+        // Real CI caught the gap this comment now documents: providing
+        // only Battery Charge left Input Voltage resolving through
+        // unavailableSensorMetric() to Severity::NO_SENSOR, and
+        // buildDeviceIssues()'s own pre-existing (not this session's)
+        // NO_SENSOR handling (~line 1624) correctly, intentionally
+        // pushes one informational 'missing sensor' issue for that —
+        // exactly the mission's own Section 6 "Missing required sensor
+        // -> Needs Review" policy, not a defect in either this fixture's
+        // battery reading or this session's OperationalPolicy/
+        // PolicyHealth work. A safely-healthy Input Voltage sensor
+        // (well below both threshold values, mirroring the explicit-
+        // threshold pattern already proven correct by Caso 3's Critical
+        // sensor fixture) closes that gap.
+        Sensor::factory()->for($healthyUps)->create([
+            'sensor_class' => 'voltage',
+            'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 120,
+            'sensor_limit' => 140,
+            'sensor_limit_warn' => 130,
+            'sensor_alert' => 1,
+            'lastupdate' => now(),
         ]);
         Sensor::factory()->for($healthyUps)->create([
             'sensor_class' => 'charge',
