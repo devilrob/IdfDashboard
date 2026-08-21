@@ -130,6 +130,19 @@ class Config
             'help' => 'Checks GitHub at most every six hours when an administrator opens this Settings page. Installation always requires the CLI command below.',
         ],
 
+        // --- Operational Priority Policy -------------------------------
+        // The single setting Support\OperationalPolicy needs (see its own
+        // class docblock and Page::loadOperationallyCriticalDeviceIds()).
+        // Deliberately not a per-device toggle inside this plugin —
+        // membership in the named LibreNMS Device Group is the actual
+        // criticality signal, managed entirely in LibreNMS's own admin UI.
+        'operational_critical_group_name' => [
+            'type' => 'string', 'default' => 'Operational Critical', 'max_length' => 191,
+            'label' => 'Operational Critical Device Group name',
+            'group' => 'policy',
+            'help' => 'Must exactly match a LibreNMS Device Group name (case-insensitive). Devices in this group get Critical severity for an otherwise-uncovered Device Down/Service/sensor condition; every other device gets Warning for the same condition.',
+        ],
+
         // --- Default Severity shown on load ----------------------------
         'default_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Critical', 'group' => 'severity', 'help' => ''],
         'default_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Warning', 'group' => 'severity', 'help' => ''],
@@ -236,6 +249,15 @@ class Config
                 $candidate = $raw === null ? (string) $field['default'] : (string) $raw;
                 $resolved[$key] = in_array($candidate, $options, true)
                     ? (is_int($field['default']) ? (int) $candidate : $candidate)
+                    : $field['default'];
+
+                continue;
+            }
+
+            if ($field['type'] === 'string') {
+                $candidate = $raw === null ? '' : trim((string) $raw);
+                $resolved[$key] = $candidate !== ''
+                    ? substr($candidate, 0, $field['max_length'])
                     : $field['default'];
 
                 continue;

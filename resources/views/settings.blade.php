@@ -65,6 +65,7 @@
                 'visual' => 'Visual Effects',
                 'navigation' => 'Navigation & Lists',
                 'updates' => 'Updates',
+                'policy' => 'Operational Priority Policy',
                 'severity' => 'Default Severity Shown on Load',
                 'problem' => 'Sensor Coverage & Data-Quality Checks',
                 'section' => 'Default Sections Visible on Load',
@@ -75,6 +76,30 @@
         @foreach ($groupLabels as $groupKey => $groupLabel)
             <fieldset class="idf-settings-group">
                 <legend>{{ $groupLabel }}</legend>
+
+                @if ($groupKey === 'policy')
+                    <p class="idf-settings-group-intro">
+                        A technical failure is not automatically an
+                        operationally critical incident — a kitchen printer
+                        being down is not the same as a production cluster
+                        being unreachable. This dashboard prefers
+                        administrator-selected LibreNMS Alert Rules for
+                        Critical/Warning severity; the setting below only
+                        controls its bounded fallback for a condition no
+                        Alert Rule currently covers (a real technical
+                        failure must never be silently hidden, but not every
+                        failure should page someone). Create a LibreNMS
+                        Device Group with this exact name and add your
+                        clusters, virtualization hosts, critical servers,
+                        core/distribution switches, firewalls and critical
+                        UPS/PDUs to it — nothing else needs to change here;
+                        membership is managed entirely in LibreNMS's own
+                        Device Groups admin page. Leave blank (or point it
+                        at a group with no members) and every device
+                        defaults to Warning rather than Critical for
+                        fallback-covered conditions.
+                    </p>
+                @endif
 
                 @if ($groupKey === 'problem')
                     <p class="idf-settings-group-intro">
@@ -118,6 +143,16 @@
                                             >{{ $optionLabel }}</option>
                                         @endforeach
                                     </select>
+                                </label>
+                            @elseif ($field['type'] === 'string')
+                                <label class="idf-settings-number-label">
+                                    <span>{{ $field['label'] }}</span>
+                                    <input
+                                        type="text"
+                                        name="settings[{{ $key }}]"
+                                        value="{{ $resolved[$key] }}"
+                                        maxlength="{{ $field['max_length'] }}"
+                                    >
                                 </label>
                             @else
                                 <label class="idf-settings-number-label">

@@ -3,6 +3,7 @@
 namespace App\Plugins\IdfDashboard;
 
 use App\Models\AlertSchedule;
+use App\Models\DeviceGroup;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\AlertRules;
@@ -11,6 +12,7 @@ use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
 use App\Plugins\IdfDashboard\Support\Freshness;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
+use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use App\Plugins\IdfDashboard\Support\Severity;
 use Carbon\Carbon;
@@ -60,6 +62,20 @@ class Page extends PageHook
      * not just display).
      */
     private array $enabledProblemTypes;
+
+    /**
+     * The name of the LibreNMS Device Group an administrator uses to
+     * mark a device "operationally critical" — clusters, virtualization
+     * hosts, critical servers, core/distribution switches, firewalls,
+     * critical UPS/PDU, critical infrastructure controllers. This is
+     * deliberately the ONLY new setting Support\OperationalPolicy needs:
+     * criticality itself lives entirely in LibreNMS's own Device
+     * Groups admin UI (device_group_device), never duplicated as a
+     * second per-device toggle inside this plugin. See
+     * loadOperationallyCriticalDeviceIds() and Support\OperationalPolicy's
+     * own class docblock.
+     */
+    private string $operationalCriticalGroupName;
 
     /**
      * Device roles whose power telemetry is mission critical. Stale
@@ -117,6 +133,7 @@ class Page extends PageHook
         $this->processorCriticalPercent = $config['processor_critical_percent'];
         $this->refreshSeconds = $config['refresh_seconds'];
         $this->staleEnabled = (bool) $config['default_problem_stale'];
+        $this->operationalCriticalGroupName = trim((string) $config['operational_critical_group_name']);
 
         /*
          * Reported directly by a user of this dashboard: turning a
@@ -375,6 +392,7 @@ class Page extends PageHook
         $deviceOutages = $this->loadDeviceOutages($allDeviceIds);
         $deviceAvailability = $this->loadAvailability($allDeviceIds);
         $maintenanceMap = $this->loadMaintenanceDevices($allDeviceIds);
+        $operationalCriticalDeviceIds = $this->loadOperationallyCriticalDeviceIds($allDeviceIds);
 
         /*
          * Normalize every active device exactly once.
@@ -390,7 +408,8 @@ class Page extends PageHook
                 $deviceProcessors,
                 $deviceOutages,
                 $deviceAvailability,
-                $maintenanceMap
+                $maintenanceMap,
+                $operationalCriticalDeviceIds
             ): array {
                 $deviceId = (int) $device->device_id;
 
@@ -406,7 +425,8 @@ class Page extends PageHook
                     $deviceOutages['current']->get($deviceId),
                     $deviceOutages['recovered']->get($deviceId),
                     $deviceAvailability->get($deviceId, collect()),
-                    $maintenanceMap->get($deviceId)
+                    $maintenanceMap->get($deviceId),
+                    $operationalCriticalDeviceIds->contains($deviceId)
                 );
             })
             ->values();
@@ -1089,7 +1109,14 @@ class Page extends PageHook
      * catch-all deliberately — see its own history in AUDIT_NOTES.md
      * (2,159 previously-invisible state sensors).
      */
-    private function metricProblemType(array $metric): string
+    /**
+     * Pure — no instance state used. Public/static so
+     * Support\OperationalPolicy can reuse the exact same category
+     * classification for its own fallback sensor issues instead of
+     * duplicating this mapping a second time (Section 27's own "no
+     * duplicate queries/logic" requirement).
+     */
+    public static function metricProblemType(array $metric): string
     {
         $label = Str::lower($metric['label']);
 
@@ -1167,7 +1194,8 @@ class Page extends PageHook
         ?object $currentOutage = null,
         ?object $recentRecovery = null,
         ?Collection $availability = null,
-        ?object $maintenance = null
+        ?object $maintenance = null,
+        bool $operationallyCritical = false
     ): array {
         $name = $this->deviceName($device);
 
@@ -1291,7 +1319,10 @@ class Page extends PageHook
             $sensors,
             $telemetry,
             $activeAlerts,
-            $staleIsUrgent
+            $staleIsUrgent,
+            $serviceRows,
+            $maintenanceActive,
+            $operationallyCritical
         );
 
         $health = Severity::worst(
@@ -1305,12 +1336,24 @@ class Page extends PageHook
             $health = Severity::MAINTENANCE;
         }
 
-        // Device Down / Service Issue / per-sensor-type problem tags are
-        // deliberately gone: those were this plugin's own parallel
-        // reimplementation of conditions real LibreNMS Alert Rules
-        // already evaluate (see buildDeviceIssues()'s own comment).
-        // 'alert', 'stale' and the 'other' fallback below are the only
-        // problem_types a device can carry now.
+        // Distinct Device Down / Service Issue / per-sensor-type
+        // problem_types TAGS (the fleet-wide filter dropdown's own
+        // categories) are gone — those tags existed only for this
+        // plugin's own now-removed parallel Device Down/Service Issue/
+        // per-sensor-threshold reimplementation of conditions real
+        // LibreNMS Alert Rules already evaluate (see buildDeviceIssues()'s
+        // own comment). This does NOT mean those conditions can no
+        // longer make a device unhealthy: an administrator-selected
+        // Alert Rule (source 'alert') still can, and — when no rule
+        // covers the condition at all — so can Support\OperationalPolicy's
+        // bounded fallback (source 'device'/'service'/'sensor'), exactly
+        // matching how an un-tagged UNKNOWN-state sensor issue already
+        // behaved before this redesign. 'alert', 'stale' and the
+        // 'other' fallback below are the only problem_types TAGS a
+        // device can carry now; a fallback issue is still fully visible
+        // in $issues/health/primary_issue, just filed under 'other'
+        // rather than a bespoke tag, same as an UNKNOWN sensor always
+        // has been.
         $problemTypes = collect();
 
         if ($activeAlerts->isNotEmpty()) {
@@ -1384,6 +1427,14 @@ class Page extends PageHook
             'role' => $role,
             'classification' => $classification,
             'category' => $classification['category'],
+
+            // Layer 3 policy input, exposed so the view can label a
+            // fallback issue's severity choice honestly ("default
+            // policy for an Operational Critical device" vs "...for a
+            // standard device" — see Support\OperationalPolicy) without
+            // re-deriving Device Group membership a second time.
+            'operationally_critical' => $operationallyCritical,
+
             'health' => $health,
 
             // Full, unfiltered per-sensor readings — no longer rendered
@@ -1430,22 +1481,43 @@ class Page extends PageHook
      * re-interpreting sensor/service/alert state.
      */
     /**
-     * Severity/"is this a real problem" is deliberately no longer
-     * computed here at all for Device Down, Service Issue, or per-
-     * sensor Critical/Warning thresholds — those are exactly the
-     * conditions real LibreNMS Alert Rules already evaluate (the admin
-     * screenshots this redesign was built from show "Cisco Switch
-     * Down", "Critical Devices - Device Down", "Service Critical/
-     * Warning" and "Sensor over/under limit - Check Device Health
-     * Settings" already configured), so an administrator now controls
-     * all of that through Support\AlertRules' per-rule selection in
-     * Settings instead of this plugin silently reimplementing the same
-     * threshold logic a second time. What genuinely has no LibreNMS
-     * Alert Rule equivalent — because a rule can only ever evaluate a
-     * sensor that already exists and already has a readable value —
-     * stays native: a sensor that is physically missing ("No sensor
-     * installed"), a sensor whose reading is stale, and a sensor/state
+     * Severity for Device Down, Service Issue, and per-sensor Critical/
+     * Warning thresholds is preferentially sourced from administrator-
+     * selected LibreNMS Alert Rules (source 'alert', below) — never
+     * duplicated as a second, independently-computed opinion while a
+     * matching rule is actively firing for a device (the admin
+     * screenshots this redesign was originally built from show "Cisco
+     * Switch Down", "Critical Devices - Device Down", "Service
+     * Critical/Warning" and "Sensor over/under limit - Check Device
+     * Health Settings" already configured). A core LibreNMS principle
+     * this plugin does not re-litigate: "a technical failure is not
+     * automatically an operationally critical incident" — a kitchen
+     * printer being technically DOWN is not the same as a production
+     * cluster being unreachable.
+     *
+     * Two conditions genuinely have no LibreNMS Alert Rule equivalent
+     * at all — because a rule can only ever evaluate a sensor that
+     * already exists and already has a readable value — and stay
+     * native regardless of Alert Rule configuration: a sensor that is
+     * physically missing ("No sensor installed"), and a sensor/state
      * value LibreNMS itself cannot decode ("Needs Review" / Unknown).
+     * A stale reading on a mission-critical power role also stays
+     * native (Support\ProblemPolicy::staleEscalates()) since no Alert
+     * Rule expresses "this sensor stopped updating" either.
+     *
+     * For everything else — Device Down, Service status 1/2/3, numeric/
+     * state sensor Critical/Warning — if this device currently has ZERO
+     * active alert-sourced issues at all (no matching rule fired, or no
+     * administrator has configured one yet), Support\OperationalPolicy
+     * supplies a bounded fallback: a real technical failure must never
+     * be silently hidden just because no Alert Rule was written for it
+     * yet, but that fallback's own severity is deliberately governed by
+     * whether this specific device is a member of the administrator-
+     * controlled "Operational Critical" LibreNMS Device Group — not by
+     * device type/role/hostname guessing. The moment a real Alert Rule
+     * exists for a condition, its issue (PRIORITY_*_ALERT) always
+     * outranks and effectively replaces this fallback
+     * (PRIORITY_*_POLICY_FALLBACK) for that device.
      */
     private function buildDeviceIssues(
         object $device,
@@ -1453,7 +1525,10 @@ class Page extends PageHook
         Collection $sensors,
         Collection $telemetry,
         Collection $alerts,
-        bool $staleIsUrgent
+        bool $staleIsUrgent,
+        Collection $services,
+        bool $maintenanceActive,
+        bool $operationallyCritical
     ): Collection {
         $deviceId = (int) $device->device_id;
         $locationId = $device->location_id !== null ? (int) $device->location_id : null;
@@ -1588,6 +1663,25 @@ class Page extends PageHook
                 'device_url' => $deviceUrl,
             ]));
         }
+
+        // Layer 3 fallback — see this method's own docblock. Only ever
+        // runs when this device has zero active alert-sourced issues at
+        // all (never layered on top of a real Alert Rule's own
+        // opinion) and is not currently in an active LibreNMS
+        // maintenance window (the same "do not manufacture new
+        // Warning/Critical noise" reasoning a maintenance window
+        // already applies to Alert Rules).
+        $issues = $issues->concat(OperationalPolicy::resolveFallbackIssues(
+            $deviceId,
+            $locationId,
+            $deviceUrl,
+            (int) $device->status,
+            $maintenanceActive,
+            $operationallyCritical,
+            $alerts->isNotEmpty(),
+            $services,
+            $telemetry
+        ));
 
         return $issues
             ->unique('key')
@@ -3293,6 +3387,61 @@ class Page extends PageHook
                 ->concat($groups)
                 ->sortBy('behavior')
                 ->keyBy('device_id');
+        } catch (\Throwable) {
+            return collect();
+        }
+    }
+
+    /**
+     * Resolves which of $deviceIds are members of the administrator-
+     * controlled LibreNMS "Operational Critical" Device Group (see
+     * Support\OperationalPolicy's own docblock for the full reasoning).
+     * `device_groups.rules`-based dynamic membership is deliberately
+     * never evaluated here — LibreNMS's own poller already materializes
+     * BOTH static and rule-based dynamic membership into
+     * `device_group_device`, so one plain join is sufficient and this
+     * plugin never re-implements LibreNMS's own dynamic-group rule
+     * engine. If the configured group name is blank, or the group does
+     * not exist yet (an administrator hasn't created it), this
+     * degrades safely to "no device is operationally critical" — never
+     * to "every device is" — matching the minimal onboarding workflow:
+     * a fresh install with no group configured falls back to Warning
+     * severity for every device until an administrator opts specific
+     * devices in.
+     */
+    private function loadOperationallyCriticalDeviceIds(Collection $deviceIds): Collection
+    {
+        if ($deviceIds->isEmpty()
+            || $this->operationalCriticalGroupName === ''
+            || ! $this->tableExists('device_groups')
+            || ! $this->tableExists('device_group_device')
+        ) {
+            return collect();
+        }
+
+        try {
+            // Resolved through the real Eloquent DeviceGroup model
+            // (App\Models\DeviceGroup — the same model the test suite's
+            // own DeviceGroup::factory() fixtures already use) rather
+            // than a raw DB::table('device_groups')->value('id') guess
+            // at the primary-key column name: Eloquent's own
+            // ->getKey()/->getKeyName() resolve that correctly whatever
+            // it is, and production code + test fixtures now share the
+            // exact same resolution path by construction.
+            $group = DeviceGroup::query()
+                ->whereRaw('LOWER(name) = ?', [Str::lower($this->operationalCriticalGroupName)])
+                ->first();
+
+            if ($group === null) {
+                return collect();
+            }
+
+            return DB::table('device_group_device')
+                ->where('device_group_id', $group->getKey())
+                ->whereIn('device_id', $deviceIds)
+                ->pluck('device_id')
+                ->map(fn (mixed $id): int => (int) $id)
+                ->values();
         } catch (\Throwable) {
             return collect();
         }

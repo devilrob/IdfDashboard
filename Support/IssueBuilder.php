@@ -10,7 +10,21 @@ final class IssueBuilder
     public const PRIORITY_CRITICAL_SENSOR = 20;
     public const PRIORITY_CRITICAL_SERVICE = 30;
     public const PRIORITY_CRITICAL_ALERT = 40;
+
+    /**
+     * Support\OperationalPolicy's own fallback tier — deliberately ranked
+     * below a real administrator-selected Alert Rule issue of the same
+     * severity (PRIORITY_CRITICAL_ALERT=40) and above the next severity
+     * tier down. This is what guarantees that the moment an
+     * administrator configures a real Alert Rule for a condition, that
+     * rule's issue always outranks — and in practice fully replaces,
+     * since Page.php only generates a fallback when a device has zero
+     * alert-sourced issues at all — this class's own generic opinion.
+     */
+    public const PRIORITY_CRITICAL_POLICY_FALLBACK = 42;
+
     public const PRIORITY_WARNING_ALERT = 45;
+    public const PRIORITY_WARNING_POLICY_FALLBACK = 47;
     public const PRIORITY_WARNING_SENSOR = 50;
     public const PRIORITY_WARNING_SERVICE = 60;
     public const PRIORITY_STALE = 70;

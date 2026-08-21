@@ -121,12 +121,14 @@ $assert([
     IssueBuilder::PRIORITY_CRITICAL_SENSOR,
     IssueBuilder::PRIORITY_CRITICAL_SERVICE,
     IssueBuilder::PRIORITY_CRITICAL_ALERT,
+    IssueBuilder::PRIORITY_CRITICAL_POLICY_FALLBACK,
     IssueBuilder::PRIORITY_WARNING_ALERT,
+    IssueBuilder::PRIORITY_WARNING_POLICY_FALLBACK,
     IssueBuilder::PRIORITY_WARNING_SENSOR,
     IssueBuilder::PRIORITY_WARNING_SERVICE,
     IssueBuilder::PRIORITY_STALE,
     IssueBuilder::PRIORITY_UNKNOWN,
-] === [10, 20, 30, 40, 45, 50, 60, 70, 80], 'Priority Attention order is exact');
+] === [10, 20, 30, 40, 42, 45, 47, 50, 60, 70, 80], 'Priority Attention order is exact, including the OperationalPolicy fallback tier ranked strictly below a real Alert Rule issue of the same severity');
 $warningAlertIssue = IssueBuilder::make([
     'key' => 'alert:9:warning',
     'device_id' => 9,
