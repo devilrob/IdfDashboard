@@ -2922,8 +2922,8 @@ class DeviceAccessTest extends TestCase
         $this->assertStringContainsString('Core Switches', $html, 'Multiple real Device Groups must be listed — this is a multi-select, not a single choice.');
         $this->assertSame(
             2,
-            substr_count($html, 'idf-device-group-checkbox'),
-            'Both available Device Groups render as independently selectable checkboxes.'
+            substr_count($html, 'class="idf-device-group-checkbox"'),
+            'Both available Device Groups render as independently selectable checkboxes (checked by the full class attribute, not a bare class-name substring — that also matches this page\'s own JS querySelectorAll(\'.idf-device-group-checkbox\') reset-to-defaults handler).'
         );
         $this->assertStringNotContainsString(
             'operational_critical_group_name',
