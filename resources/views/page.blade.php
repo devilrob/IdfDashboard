@@ -137,6 +137,74 @@
         color: #5c6bc0;
     }
 
+    /*
+     * Section 25 — administrator-only "Policy Health" self-check.
+     * Deliberately styled identically to .infra-legend just above it
+     * (same collapsed-by-default <details>, same background/border/
+     * font-size) — this is one more optional reference panel, not a
+     * louder/more urgent element than the legend it sits beside. The
+     * three status dots reuse the exact same three colors the legend
+     * already established for Critical/Warning/Needs-Review-adjacent
+     * meanings (#1c7a40 healthy-green, #8a5a00 warning-amber, #5c6bc0
+     * unknown-indigo) so an administrator never has to learn a second
+     * color vocabulary for this panel.
+     */
+    .infra-policy-health {
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 10px;
+        margin-bottom: 10px;
+        padding: 7px 9px;
+    }
+
+    .infra-policy-health summary {
+        color: #337ab7;
+        cursor: pointer;
+        font-weight: 700;
+        outline: none;
+    }
+
+    .policy-health-intro {
+        color: #777;
+        line-height: 1.4;
+        margin: 8px 0;
+    }
+
+    .policy-health-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+    }
+
+    .policy-health-item {
+        align-items: baseline;
+        display: flex;
+        gap: 6px;
+        line-height: 1.4;
+        padding: 3px 0;
+    }
+
+    .policy-health-dot {
+        border-radius: 50%;
+        flex: 0 0 auto;
+        height: 8px;
+        margin-top: 3px;
+        width: 8px;
+    }
+
+    .policy-health-ok .policy-health-dot {
+        background: #1c7a40;
+    }
+
+    .policy-health-warning .policy-health-dot {
+        background: #8a5a00;
+    }
+
+    .policy-health-info .policy-health-dot {
+        background: #5c6bc0;
+    }
+
     .coverage-panel,
     .summary-panel {
         display: grid;
@@ -1075,6 +1143,7 @@
 
     body.tv-mode-active .infra-toolbar,
     body.tv-mode-active .infra-legend,
+    body.tv-mode-active .infra-policy-health,
     body.tv-mode-active .coverage-panel,
     body.tv-mode-active .summary-panel {
         display: none !important;
@@ -1961,6 +2030,41 @@
             </div>
         </div>
     </details>
+
+    {{--
+        Section 25 — administrator-only, strictly read-only. $policyHealth
+        is null for any non-admin user (Page::data()'s own $user->hasRole(
+        'admin') gate), so this entire block simply does not exist in the
+        rendered HTML for a regular viewer — not hidden via CSS, absent
+        from the payload entirely. Never a control: nothing in this panel
+        submits a request, calls an endpoint, or otherwise creates/
+        modifies/deletes an Alert Rule, Device Group, or any other
+        LibreNMS resource — see Support\PolicyHealth's own docblock.
+    --}}
+    @if($policyHealth !== null)
+        <details class="infra-policy-health">
+            <summary>Policy Health — administrator diagnostic</summary>
+
+            <p class="policy-health-intro">
+                Read-only self-check: does your current Alert Rule /
+                Operational Critical Device Group configuration actually
+                explain what this dashboard is showing right now, or is
+                severity still coming from the default fallback policy for
+                a condition no one has configured a rule for yet? This
+                never creates, modifies or deletes an Alert Rule, Device
+                Group, or any other LibreNMS resource.
+            </p>
+
+            <ul class="policy-health-list">
+                @foreach($policyHealth as $check)
+                    <li class="policy-health-item policy-health-{{ $check['status'] }}">
+                        <span class="policy-health-dot" aria-hidden="true"></span>
+                        {{ e($check['label']) }}
+                    </li>
+                @endforeach
+            </ul>
+        </details>
+    @endif
 
     @if(count($priorityAttention['items']) > 0)
         {{--

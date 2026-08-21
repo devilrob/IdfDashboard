@@ -2204,6 +2204,113 @@ class DeviceAccessTest extends TestCase
         $this->assertGreaterThan(0, $devices->get($eventLogDevice->device_id)['recent_event_count'], 'Caso 10: the event is genuinely present as context, not silently dropped — it simply does not drive severity.');
     }
 
+    /**
+     * Section 25's "Policy Health" panel. RefreshDatabase gives each
+     * test its own isolated, rolled-back transaction, so — unlike
+     * AlertRules::available()'s own docblock caveat about a shared
+     * instance — this fixture can safely assert exact counts for
+     * every one of PolicyHealth's six checks without any risk of
+     * leftover state from another test method's own Alert Rule/
+     * Device Group fixtures leaking in.
+     */
+    public function testPolicyHealthReflectsRealConfigurationAndIsAdminOnly(): void
+    {
+        $location = Location::factory()->create(['location' => 'Policy Health Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Group check: OK, exactly one member.
+        $groupMember = $makeDevice('policy-health-group-member.example.com', 1);
+        $criticalGroup->devices()->attach($groupMember->device_id);
+
+        // Rule-name checks (informational, name-substring heuristic
+        // only): both a "down" rule and a "service" rule exist, so
+        // both resolve OK — never parsed for whether they would
+        // actually fire, only whether a rule by that kind of name is
+        // present at all.
+        $downRule = AlertRule::factory()->create(['name' => 'Device Down — Critical Infrastructure']);
+        $serviceRule = AlertRule::factory()->create(['name' => 'Sophos Health Check Service']);
+
+        // Fallback-coverage check: exactly one device currently has a
+        // Critical/Warning condition with no Alert Rule attached at
+        // all (Device Down, no Alert Rule of any kind on this
+        // device_id) — must be counted, not silently absorbed.
+        $fallbackDevice = $makeDevice('policy-health-fallback-device.example.com', 0);
+
+        // Overlapping-alert check: exactly one device has two
+        // distinct Alert Rules firing at the same time.
+        $overlapDevice = $makeDevice('policy-health-overlap-device.example.com', 1);
+        Alert::factory()->create(['device_id' => $overlapDevice->device_id, 'rule_id' => $downRule->id]);
+        Alert::factory()->create(['device_id' => $overlapDevice->device_id, 'rule_id' => $serviceRule->id]);
+
+        $admin = User::factory()->create(['enabled' => 1]);
+        $admin->assignRole('admin');
+        $adminRequest = Request::create('/plugin/IdfDashboard');
+        $adminRequest->setUserResolver(fn (): User => $admin);
+        $adminPayload = (new Page())->data(
+            ['operational_critical_group_name' => 'Operational Critical'],
+            $adminRequest
+        );
+
+        $this->assertIsArray($adminPayload['policyHealth'], 'An admin request must receive the Policy Health payload.');
+        $this->assertCount(6, $adminPayload['policyHealth'], 'All six PolicyHealth checks must be present, in a stable order.');
+
+        $checks = $adminPayload['policyHealth'];
+
+        $this->assertSame('ok', $checks[0]['status']);
+        $this->assertStringContainsString('Operational Critical', $checks[0]['label']);
+        $this->assertStringContainsString('1 member', $checks[0]['label']);
+
+        $this->assertSame('ok', $checks[1]['status']);
+        $this->assertStringContainsString('2 of 2', $checks[1]['label'], 'Both rules are included by default — no explicit idf_included_alert_rule_ids setting was saved in this fixture.');
+
+        $this->assertSame('ok', $checks[2]['status']);
+        $this->assertStringContainsString('Device Down — Critical Infrastructure', $checks[2]['label']);
+
+        $this->assertSame('ok', $checks[3]['status']);
+        $this->assertStringContainsString('Sophos Health Check Service', $checks[3]['label']);
+
+        $this->assertSame('info', $checks[4]['status']);
+        $this->assertStringContainsString('1 device', $checks[4]['label']);
+        $this->assertStringContainsString('default fallback policy', $checks[4]['label']);
+
+        $this->assertSame('warning', $checks[5]['status']);
+        $this->assertStringContainsString('1 device', $checks[5]['label']);
+        $this->assertStringContainsString('more than one active Alert Rule', $checks[5]['label']);
+
+        $adminHtml = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $adminPayload
+        )->render();
+        $this->assertStringContainsString('Policy Health', $adminHtml, 'The panel must actually render for an admin, not just exist in the payload.');
+        $this->assertStringContainsString('Sophos Health Check Service', $adminHtml);
+
+        $viewer = User::factory()->create(['enabled' => 1]);
+        $viewer->assignRole('global-read');
+        $viewerRequest = Request::create('/plugin/IdfDashboard');
+        $viewerRequest->setUserResolver(fn (): User => $viewer);
+        $viewerPayload = (new Page())->data(
+            ['operational_critical_group_name' => 'Operational Critical'],
+            $viewerRequest
+        );
+
+        $this->assertNull($viewerPayload['policyHealth'], 'A non-admin request must never receive the Policy Health diagnostic payload.');
+
+        $viewerHtml = view()->file(
+            app_path('Plugins/IdfDashboard/resources/views/page.blade.php'),
+            $viewerPayload
+        )->render();
+        $this->assertStringNotContainsString('Policy Health', $viewerHtml, 'The panel must not exist in the rendered HTML at all for a non-admin — absent, not merely hidden by CSS.');
+    }
+
     private function writeVisualFixture(string $name, string $html): void
     {
         $directory = getenv('IDF_VISUAL_OUTPUT_DIR');
