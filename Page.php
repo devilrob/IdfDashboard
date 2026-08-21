@@ -13,6 +13,7 @@ use App\Plugins\IdfDashboard\Support\DeviceClassifier;
 use App\Plugins\IdfDashboard\Support\Freshness;
 use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use App\Plugins\IdfDashboard\Support\OperationalPolicy;
+use App\Plugins\IdfDashboard\Support\PolicyHealth;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use App\Plugins\IdfDashboard\Support\Severity;
 use Carbon\Carbon;
@@ -719,8 +720,31 @@ class Page extends PageHook
             ->sortBy('name')
             ->values();
 
+        // Section 25 — administrator-only, strictly read-only. Never
+        // computed (let alone shown) for a regular user; never creates,
+        // modifies or deletes any LibreNMS resource — see
+        // Support\PolicyHealth's own docblock. One extra indexed lookup
+        // only for an admin request, not a per-device/per-sensor cost
+        // (Section 28) — loadOperationallyCriticalDeviceIds() already
+        // resolved the group internally but its existing, already-
+        // tested contract only returns member IDs, not group
+        // existence, so that one fact is confirmed here separately
+        // rather than reshaping an already-verified function.
+        $policyHealth = $user->hasRole('admin')
+            ? PolicyHealth::evaluate(
+                $availableAlertRules,
+                $includedAlertRuleIds,
+                $this->operationalCriticalGroupName,
+                $this->operationalCriticalGroupExists(),
+                $operationalCriticalDeviceIds->count(),
+                $devices
+            )
+            : null;
+
         return [
             'pluginTitle' => 'Infrastructure Health Dashboard',
+
+            'policyHealth' => $policyHealth,
 
             'priorityAttention' => $priorityAttention,
 
@@ -3444,6 +3468,29 @@ class Page extends PageHook
                 ->values();
         } catch (\Throwable) {
             return collect();
+        }
+    }
+
+    /**
+     * Whether the configured Operational Critical group name actually
+     * resolves to a real LibreNMS Device Group — distinct from "does
+     * it have any authorized-visible members right now" (see
+     * loadOperationallyCriticalDeviceIds(), whose own return value
+     * cannot tell those two states apart). Used only by the
+     * administrator-only Section 25 Policy Health panel.
+     */
+    private function operationalCriticalGroupExists(): bool
+    {
+        if ($this->operationalCriticalGroupName === '' || ! $this->tableExists('device_groups')) {
+            return false;
+        }
+
+        try {
+            return DeviceGroup::query()
+                ->whereRaw('LOWER(name) = ?', [Str::lower($this->operationalCriticalGroupName)])
+                ->exists();
+        } catch (\Throwable) {
+            return false;
         }
     }
 
