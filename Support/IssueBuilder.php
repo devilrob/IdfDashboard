@@ -109,6 +109,14 @@ final class IssueBuilder
             'priority' => (int) ($values['priority'] ?? self::priorityFor($severity, (string) ($values['source'] ?? ''))),
             'source' => (string) ($values['source'] ?? 'unknown'),
             'type' => (string) ($values['type'] ?? 'unknown'),
+            // The centralized Support\ConditionBucket this issue belongs
+            // to — the single field Support\TvPresentationPolicy (and
+            // any other bucket-aware consumer) reads, never re-derived.
+            // Callers that don't build a real technical condition
+            // (Stale, NO_SENSOR, UNKNOWN sensor readings, etc.) leave
+            // this at the safe default: harmless, since TV eligibility
+            // is gated on severity being Critical/Warning first anyway.
+            'condition_bucket' => (string) ($values['condition_bucket'] ?? ConditionBucket::OTHER),
             'title' => trim((string) ($values['title'] ?? 'Operational issue')),
             'description' => $description !== '' ? $description : 'Current state unavailable',
             'value' => $values['value'] ?? null,

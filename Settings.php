@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Plugins\Hooks\SettingsHook;
 use App\Plugins\IdfDashboard\Support\AlertRules;
 use App\Plugins\IdfDashboard\Support\Config;
+use App\Plugins\IdfDashboard\Support\ConditionBucket;
 use App\Plugins\IdfDashboard\Support\DeviceGroups;
 use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
@@ -44,6 +45,10 @@ class Settings extends SettingsHook
             $settings[AlertRules::DEVICE_DOWN_SETTING_KEY] ?? null,
             $availableAlertRules
         );
+        $handlingByRuleId = AlertRules::resolveHandling(
+            $settings[AlertRules::HANDLING_SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
 
         $availableDeviceGroups = DeviceGroups::available();
         $selectedDeviceGroupIds = DeviceGroups::resolveEffectiveGroupIds(
@@ -69,10 +74,18 @@ class Settings extends SettingsHook
             'alertRuleSettingKey' => AlertRules::SETTING_KEY,
             'deviceDownTaggedIds' => $deviceDownTaggedIds,
             'deviceDownSettingKey' => AlertRules::DEVICE_DOWN_SETTING_KEY,
+            'handlingByRuleId' => $handlingByRuleId,
+            'handlingSettingKey' => AlertRules::HANDLING_SETTING_KEY,
+            'handlingOptions' => [
+                AlertRules::HANDLING_DIRECT => 'Direct severity',
+                AlertRules::HANDLING_CONDITION_POLICY => 'Condition policy',
+                AlertRules::HANDLING_MONITOR => 'Monitor',
+            ],
             'availableDeviceGroups' => $availableDeviceGroups,
             'selectedDeviceGroupIds' => $selectedDeviceGroupIds,
             'deviceGroupSettingKey' => DeviceGroups::SETTING_KEY,
             'effectivePolicySummary' => OperationalPolicy::effectivePolicySummary($policyConfig),
+            'conditionBucketLabels' => ConditionBucket::labels(),
             'updateStatus' => UpdateStatus::get(
                 (bool) $resolved['update_check_enabled'],
                 $forceUpdateCheck

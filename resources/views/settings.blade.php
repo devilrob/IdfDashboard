@@ -24,6 +24,8 @@
                 <div class="idf-update-error">{{ $updateStatus['error'] }}</div>
             @elseif($updateStatus['update_available'])
                 <div class="idf-update-available">A verified stable release is available.</div>
+            @elseif($updateStatus['ahead_of_stable'])
+                <div class="idf-update-current">Running ahead of the latest published stable release (development build) — v{{ $updateStatus['installed'] }} installed, v{{ $updateStatus['latest'] }} published.</div>
             @elseif($updateStatus['checked_at'])
                 <div class="idf-update-current">The installed version is current.</div>
             @elseif(! $updateStatus['enabled'])
@@ -85,17 +87,21 @@
             <p class="idf-settings-group-intro">
                 A technical failure is not automatically an operationally
                 critical incident — a kitchen printer being down is not the
-                same as a production cluster being unreachable. Alert Rules
-                below are the preferred, explicit source of Critical/Warning
-                severity; the policy here only governs this dashboard's own
-                bounded fallback for a condition no included Alert Rule
-                already covers for that device.
+                same as a production cluster being unreachable. This policy
+                decides Critical/Warning/Monitor/Ignore per condition type
+                (device down, voltage, temperature, humidity, …) and
+                infrastructure tier — the sole severity source for a
+                Condition-policy Alert Rule's firing, and for every sensor/
+                service condition regardless of whether any rule exists at
+                all. A Direct-severity Alert Rule (see Alert Rules below)
+                adds its own separate device/hardware-level signal on top of
+                this, never replaced by it.
             </p>
 
             <h4 class="idf-settings-subheading">Operational Critical Device Groups</h4>
             <p class="idf-settings-group-intro">
                 Select every real LibreNMS Device Group (static or dynamic)
-                whose members should use the Critical-tier fallback
+                whose members should use the Critical-tier condition
                 severities below. A device belongs to Operational Critical if
                 it is a member of <strong>any</strong> selected group.
                 Membership itself is still managed entirely on LibreNMS's own
@@ -178,26 +184,37 @@
         </fieldset>
 
         {{-- Alert Rules: one table only — real LibreNMS Alert Rules,
-             whether each feeds this dashboard, and which one (if any) is
-             the exact Device Down correlation hint. No Sensors/Services
-             tagging — see Support\AlertRules' own docblock for why no
-             such tag could ever safely suppress anything. --}}
+             whether each feeds this dashboard, how its firing translates
+             into operational severity (Handling), and the exact Device
+             Down correlation hint. No Sensors/Services tagging — see
+             Support\AlertRules' own docblock for why no such tag could
+             ever safely suppress anything. --}}
         <fieldset class="idf-settings-group">
             <legend>Alert Rules</legend>
 
             <p class="idf-settings-group-intro">
                 Every rule below is a real Alert Rule already configured in
                 LibreNMS (Alert Rules admin page). <strong>Include</strong>
-                controls whether the rule feeds this dashboard's own "Alert"
-                issues — LibreNMS keeps evaluating and notifying on it
-                exactly as configured either way.
-                <strong>Device Down</strong> is the only exact-correlation
-                hint this dashboard offers: tagging a rule Device Down lets
-                it suppress this dashboard's own Device Down fallback for
-                the same device, because both share a real, exact
-                device_id. No other condition (a specific sensor or
-                service) has an equivalent exact identifier available on a
-                fired LibreNMS alert, so no tag is offered for them.
+                controls whether the rule feeds this dashboard at all —
+                LibreNMS keeps evaluating and notifying on it exactly as
+                configured either way. <strong>Handling</strong> controls
+                HOW an included rule's firing becomes operational severity:
+                <strong>Direct severity</strong> uses the rule's own
+                severity as-is (for rules whose condition already is the
+                device/hardware state itself — Device Down, Cluster/SNMP
+                Down, Firewall rules); <strong>Condition policy</strong>
+                treats the firing only as proof a real condition exists —
+                actual severity comes from the Operational Priority
+                condition matrix below, applied to whichever sensor/service
+                is currently violating (use this for generic rules like
+                "Sensor over/under limit"); <strong>Monitor</strong> keeps
+                the rule's firing visible without ever becoming Critical/
+                Warning (for informational/noisy rules like "Device
+                rebooted"). <strong>Device Down</strong> is the only
+                exact-correlation hint this dashboard offers: tagging a
+                rule Device Down lets it suppress this dashboard's own
+                Device Down condition for the same device, because both
+                share a real, exact device_id.
             </p>
 
             @if (empty($availableAlertRules))
@@ -216,6 +233,7 @@
                             <th>Alert Rule</th>
                             <th>Severity</th>
                             <th>Include</th>
+                            <th>Handling</th>
                             <th>Device Down</th>
                         </tr>
                     </thead>
@@ -236,6 +254,16 @@
                                         value="{{ $rule['id'] }}"
                                         @checked(in_array($rule['id'], $includedAlertRuleIds, true))
                                     >
+                                </td>
+                                <td>
+                                    <select name="settings[{{ $handlingSettingKey }}][{{ $rule['id'] }}]" class="idf-alert-rule-handling">
+                                        @foreach ($handlingOptions as $handlingValue => $handlingLabel)
+                                            <option
+                                                value="{{ $handlingValue }}"
+                                                @selected(($handlingByRuleId[$rule['id']] ?? 'direct') === $handlingValue)
+                                            >{{ $handlingLabel }}</option>
+                                        @endforeach
+                                    </select>
                                 </td>
                                 <td>
                                     <input
@@ -260,14 +288,15 @@
         <details class="idf-settings-group idf-settings-advanced">
             <summary>Advanced</summary>
             <p class="idf-settings-group-intro">
-                Detailed per-condition fallback overrides. Defaults here
-                reproduce this plugin's original policy matrix exactly, so
-                opening this section changes nothing until you edit a value.
-                There is deliberately no single global "Fallback Safety Net
-                enabled" switch — the *_enabled toggles below already let
-                you disable each category independently, and a second
-                master switch would just be a second, competing authority
-                over the same decision.
+                Detailed per-condition severity overrides — one Critical-tier
+                and one standard-tier choice per condition (Critical/Warning/
+                Monitor/Ignore). Defaults here reproduce the audited
+                noise-reduction target matrix, so opening this section
+                changes nothing until you edit a value. There is deliberately
+                no single global "Fallback Safety Net enabled" switch —
+                setting a condition to "Ignore (no issue)" already disables
+                it individually, and a second master switch would just be a
+                second, competing authority over the same decision.
             </p>
             <div class="idf-settings-field-grid">
                 @foreach ($groups['advanced'] ?? [] as $key => $field)
@@ -315,10 +344,18 @@ document.querySelector('[data-idf-reset-defaults]').addEventListener('click', fu
     // Device Down tagging has no FIELDS default either — "reset to
     // defaults" means "nothing tagged", matching
     // Support\AlertRules::resolveDeviceDownTaggedIds()'s own safe
-    // default (the fallback keeps running until an administrator
-    // explicitly tags a rule as covering it).
+    // default (the condition policy keeps running until an
+    // administrator explicitly tags a rule as covering it).
     document.querySelectorAll('.idf-device-down-checkbox').forEach(function (input) {
         input.checked = false;
+    });
+
+    // Alert Rule Handling has no FIELDS default either — "reset to
+    // defaults" means "Direct severity" for every rule, matching
+    // Support\AlertRules::resolveHandling()'s own fail-safe default
+    // (reproduces this plugin's pre-redesign behavior exactly).
+    document.querySelectorAll('.idf-alert-rule-handling').forEach(function (select) {
+        select.value = 'direct';
     });
 
     // Operational Critical Device Groups likewise has no FIELDS

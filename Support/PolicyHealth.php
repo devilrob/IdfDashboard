@@ -12,17 +12,25 @@ use Illuminate\Support\Collection;
  * other LibreNMS resource — it only reads data Page::data() has
  * already loaded for the current request and reports what it finds,
  * so an administrator can self-audit their own Alert Rule/Device
- * Group configuration against real live evidence instead of guessing.
+ * Group/condition-policy configuration against real live evidence
+ * instead of guessing.
  *
  * Deliberately does NOT attempt to parse an Alert Rule's condition
  * string to simulate whether it would fire for a given device — that
  * would be this plugin re-implementing LibreNMS's own rule-evaluation
  * engine a second time, exactly the kind of duplicate logic this
  * whole redesign exists to remove. Every check here is either a
- * direct table-existence/membership fact, or an aggregate computed
- * from the ALREADY-COMPUTED, already-correct $device['issues'] every
- * device on this dashboard carries — never a new independent opinion
- * about what should be Critical/Warning.
+ * direct table-existence/membership fact, a declared administrator
+ * setting, or an aggregate computed from the ALREADY-COMPUTED,
+ * already-correct $device['issues']/$device['condition_policy_fail_safe_rule_names']
+ * every device on this dashboard carries — never a new independent
+ * opinion about what should be Critical/Warning.
+ *
+ * The old rule-NAME-substring heuristics ("does a rule's name contain
+ * 'down'/'service'?") are gone entirely — Support\AlertRules::
+ * HANDLING_* is now an explicit, administrator-declared fact per rule,
+ * a strictly better signal than guessing from a name, so keeping both
+ * would be exactly the duplicated-authority this redesign forbids.
  */
 final class PolicyHealth
 {
@@ -37,6 +45,7 @@ final class PolicyHealth
      * @param  array<string, mixed>  $policyConfig  The resolved Operational Priority policy slice of Support\Config — see Support\Config::FIELDS.
      * @param  Collection<int, array<string, mixed>>  $devices  Every currently authorized, already-normalized device.
      * @param  array<int, int>  $deviceDownTaggedIds  See Support\AlertRules::resolveDeviceDownTaggedIds().
+     * @param  array<int, string>  $handlingByRuleId  rule_id => Handling value, see Support\AlertRules::resolveHandling().
      * @return array<int, array{status: string, label: string}>
      */
     public static function evaluate(
@@ -46,6 +55,7 @@ final class PolicyHealth
         int $operationalCriticalDeviceCount,
         Collection $devices,
         array $deviceDownTaggedIds = [],
+        array $handlingByRuleId = [],
         array $policyConfig = []
     ): array {
         $checks = [];
@@ -56,10 +66,10 @@ final class PolicyHealth
         );
 
         $checks[] = self::alertRuleInventoryCheck($availableAlertRules, $includedAlertRuleIds);
+        $checks[] = self::handlingBreakdownCheck($includedAlertRuleIds, $handlingByRuleId);
         $checks[] = self::deviceDownCoverageCheck($includedAlertRuleIds, $deviceDownTaggedIds);
-        $checks[] = self::deviceDownRuleCheck($availableAlertRules);
-        $checks[] = self::serviceRuleCheck($availableAlertRules);
-        $checks[] = self::fallbackCategoriesCheck($policyConfig);
+        $checks[] = self::conditionPolicyCorrelationCheck($devices);
+        $checks[] = self::ignoredConditionsCheck($policyConfig);
         $checks[] = self::fallbackCoverageCheck($devices);
         $checks[] = self::overlappingAlertCheck($devices);
 
@@ -101,7 +111,7 @@ final class PolicyHealth
         if ($total === 0) {
             return [
                 'status' => self::STATUS_WARNING,
-                'label' => 'No LibreNMS Alert Rules were found at all — every Critical/Warning severity on this dashboard currently comes from the default fallback policy, never an administrator-selected rule.',
+                'label' => 'No LibreNMS Alert Rules were found at all — every Critical/Warning severity on this dashboard currently comes from the condition policy, never an administrator-selected rule.',
             ];
         }
 
@@ -113,57 +123,50 @@ final class PolicyHealth
         ];
     }
 
-    /** @param array<int, array{id: int, name: string, severity: string}> $availableAlertRules */
-    private static function deviceDownRuleCheck(array $availableAlertRules): array
+    /**
+     * How many currently-included rules use each Handling — the
+     * explicit, administrator-declared replacement for the old
+     * rule-name-substring guessing.
+     *
+     * @param  array<int, int>  $includedAlertRuleIds
+     * @param  array<int, string>  $handlingByRuleId
+     */
+    private static function handlingBreakdownCheck(array $includedAlertRuleIds, array $handlingByRuleId): array
     {
-        $matches = array_filter(
-            $availableAlertRules,
-            static fn (array $rule): bool => str_contains(strtolower($rule['name']), 'down')
-        );
-
-        if ($matches === []) {
+        if ($includedAlertRuleIds === []) {
             return [
                 'status' => self::STATUS_INFO,
-                'label' => 'No Alert Rule name contains "down" — Device Down severity currently comes entirely from the default fallback policy. This is only informational: a rule may exist under a different name.',
+                'label' => 'No Alert Rules are currently included, so there is no Handling to report.',
             ];
         }
 
-        return [
-            'status' => self::STATUS_OK,
-            'label' => count($matches) . ' possible Device Down Alert Rule(s) found by name: ' . implode(', ', array_map(static fn (array $rule): string => $rule['name'], $matches)) . '.',
+        $counts = [
+            AlertRules::HANDLING_DIRECT => 0,
+            AlertRules::HANDLING_CONDITION_POLICY => 0,
+            AlertRules::HANDLING_MONITOR => 0,
         ];
-    }
 
-    /** @param array<int, array{id: int, name: string, severity: string}> $availableAlertRules */
-    private static function serviceRuleCheck(array $availableAlertRules): array
-    {
-        $matches = array_filter(
-            $availableAlertRules,
-            static fn (array $rule): bool => str_contains(strtolower($rule['name']), 'service')
-        );
-
-        if ($matches === []) {
-            return [
-                'status' => self::STATUS_INFO,
-                'label' => 'No Alert Rule name contains "service" — service check severity currently comes entirely from the default fallback policy (service_status is always shown regardless). This is only informational: a rule may exist under a different name.',
-            ];
+        foreach ($includedAlertRuleIds as $ruleId) {
+            $handling = $handlingByRuleId[$ruleId] ?? AlertRules::HANDLING_DIRECT;
+            $counts[$handling] = ($counts[$handling] ?? 0) + 1;
         }
 
         return [
             'status' => self::STATUS_OK,
-            'label' => count($matches) . ' possible Service Alert Rule(s) found by name: ' . implode(', ', array_map(static fn (array $rule): string => $rule['name'], $matches)) . '.',
+            'label' => $counts[AlertRules::HANDLING_DIRECT] . ' rule(s) Direct severity, '
+                . $counts[AlertRules::HANDLING_CONDITION_POLICY] . ' Condition policy, '
+                . $counts[AlertRules::HANDLING_MONITOR] . ' Monitor.',
         ];
     }
 
     /**
      * Reports how many currently-included Alert Rules an administrator
      * has tagged "Device Down" — the only tag this plugin offers, and
-     * the only one that ever suppresses a fallback, because it shares a
-     * real, exact device_id with the fallback it replaces (see
-     * Support\OperationalPolicy's own docblock). This check never
-     * treats the tag as proof a rule actually fires for a given device
-     * (that would be re-simulating LibreNMS's own rule engine, see this
-     * class's own docblock) — it simply reports declared intent.
+     * the only one that ever suppresses a condition-policy issue,
+     * because it shares a real, exact device_id with the issue it
+     * replaces (see Support\OperationalPolicy's own docblock). This
+     * check never treats the tag as proof a rule actually fires for a
+     * given device — it simply reports declared intent.
      *
      * @param  array<int, int>  $includedAlertRuleIds
      * @param  array<int, int>  $deviceDownTaggedIds
@@ -182,7 +185,7 @@ final class PolicyHealth
         if ($taggedCount === 0) {
             return [
                 'status' => self::STATUS_INFO,
-                'label' => 'No included Alert Rule is tagged "Device Down" yet — the Device Down fallback still runs for every device until one is tagged, never hidden.',
+                'label' => 'No included Alert Rule is tagged "Device Down" yet — the Device Down condition still runs for every device until one is tagged, never hidden.',
             ];
         }
 
@@ -193,41 +196,78 @@ final class PolicyHealth
     }
 
     /**
-     * The effective enabled/disabled state of each fallback category —
-     * an administrator relying entirely on their own Alert Rules for a
-     * category (Section 9) should be able to confirm that choice took
-     * effect without reading Settings a second time.
+     * Whether Condition-policy-Handling rules are actually correlating
+     * to a currently-violating sensor/service on the devices they fire
+     * for — see Page::buildDeviceIssues()'s own fail-safe docblock. A
+     * device carries a non-empty
+     * 'condition_policy_fail_safe_rule_names' only when correlation
+     * failed and this plugin fell back to that rule's own Direct
+     * severity for that one device, so the underlying failure was never
+     * silently hidden either way — this check is purely diagnostic,
+     * for an administrator to notice a Condition-policy rule that may
+     * be scoped to a condition this plugin's own sensor classification
+     * cannot recognize.
+     *
+     * @param  Collection<int, array<string, mixed>>  $devices
+     */
+    private static function conditionPolicyCorrelationCheck(Collection $devices): array
+    {
+        $failingRuleNames = $devices
+            ->flatMap(fn (array $device): array => $device['condition_policy_fail_safe_rule_names'] ?? [])
+            ->unique()
+            ->values();
+
+        if ($failingRuleNames->isEmpty()) {
+            return [
+                'status' => self::STATUS_OK,
+                'label' => 'Every currently firing Condition-policy Alert Rule is correlating to at least one currently-violating sensor/service.',
+            ];
+        }
+
+        return [
+            'status' => self::STATUS_WARNING,
+            'label' => $failingRuleNames->count() . ' Condition-policy Alert Rule(s) currently failing safe to their own Direct severity (could not correlate to a currently-violating sensor/service on the device they fired for): '
+                . $failingRuleNames->implode(', ') . '. The underlying condition is still shown, never hidden.',
+        ];
+    }
+
+    /**
+     * How many condition buckets are configured as "Ignore" for the
+     * Operational Critical tier — the closest equivalent to the old
+     * per-category enabled/disabled toggles, now expressed per bucket
+     * rather than per numeric/state axis.
      *
      * @param  array<string, mixed>  $policyConfig
      */
-    private static function fallbackCategoriesCheck(array $policyConfig): array
+    private static function ignoredConditionsCheck(array $policyConfig): array
     {
-        $categories = [
-            'Device Down' => $policyConfig['fallback_device_down_enabled'] ?? true,
-            'Numeric sensors' => $policyConfig['fallback_numeric_sensor_enabled'] ?? true,
-            'State sensors' => $policyConfig['fallback_state_sensor_enabled'] ?? true,
-            'Services' => $policyConfig['fallback_service_enabled'] ?? true,
-        ];
+        $ignoredLabels = [];
 
-        $disabled = array_keys(array_filter($categories, static fn ($enabled): bool => ! $enabled));
+        foreach (ConditionBucket::CONDITION_POLICY_BUCKETS as $bucket) {
+            $choice = (string) ($policyConfig['condition_policy_' . $bucket . '_critical_group_severity'] ?? '');
 
-        if ($disabled === []) {
+            if ($choice === 'disabled') {
+                $ignoredLabels[] = ConditionBucket::labels()[$bucket];
+            }
+        }
+
+        if ($ignoredLabels === []) {
             return [
                 'status' => self::STATUS_OK,
-                'label' => 'Every fallback category (Device Down, Numeric sensors, State sensors, Services) is enabled.',
+                'label' => 'No condition bucket is set to Ignore for Operational Critical devices.',
             ];
         }
 
         return [
             'status' => self::STATUS_INFO,
-            'label' => 'Fallback disabled for: ' . implode(', ', $disabled) . ' — this dashboard relies entirely on your own Alert Rules for ' . (count($disabled) === 1 ? 'this category' : 'these categories') . '; the underlying technical telemetry remains visible either way.',
+            'label' => 'Ignored for Operational Critical devices: ' . implode(', ', $ignoredLabels) . ' — the underlying technical telemetry remains visible regardless.',
         ];
     }
 
     /** @param Collection<int, array<string, mixed>> $devices */
     private static function fallbackCoverageCheck(Collection $devices): array
     {
-        $fallbackDeviceCount = $devices->filter(
+        $conditionPolicyDeviceCount = $devices->filter(
             fn (array $device): bool => $device['issues']->contains(
                 fn (array $issue): bool => $issue['actionable']
                     && in_array($issue['source'], ['device', 'sensor', 'service'], true)
@@ -235,16 +275,16 @@ final class PolicyHealth
             )
         )->count();
 
-        if ($fallbackDeviceCount === 0) {
+        if ($conditionPolicyDeviceCount === 0) {
             return [
                 'status' => self::STATUS_OK,
-                'label' => 'No currently visible technical condition is relying on the default fallback policy — every Critical/Warning issue right now comes from a real Alert Rule.',
+                'label' => 'No currently visible technical condition is relying on the condition policy alone — every Critical/Warning issue right now also comes from a real Direct-severity Alert Rule.',
             ];
         }
 
         return [
             'status' => self::STATUS_INFO,
-            'label' => $fallbackDeviceCount . ' device' . ($fallbackDeviceCount === 1 ? '' : 's') . ' currently ' . ($fallbackDeviceCount === 1 ? 'has' : 'have') . ' at least one Critical/Warning condition with no matching Alert Rule yet — visible on the dashboard via the default fallback policy, never hidden.',
+            'label' => $conditionPolicyDeviceCount . ' device' . ($conditionPolicyDeviceCount === 1 ? '' : 's') . ' currently ' . ($conditionPolicyDeviceCount === 1 ? 'has' : 'have') . ' at least one Critical/Warning condition sourced from the condition policy (device/sensor/service) — visible on the dashboard, never hidden.',
         ];
     }
 

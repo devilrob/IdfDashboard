@@ -3,10 +3,9 @@
 
     @if ($groupKey === 'problem')
         <p class="idf-settings-group-intro">
-            Alert Rules are the preferred, explicit source of operational
-            severity; the Operational Priority fallback is a safety net for
-            technical failures no included Alert Rule covers yet — it still
-            evaluates sensor/service thresholds on your behalf when enabled.
+            Operational Priority (above) decides Critical/Warning/Monitor/
+            Ignore for a real technical condition, from Direct-severity
+            Alert Rules and this dashboard's own condition policy alike.
             This section covers a third, narrower concept: data
             <strong>quality</strong>, not severity — whether a
             <em>missing</em> sensor of this type is flagged "No sensor
@@ -14,6 +13,22 @@
             reading is flagged "Needs Review". Neither of those is something
             an Alert Rule can express, since a rule can only evaluate a
             sensor that already exists and already has a decodable value.
+        </p>
+    @endif
+
+    @if ($groupKey === 'tv')
+        <p class="idf-settings-group-intro">
+            TV Mode is a curated wall/NOC projection, not the normal
+            dashboard rendered full-screen — it shows only what deserves
+            immediate visual attention. These settings are pure
+            presentation filters: they can never change device health,
+            location health, normal Priority Attention, header counters, or
+            Alert Rule inclusion — only whether TV Mode projects it. A
+            device with several simultaneous conditions still appears on TV
+            if <strong>any one</strong> of them remains TV-eligible, credited
+            to that cause. Monitor-tier issues never appear on TV, with no
+            separate setting needed — they are already excluded everywhere
+            actionable issues are counted.
         </p>
     @endif
 
