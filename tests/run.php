@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Plugins\IdfDashboard\Support\AlertRules;
+use App\Plugins\IdfDashboard\Support\ConditionBucket;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
 use App\Plugins\IdfDashboard\Support\DeviceGroups;
@@ -11,12 +12,14 @@ use App\Plugins\IdfDashboard\Support\IssueBuilder;
 use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use App\Plugins\IdfDashboard\Support\Severity;
+use App\Plugins\IdfDashboard\Support\TvPresentationPolicy;
 use App\Plugins\IdfDashboard\Support\UpdateStatus;
 use App\Plugins\IdfDashboard\Support\Version;
 
 $root = dirname(__DIR__);
 
 require $root . '/Support/Config.php';
+require $root . '/Support/ConditionBucket.php';
 require $root . '/Support/DeviceClassifier.php';
 require $root . '/Support/Freshness.php';
 require $root . '/Support/IssueBuilder.php';
@@ -25,13 +28,20 @@ require $root . '/Support/Severity.php';
 require $root . '/Support/Version.php';
 require $root . '/Support/UpdateStatus.php';
 // AlertRules.php/DeviceGroups.php/OperationalPolicy.php reference
-// Illuminate Facades (DB/Schema) and Collection only inside methods
-// this script never calls (available()/memberDeviceIds()/
-// resolveFallbackIssues()) — every method exercised below is pure
-// array-in/array-out logic, safe to load without a Laravel bootstrap.
+// Illuminate Facades (DB/Schema) only inside methods this script never
+// calls (available()/memberDeviceIds()) — every method exercised below
+// is pure array-in/array-out logic, safe to load without a Laravel
+// bootstrap. TvPresentationPolicy.php is loaded (its class definition
+// only type-hints Illuminate\Support\Collection, never instantiates
+// one at load time) so ConditionBucket/AlertRules-constant reflection
+// checks below can reference it, but its own eligibleCauses()/
+// deviceHasEligibleCause() methods take a real Collection argument and
+// are exercised only in tests/librenms/DeviceAccessTest.php, which has
+// a full Laravel bootstrap.
 require $root . '/Support/AlertRules.php';
 require $root . '/Support/DeviceGroups.php';
 require $root . '/Support/OperationalPolicy.php';
+require $root . '/Support/TvPresentationPolicy.php';
 require $root . '/bin/update.php';
 
 $failures = 0;
@@ -157,8 +167,12 @@ $assert($sensorIssue['description'] !== '', 'critical issue always has a cause')
 $fallbackIssue = IssueBuilder::make(['severity' => 'warning', 'source' => 'sensor', 'value' => null]);
 $assert($fallbackIssue['description'] === 'Current value unavailable', 'warning issue explains an unavailable value');
 $assert(array_keys($sensorIssue) === [
-    'key', 'device_id', 'location_id', 'severity', 'priority', 'source', 'type', 'title', 'description', 'value', 'unit', 'threshold', 'threshold_direction', 'timestamp', 'age_seconds', 'actionable', 'device_url',
+    'key', 'device_id', 'location_id', 'severity', 'priority', 'source', 'type', 'condition_bucket', 'title', 'description', 'value', 'unit', 'threshold', 'threshold_direction', 'timestamp', 'age_seconds', 'actionable', 'device_url',
 ], 'issue structure is stable');
+$assert(
+    IssueBuilder::make(['severity' => 'warning', 'source' => 'sensor'])['condition_bucket'] === ConditionBucket::OTHER,
+    'IssueBuilder::make(): condition_bucket defaults to Support\ConditionBucket::OTHER when a caller does not build a real technical condition'
+);
 $assert(
     IssueBuilder::evaluateNumericSensor(90, 82, 78, null, null) === [
         'severity' => Severity::CRITICAL, 'threshold' => 82.0, 'direction' => 'above critical high',
@@ -195,6 +209,37 @@ $assert(
 $assert(
     IssueBuilder::evaluateNumericSensor(0, null, null, 0, null, true)['severity'] === Severity::HEALTHY,
     'numeric sensor ignores lower zero only for explicitly resting-at-zero sensors'
+);
+
+// --- Threshold audit findings (Gate 13/14 of the noise-reduction audit) ---
+// Case 2: "Voltage 0 V — below low limit 0 V". Page::sensorThreshold()
+// only sets $lowerZeroIsUnset=true for sensor_class 'current' and
+// on-battery-duration sensors — voltage is NOT in that allowlist, so a
+// voltage sensor whose sensor_limit_low is exactly 0 (a common LibreNMS
+// default for "never configured") DOES register a real violation once
+// its own reading is also 0 (0 <= 0). This is documented, current,
+// UNCHANGED behavior — deliberately NOT "fixed" by adding 'voltage' to
+// that allowlist, because doing so would blanket-treat every
+// legitimately-configured 0V low threshold as unset too (this plugin's
+// schema has no way to distinguish "admin configured exactly 0V" from
+// "column left at its default" — both store the identical value), which
+// the audit's own non-negotiable rule explicitly forbids. Documented
+// here as a regression pin on today's real behavior, not a fix.
+$assert(
+    IssueBuilder::evaluateNumericSensor(0, null, null, 0, null, false)['severity'] === Severity::CRITICAL,
+    'Threshold audit Case 2 (documented, unchanged): a voltage-shaped call (lowerZeroIsUnset=false, the actual value Page::sensorThreshold() passes for sensor_class=voltage) with current=0 and critical-low=0 registers Critical — 0 <= 0 is a genuine boundary match, not a comparison bug. Fixing this would require distinguishing "configured 0" from "default 0", which is not possible from this schema alone (see audit Gate 13/15) — left unchanged.'
+);
+$assert(
+    IssueBuilder::evaluateNumericSensor(0, null, null, 0, null, true)['severity'] === Severity::HEALTHY,
+    'Threshold audit Case 2, contrast: sensor_class \'current\' (already resting-at-zero-aware before this audit) correctly treats the identical 0-vs-0 reading as healthy — proves the mechanism this fix would reuse already exists and already works for the one class it is safe for.'
+);
+// Case 1: "Temperature 105.8 °F below warning limit 221 °F" — the
+// comparison direction itself is correct: a 'low' threshold check is
+// $value <= $threshold, so 105.8 <= 221 correctly evaluates true.
+$assert(
+    IssueBuilder::evaluateNumericSensor(105.8, null, null, null, 221.0)['severity'] === Severity::WARNING
+        && IssueBuilder::evaluateNumericSensor(105.8, null, null, null, 221.0)['direction'] === 'below warning low',
+    'Threshold audit Case 1 (documented, unchanged): given a stored warning-low threshold of 221, 105.8 correctly evaluates as "below warning low" — the comparison logic is executing exactly as designed. A "low" threshold of 221°F is operationally implausible for temperature, which points to bad/misassigned LibreNMS-side threshold data (a vendor MIB or discovery bug on the real device), not an IdfDashboard bug — see this plugin\'s own IssueBuilder docblock: sensor_limit* is assumed already normalized by LibreNMS, and this plugin has no way to verify or re-derive that. Not fixed here, per the audit\'s explicit instruction not to invent MIB normalization in this plugin.'
 );
 
 $defaults = Config::resolve([]);
@@ -270,6 +315,28 @@ $releases = [
 ];
 $latest = UpdateStatus::latestStableRelease($releases);
 $assert($latest !== null && $latest['version'] === '1.10.0', 'latest verified stable release');
+
+// --- Update-status three-way comparison (Gate 15/19 of the noise-
+// reduction audit) — installed vs. published-stable is genuinely
+// three-way, never a single boolean. Mirrors the exact two
+// version_compare() calls UpdateStatus::get() makes once $latest is
+// known (that method itself needs Http/Cache facades unavailable in
+// this standalone runner, so the comparison formula is verified
+// directly here instead).
+$updateAvailable = static fn (string $installed, string $latest): bool => version_compare($latest, $installed, '>');
+$aheadOfStable = static fn (string $installed, string $latest): bool => version_compare($installed, $latest, '>');
+$assert(
+    $updateAvailable('1.3.0', '1.4.0') === true && $aheadOfStable('1.3.0', '1.4.0') === false,
+    'Update status: installed < stable -> update_available=true, ahead_of_stable=false ("Update available")'
+);
+$assert(
+    $updateAvailable('1.4.0', '1.4.0') === false && $aheadOfStable('1.4.0', '1.4.0') === false,
+    'Update status: installed == stable -> both false ("The installed version is current")'
+);
+$assert(
+    $updateAvailable('1.4.0', '1.3.0') === false && $aheadOfStable('1.4.0', '1.3.0') === true,
+    'Update status: installed > stable -> update_available=false, ahead_of_stable=true ("Running ahead of the latest published stable release") — never the misleading generic "current" message'
+);
 
 $assert(IdfDashboardUpdater::isStableTag('v1.2.3'), 'updater accepts semantic stable tag');
 $assert(! IdfDashboardUpdater::isStableTag('main'), 'updater rejects branch');
@@ -1185,6 +1252,62 @@ $assert(
     'AlertRules: DEVICE_DOWN_SETTING_KEY exists as the sole remaining condition tag'
 );
 
+// --- Support\AlertRules::resolveHandling (Gate B3 — Alert Rule Handling) ---
+$assert(
+    AlertRules::resolveHandling(null, $availableRules) === [10 => AlertRules::HANDLING_DIRECT, 20 => AlertRules::HANDLING_DIRECT],
+    'AlertRules::resolveHandling: never-saved setting resolves every rule to HANDLING_DIRECT — fail-safe, backward-compatible default'
+);
+$assert(
+    AlertRules::resolveHandling(['10' => 'condition_policy', '20' => 'monitor'], $availableRules)
+        === [10 => AlertRules::HANDLING_CONDITION_POLICY, 20 => AlertRules::HANDLING_MONITOR],
+    'AlertRules::resolveHandling: an explicit per-rule Handling is respected'
+);
+$assert(
+    AlertRules::resolveHandling(['10' => 'not-a-real-handling'], $availableRules) === [10 => AlertRules::HANDLING_DIRECT, 20 => AlertRules::HANDLING_DIRECT],
+    'AlertRules::resolveHandling: an unrecognized persisted value fails safe to HANDLING_DIRECT, never Monitor/Condition policy'
+);
+$assert(
+    AlertRules::resolveHandling(['999' => 'monitor'], $availableRules) === [10 => AlertRules::HANDLING_DIRECT, 20 => AlertRules::HANDLING_DIRECT],
+    'AlertRules::resolveHandling: a stale/deleted rule ID in the raw setting is silently ignored'
+);
+
+// --- Support\ConditionBucket (Gate B1 — centralized condition buckets) ---
+$assert(
+    ConditionBucket::forMetricProblemType('temperature') === ConditionBucket::TEMPERATURE
+        && ConditionBucket::forMetricProblemType('humidity') === ConditionBucket::HUMIDITY
+        && ConditionBucket::forMetricProblemType('voltage') === ConditionBucket::VOLTAGE
+        && ConditionBucket::forMetricProblemType('battery') === ConditionBucket::BATTERY
+        && ConditionBucket::forMetricProblemType('fan') === ConditionBucket::FAN
+        && ConditionBucket::forMetricProblemType('state') === ConditionBucket::HARDWARE_STATE
+        && ConditionBucket::forMetricProblemType('storage') === ConditionBucket::STORAGE
+        && ConditionBucket::forMetricProblemType('memory') === ConditionBucket::MEMORY
+        && ConditionBucket::forMetricProblemType('processor') === ConditionBucket::CPU
+        && ConditionBucket::forMetricProblemType('anything-else') === ConditionBucket::OTHER,
+    'ConditionBucket::forMetricProblemType: every Page::metricProblemType() output maps to exactly one bucket, unrecognized types fall back to OTHER'
+);
+$assert(
+    ConditionBucket::forServiceStatus(2) === ConditionBucket::SERVICE_CRITICAL
+        && ConditionBucket::forServiceStatus(1) === ConditionBucket::SERVICE_WARNING
+        && ConditionBucket::forServiceStatus(3) === null
+        && ConditionBucket::forServiceStatus(0) === null,
+    'ConditionBucket::forServiceStatus: 2=critical, 1=warning, Unknown(3)/OK(0) deliberately return null — not part of the condition-bucket matrix'
+);
+$assert(
+    count(ConditionBucket::ALL) === 13 && count(array_unique(ConditionBucket::ALL)) === 13,
+    'ConditionBucket::ALL: exactly 13 distinct buckets, matching the audited target matrix'
+);
+$assert(
+    count(ConditionBucket::CONDITION_POLICY_BUCKETS) === 10
+        && ! in_array(ConditionBucket::DEVICE_DOWN, ConditionBucket::CONDITION_POLICY_BUCKETS, true)
+        && ! in_array(ConditionBucket::SERVICE_CRITICAL, ConditionBucket::CONDITION_POLICY_BUCKETS, true)
+        && ! in_array(ConditionBucket::SERVICE_WARNING, ConditionBucket::CONDITION_POLICY_BUCKETS, true),
+    'ConditionBucket::CONDITION_POLICY_BUCKETS: excludes Device Down and Service Critical/Warning — those reuse the older, already-working exact-correlation settings instead of a duplicate condition_policy_* authority'
+);
+$assert(
+    count(ConditionBucket::labels()) === 13,
+    'ConditionBucket::labels: one human label per bucket'
+);
+
 // --- Support\OperationalPolicy::effectivePolicySummary (Gate B5 UI) —
 // must reflect $policyConfig exactly, never hardcoded prose. ----------
 $defaultPolicyConfig = Config::resolve([]);
@@ -1199,18 +1322,33 @@ $assert(
     'OperationalPolicy::effectivePolicySummary: Device Down defaults match the documented policy matrix (Critical for Operational Critical groups, Warning otherwise)'
 );
 $assert(
-    array_key_exists('Sensor Failure', $summaryByCondition),
-    'OperationalPolicy::effectivePolicySummary: numeric and state sensor rows collapse into one "Sensor Failure" row when both resolve to the same severities (true for the defaults)'
+    count($summaryRows) === 13,
+    'OperationalPolicy::effectivePolicySummary: one row per Support\ConditionBucket (Device Down + 10 condition-policy buckets + Service Critical + Service Warning)'
 );
-$overriddenPolicyConfig = Config::resolve(['fallback_numeric_sensor_normal_severity' => 'disabled']);
+$assert(
+    ($summaryByCondition['Temperature']['critical_groups'] ?? null) === 'Warning'
+        && ($summaryByCondition['Temperature']['other_devices'] ?? null) === 'Monitor',
+    'OperationalPolicy::effectivePolicySummary: Temperature defaults match the audited noise-reduction matrix (Warning for Operational Critical groups, Monitor for standard devices)'
+);
+$assert(
+    ($summaryByCondition['Humidity']['critical_groups'] ?? null) === 'Monitor'
+        && ($summaryByCondition['Humidity']['other_devices'] ?? null) === 'Monitor',
+    'OperationalPolicy::effectivePolicySummary: Humidity defaults to Monitor on both tiers — the exact noise this redesign exists to quiet'
+);
+$assert(
+    ($summaryByCondition['Voltage']['critical_groups'] ?? null) === 'Critical'
+        && ($summaryByCondition['Voltage']['other_devices'] ?? null) === 'Warning',
+    'OperationalPolicy::effectivePolicySummary: Voltage defaults match the audited matrix (Critical for Operational Critical groups, Warning otherwise)'
+);
+$overriddenPolicyConfig = Config::resolve(['condition_policy_temperature_normal_severity' => 'disabled']);
 $overriddenRows = OperationalPolicy::effectivePolicySummary($overriddenPolicyConfig);
 $overriddenByCondition = [];
 foreach ($overriddenRows as $row) {
     $overriddenByCondition[$row['condition']] = $row;
 }
 $assert(
-    array_key_exists('Numeric Sensor Failure', $overriddenByCondition) && array_key_exists('State Sensor Failure', $overriddenByCondition),
-    'OperationalPolicy::effectivePolicySummary: numeric/state sensor rows split into two once an Advanced override makes them diverge'
+    ($overriddenByCondition['Temperature']['other_devices'] ?? null) === 'Ignored',
+    'OperationalPolicy::effectivePolicySummary: a condition_policy_* override is reflected live, never hardcoded'
 );
 
 // --- Section 4/12: every Config::FIELDS group must actually render in
@@ -1269,6 +1407,26 @@ $assert(
         && ! str_contains($settingsBladeSource, 'value="service"')
         && ! str_contains($settingsBladeSource, 'alertRuleConditionCategories'),
     'settings.blade.php: no Sensors/Services Alert Rule tagging controls remain'
+);
+$assert(
+    str_contains($settingsBladeSource, '$handlingSettingKey')
+        && str_contains($settingsBladeSource, 'idf-alert-rule-handling')
+        && substr_count($settingsBladeSource, '<th>Handling</th>') === 1,
+    'settings.blade.php: the Alert Rules table gains a Handling column (Direct severity / Condition policy / Monitor)'
+);
+$assert(
+    AlertRules::HANDLING_VALUES === [AlertRules::HANDLING_DIRECT, AlertRules::HANDLING_CONDITION_POLICY, AlertRules::HANDLING_MONITOR],
+    'AlertRules::HANDLING_VALUES: exactly three Handling values — no separate "Ignore" — Include already performs that function (explicit scope decision)'
+);
+$assert(
+    str_contains($settingsBladeSource, "ahead_of_stable"),
+    'settings.blade.php: the three-way installed-vs-stable comparison (Update available / Current / Running ahead of stable) is rendered, not just the old two-way check'
+);
+$assert(
+    array_key_exists('tv_show_condition_voltage', Config::FIELDS)
+        && array_key_exists('tv_show_severity_critical', Config::FIELDS)
+        && Config::FIELDS['tv_show_condition_voltage']['group'] === 'tv',
+    'Config::FIELDS: TV Presentation Policy controls (condition buckets + severity) exist and render generically via the \'tv\' group — settings.blade.php never hardcodes them'
 );
 
 exit($failures === 0 ? 0 : 1);

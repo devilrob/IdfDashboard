@@ -49,6 +49,55 @@ final class AlertRules
     public const DEVICE_DOWN_SETTING_KEY = 'idf_device_down_alert_rule_ids';
 
     /**
+     * Persisted per-rule setting for how a rule's own firing translates
+     * into operational severity — the noise-reduction redesign's core
+     * new control. See Page::buildDeviceIssues() for exactly how each
+     * value is consumed.
+     *
+     * - HANDLING_DIRECT (the fail-safe default for any rule an admin
+     *   has never declared a Handling for): the rule's own
+     *   `alert_rules.severity` becomes the issue's severity as-is,
+     *   unchanged from this plugin's behavior before this redesign.
+     *   Reserved for rules whose condition already IS the
+     *   device/hardware state itself (Device Down, Cluster/SNMP Down,
+     *   Firewall rules) — there is no finer-grained technical condition
+     *   to separate.
+     * - HANDLING_CONDITION_POLICY: the rule's own severity is NOT used.
+     *   The rule firing proves a real technical condition exists; the
+     *   actual severity comes from Support\OperationalPolicy's
+     *   condition-bucket policy, applied to whichever sensors/services
+     *   are CURRENTLY violating on that device (live data already
+     *   loaded for this request — no alert_log lookup, no N+1). If no
+     *   recognized violation can be found at all, this fails safe to
+     *   HANDLING_DIRECT for that one rule/device (Page::buildDeviceIssues()'s
+     *   own fail-safe) — a real failure must never be silently dropped
+     *   just because this plugin couldn't correlate it precisely.
+     * - HANDLING_MONITOR: the rule firing creates a visible-but-
+     *   non-actionable issue (actionable=false, same mechanism as
+     *   Support\OperationalPolicy's Monitor outcome) — for
+     *   informational/noisy rules (e.g. "Device rebooted") that should
+     *   never contribute to device health or Priority Attention.
+     *
+     * Deliberately no "Ignore" value here — the existing Include column
+     * (self::SETTING_KEY) already fully controls whether a rule's
+     * alerts reach this plugin at all; a second "ignore" authority
+     * would just compete with it.
+     */
+    public const HANDLING_DIRECT = 'direct';
+
+    public const HANDLING_CONDITION_POLICY = 'condition_policy';
+
+    public const HANDLING_MONITOR = 'monitor';
+
+    public const HANDLING_VALUES = [
+        self::HANDLING_DIRECT,
+        self::HANDLING_CONDITION_POLICY,
+        self::HANDLING_MONITOR,
+    ];
+
+    public const HANDLING_SETTING_KEY = 'idf_alert_rule_handling';
+
+    /**
      * Every real alert rule currently defined in LibreNMS, ordered by
      * name. Defensive like the rest of this plugin's raw-table reads:
      * degrades to an empty list instead of throwing if the schema
@@ -159,6 +208,41 @@ final class AlertRules
         }
 
         return array_values(array_intersect($availableIds, array_unique($selected)));
+    }
+
+    /**
+     * The administrator-declared Handling for every currently-available
+     * rule — rule_id => one of self::HANDLING_VALUES. A rule with no
+     * declared Handling at all (never saved, or a stale/deleted rule
+     * ID in the raw setting) resolves to self::HANDLING_DIRECT, the
+     * fail-safe default that reproduces this plugin's pre-redesign
+     * behavior exactly: an administrator who never opens this control
+     * gets no behavior change. An invalid/unrecognized persisted value
+     * for a rule that DOES still exist also falls back to
+     * HANDLING_DIRECT, never silently to Monitor or Condition policy —
+     * the fail-safe direction is always "keep showing the rule's own
+     * severity," never "start hiding it."
+     *
+     * @param  mixed  $rawSetting
+     * @param  array<int, array{id: int, name: string, severity: string}>  $availableRules
+     * @return array<int, string> rule_id => Handling value, one entry per available rule
+     */
+    public static function resolveHandling(mixed $rawSetting, array $availableRules): array
+    {
+        $raw = is_array($rawSetting) ? $rawSetting : [];
+        $handling = [];
+
+        foreach ($availableRules as $rule) {
+            $ruleId = $rule['id'];
+            $declared = $raw[(string) $ruleId] ?? $raw[$ruleId] ?? null;
+            $declared = is_string($declared) ? $declared : '';
+
+            $handling[$ruleId] = in_array($declared, self::HANDLING_VALUES, true)
+                ? $declared
+                : self::HANDLING_DIRECT;
+        }
+
+        return $handling;
     }
 
     private static function tableExists(string $table): bool

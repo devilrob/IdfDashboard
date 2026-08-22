@@ -2049,12 +2049,19 @@ class DeviceAccessTest extends TestCase
         // Critical threshold, with no Alert Rule covering it yet — the
         // condition must not be silently hidden just because no rule
         // exists, and its severity follows the device's Operational
-        // Critical membership.
+        // Critical membership. Deliberately a Voltage sensor, not
+        // Temperature — the audited noise-reduction condition matrix
+        // intentionally de-prioritizes Temperature to Warning/Monitor
+        // (see the Voltage/Temperature/Humidity condition-bucket
+        // matrix test below), so Voltage (unchanged Critical/Warning
+        // defaults) is what actually proves this general "critical-
+        // group tier drives severity" mechanic without conflating it
+        // with condition-bucket-specific policy.
         $criticalServerSensor = $makeDevice('critical-db-server.example.com', 1);
         $criticalGroup->devices()->attach($criticalServerSensor->device_id);
         Sensor::factory()->for($criticalServerSensor)->create([
-            'sensor_class' => 'temperature',
-            'sensor_descr' => 'Server Ambient',
+            'sensor_class' => 'voltage',
+            'sensor_descr' => 'Server Input Voltage',
             'sensor_current' => 95,
             'sensor_limit' => 80,
             'sensor_limit_warn' => 70,
@@ -2358,7 +2365,7 @@ class DeviceAccessTest extends TestCase
         $this->assertSame('critical', $devices->get($clusterDown->device_id)['health'], 'Caso 2: an Operational Critical device going down is Critical.');
         $this->assertTrue($devices->get($clusterDown->device_id)['operationally_critical']);
 
-        $this->assertSame('critical', $devices->get($criticalServerSensor->device_id)['health'], 'Caso 3: a Critical numeric sensor on a critical server, no Alert Rule yet, is Critical.');
+        $this->assertSame('critical', $devices->get($criticalServerSensor->device_id)['health'], 'Caso 3: a Critical Voltage sensor on a critical server, no Alert Rule yet, is Critical.');
         $this->assertTrue($devices->get($criticalServerSensor->device_id)['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'sensor'
                 && $issue['severity'] === 'critical'
@@ -2461,9 +2468,9 @@ class DeviceAccessTest extends TestCase
         // assertions below) — without touching any source code.
         $configuredNormalDown = $makeDevice('configured-normal-down.example.com', 0);
 
-        // Case G: a disabled numeric sensor fallback must never
-        // generate an issue for an otherwise-Critical numeric sensor,
-        // while the sensor's own telemetry stays fully visible.
+        // Case G: a disabled (Ignore) Temperature condition bucket must
+        // never generate an issue for an otherwise-Critical temperature
+        // sensor, while the sensor's own telemetry stays fully visible.
         $disabledSensorFallback = $makeDevice('disabled-sensor-fallback.example.com', 1);
         $criticalGroup->devices()->attach($disabledSensorFallback->device_id);
         Sensor::factory()->for($disabledSensorFallback)->create([
@@ -2491,10 +2498,10 @@ class DeviceAccessTest extends TestCase
         // this device must fall back to the documented safe default
         // (Warning) exactly as if nothing had been configured at all.
         // Uses a normal (non-Operational-Critical) device with a
-        // Critical STATE sensor (fallback_state_sensor_normal_severity
+        // Critical STATE sensor (condition_policy_hardware_state_normal_severity
         // is the one setting given the invalid value below) so this
-        // case is unaffected by Case G's numeric-sensor-fallback
-        // disable and by Case F's Device Down setting.
+        // case is unaffected by Case G's Temperature-bucket disable and
+        // by Case F's Device Down setting.
         $invalidConfigDevice = $makeDevice('invalid-config-device.example.com', 1);
         $invalidConfigPsu = Sensor::factory()->for($invalidConfigDevice)->create([
             'sensor_class' => 'state',
@@ -2518,10 +2525,13 @@ class DeviceAccessTest extends TestCase
         // Case F (UNKNOWN semantics): a legacy-persisted 'unknown'
         // value (from before this hardening, when it was briefly
         // offered as a fake "Informational") must fail safely to the
-        // documented default (Critical for an Operational Critical
-        // device's state sensor) exactly like any other invalid value
-        // — never treated as a real choice, since UNKNOWN is not (and
-        // must never become) a policy option.
+        // exact same documented default as any other invalid value
+        // (actionable Warning — Support\OperationalPolicy::
+        // resolveConditionOutcome()'s own docblock), REGARDLESS of
+        // Operational Critical tier — the fail-safe direction never
+        // varies by tier, only a recognized choice does. Never treated
+        // as a real choice, since UNKNOWN is not (and must never
+        // become) a policy option.
         $legacyUnknownConfigDevice = $makeDevice('legacy-unknown-config.example.com', 1);
         $criticalGroup->devices()->attach($legacyUnknownConfigDevice->device_id);
         $legacyUnknownPsu = Sensor::factory()->for($legacyUnknownConfigDevice)->create([
@@ -2578,9 +2588,9 @@ class DeviceAccessTest extends TestCase
             [
                 'operational_critical_group_name' => 'Operational Critical',
                 'fallback_device_down_normal_severity' => 'disabled',
-                'fallback_numeric_sensor_enabled' => '0',
-                'fallback_state_sensor_normal_severity' => 'banana',
-                'fallback_state_sensor_critical_group_severity' => 'unknown',
+                'condition_policy_temperature_critical_group_severity' => 'disabled',
+                'condition_policy_hardware_state_normal_severity' => 'banana',
+                'condition_policy_hardware_state_critical_group_severity' => 'unknown',
                 'fallback_service_unknown_severity' => 'disabled',
                 'fallback_suppress_during_maintenance' => '0',
             ],
@@ -2598,7 +2608,7 @@ class DeviceAccessTest extends TestCase
         $disabledSensorFallbackDevice = $devices->get($disabledSensorFallback->device_id);
         $this->assertFalse(
             $disabledSensorFallbackDevice['issues']->contains(fn (array $issue): bool => $issue['source'] === 'sensor'),
-            'Case G: a disabled numeric sensor fallback must generate no issue at all.'
+            'Case G: a Temperature condition bucket set to Ignore must generate no issue at all.'
         );
         $this->assertTrue(
             $disabledSensorFallbackDevice['telemetry']->contains(fn (array $metric): bool => $metric['state'] === 'critical'),
@@ -2630,14 +2640,15 @@ class DeviceAccessTest extends TestCase
         }
 
         // A legacy-persisted 'unknown' value (saved before this
-        // hardening) must fail safely to the documented default
-        // (Critical for an Operational Critical device's state sensor),
-        // exactly like the "banana" case above — never treated as a
-        // real choice.
+        // hardening) must fail safely to the exact same documented
+        // default as the "banana" case above (actionable Warning) even
+        // on an Operational Critical device — the fail-safe direction
+        // never varies by tier, only a recognized choice does — never
+        // treated as a real choice.
         $this->assertSame(
-            'critical',
+            'warning',
             $devices->get($legacyUnknownConfigDevice->device_id)['health'],
-            'Case F: a legacy-persisted "unknown" severity value safely falls back to the documented default (Critical), never a fake Informational state.'
+            'Case F: a legacy-persisted "unknown" severity value safely falls back to the documented default (Warning) on any tier, never a fake Informational state.'
         );
 
         $this->assertSame(
@@ -2652,11 +2663,430 @@ class DeviceAccessTest extends TestCase
     }
 
     /**
+     * Noise-reduction redesign — the condition-bucket policy
+     * (Support\ConditionBucket + Support\OperationalPolicy::
+     * resolveConditionIssues()) and Alert Rule Handling (Support\
+     * AlertRules::HANDLING_*) together. Proves the exact scenario the
+     * originating audit was built to fix: a generic Critical sensor
+     * Alert Rule must never uniformly make every current condition on a
+     * device Critical — Humidity, Temperature and Voltage must each
+     * receive their own configured operational priority, independent
+     * of both the rule's own severity and each other.
+     */
+    public function testConditionBucketPolicyAndAlertRuleHandling(): void
+    {
+        $location = Location::factory()->create(['location' => 'Condition Policy Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // A single generic "Sensor over/under limit" style Alert Rule,
+        // Critical severity, marked Handling=Condition policy — the
+        // exact real-world fixture the audit was built from. Its own
+        // severity must never become any device's issue severity.
+        $genericSensorRule = AlertRule::factory()->create([
+            'name' => 'Sensor over limit - Check Device Health Settings',
+            'severity' => 'critical',
+        ]);
+
+        // Humidity-only, standard device: Monitor by default (both
+        // tiers) — visible, never actionable.
+        $humidityOnly = $makeDevice('humidity-only.example.com', 1);
+        Alert::factory()->create(['device_id' => $humidityOnly->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($humidityOnly)->create([
+            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 80, 'sensor_limit' => 70, 'sensor_limit_warn' => 60,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Temperature-only, Operational Critical: Warning by default.
+        $temperatureCritical = $makeDevice('temperature-critical-group.example.com', 1);
+        $criticalGroup->devices()->attach($temperatureCritical->device_id);
+        Alert::factory()->create(['device_id' => $temperatureCritical->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($temperatureCritical)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Temperature-only, standard device: Monitor by default.
+        $temperatureStandard = $makeDevice('temperature-standard.example.com', 1);
+        Alert::factory()->create(['device_id' => $temperatureStandard->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($temperatureStandard)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Voltage-only, Operational Critical: Critical by default.
+        $voltageCritical = $makeDevice('voltage-critical-group.example.com', 1);
+        $criticalGroup->devices()->attach($voltageCritical->device_id);
+        Alert::factory()->create(['device_id' => $voltageCritical->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($voltageCritical)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Voltage-only, standard device: Warning by default.
+        $voltageStandard = $makeDevice('voltage-standard.example.com', 1);
+        Alert::factory()->create(['device_id' => $voltageStandard->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($voltageStandard)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Battery Critical / Fan Critical / Hardware-state Critical —
+        // tier-aware severity, same generic Condition-policy rule.
+        $batteryCritical = $makeDevice('battery-critical-group.example.com', 1);
+        $criticalGroup->devices()->attach($batteryCritical->device_id);
+        Alert::factory()->create(['device_id' => $batteryCritical->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($batteryCritical)->create([
+            'sensor_class' => 'charge', 'sensor_descr' => 'Battery Charge',
+            'sensor_current' => 5, 'sensor_limit_low' => 10, 'sensor_limit_low_warn' => 20,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $fanStandard = $makeDevice('fan-standard.example.com', 1);
+        Alert::factory()->create(['device_id' => $fanStandard->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($fanStandard)->create([
+            'sensor_class' => 'fanspeed', 'sensor_descr' => 'Fan 1',
+            'sensor_current' => 0, 'sensor_limit_low' => 500, 'sensor_limit_low_warn' => 1000,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        $hardwareStateCritical = $makeDevice('hardware-state-critical-group.example.com', 1);
+        $criticalGroup->devices()->attach($hardwareStateCritical->device_id);
+        Alert::factory()->create(['device_id' => $hardwareStateCritical->device_id, 'rule_id' => $genericSensorRule->id]);
+        $hwStatePsu = Sensor::factory()->for($hardwareStateCritical)->create([
+            'sensor_class' => 'state', 'sensor_descr' => 'Power Supply 1',
+            'sensor_current' => 2, 'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        $hwStateIndexId = DB::table('state_indexes')->insertGetId(['state_name' => 'condition-policy-hw-state']);
+        DB::table('sensors_to_state_indexes')->insert(['sensor_id' => $hwStatePsu->sensor_id, 'state_index_id' => $hwStateIndexId]);
+        DB::table('state_translations')->insert(['state_index_id' => $hwStateIndexId, 'state_descr' => 'Failed', 'state_value' => 2, 'state_generic_value' => 2]);
+
+        // Multi-condition: Humidity Monitor + Temperature Warning +
+        // Voltage Critical, all on the SAME Operational Critical
+        // device, all behind the SAME generic Critical Condition-policy
+        // rule. Final health must be Critical (Voltage wins); all three
+        // conditions remain visible in $device['issues'].
+        $multiCondition = $makeDevice('multi-condition.example.com', 1);
+        $criticalGroup->devices()->attach($multiCondition->device_id);
+        Alert::factory()->create(['device_id' => $multiCondition->device_id, 'rule_id' => $genericSensorRule->id]);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 80, 'sensor_limit' => 70, 'sensor_limit_warn' => 60,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // A Direct-severity rule (unchanged behavior) — its own
+        // severity becomes the issue directly, never routed through
+        // condition-bucket policy.
+        $directRule = AlertRule::factory()->create([
+            'name' => 'Cluster - SNMP Down',
+            'severity' => 'critical',
+        ]);
+        $directDevice = $makeDevice('direct-severity-device.example.com', 1);
+        Alert::factory()->create(['device_id' => $directDevice->device_id, 'rule_id' => $directRule->id]);
+
+        // A Condition-policy rule that fires but correlates to NOTHING
+        // currently violating on the device — must fail safe to the
+        // rule's own Direct severity, never silently dropped.
+        $ambiguousRule = AlertRule::factory()->create([
+            'name' => 'Custom Condition Rule With No Sensor Match',
+            'severity' => 'critical',
+        ]);
+        $ambiguousDevice = $makeDevice('ambiguous-condition-policy.example.com', 1);
+        Alert::factory()->create(['device_id' => $ambiguousDevice->device_id, 'rule_id' => $ambiguousRule->id]);
+
+        // A Monitor-handling rule — visible, never actionable,
+        // regardless of its own configured severity.
+        $monitorRule = AlertRule::factory()->create([
+            'name' => 'Device rebooted',
+            'severity' => 'critical',
+        ]);
+        $monitorDevice = $makeDevice('monitor-handling-device.example.com', 1);
+        Alert::factory()->create(['device_id' => $monitorDevice->device_id, 'rule_id' => $monitorRule->id]);
+
+        // Include=false — no issue at all, regardless of Handling.
+        $excludedRule = AlertRule::factory()->create([
+            'name' => 'Excluded rule',
+            'severity' => 'critical',
+        ]);
+        $excludedDevice = $makeDevice('excluded-rule-device.example.com', 1);
+        Alert::factory()->create(['device_id' => $excludedDevice->device_id, 'rule_id' => $excludedRule->id]);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        $payload = (new Page())->data(
+            [
+                'operational_critical_group_name' => 'Operational Critical',
+                AlertRules::SETTING_KEY => [
+                    (string) $genericSensorRule->id,
+                    (string) $directRule->id,
+                    (string) $ambiguousRule->id,
+                    (string) $monitorRule->id,
+                ],
+                AlertRules::HANDLING_SETTING_KEY => [
+                    (string) $genericSensorRule->id => AlertRules::HANDLING_CONDITION_POLICY,
+                    (string) $directRule->id => AlertRules::HANDLING_DIRECT,
+                    (string) $ambiguousRule->id => AlertRules::HANDLING_CONDITION_POLICY,
+                    (string) $monitorRule->id => AlertRules::HANDLING_MONITOR,
+                ],
+            ],
+            $request
+        );
+        $devices = collect($payload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertSame('healthy', $devices->get($humidityOnly->device_id)['health'], 'Humidity-only, standard device: Monitor never elevates health above Healthy.');
+        $this->assertTrue(
+            $devices->get($humidityOnly->device_id)['issues']->contains(
+                fn (array $issue): bool => $issue['source'] === 'sensor' && $issue['severity'] === 'critical' && ! $issue['actionable']
+            ),
+            'Humidity-only: the Monitor-tier issue exists (visible), carrying the TRUE technical severity (Critical, from the raw breach), but is not actionable.'
+        );
+        $this->assertFalse(
+            $devices->get($humidityOnly->device_id)['issues']->contains(fn (array $issue): bool => $issue['source'] === 'alert'),
+            'Humidity-only: a Condition-policy rule never creates its own raw-severity alert issue — only the condition-bucket issue exists.'
+        );
+
+        $this->assertSame('warning', $devices->get($temperatureCritical->device_id)['health'], 'Temperature-only, Operational Critical: Warning by default.');
+        $this->assertSame('healthy', $devices->get($temperatureStandard->device_id)['health'], 'Temperature-only, standard device: Monitor never elevates health.');
+
+        $this->assertSame('critical', $devices->get($voltageCritical->device_id)['health'], 'Voltage-only, Operational Critical: Critical by default.');
+        $this->assertSame('warning', $devices->get($voltageStandard->device_id)['health'], 'Voltage-only, standard device: Warning by default.');
+
+        $this->assertSame('critical', $devices->get($batteryCritical->device_id)['health'], 'Battery Critical, Operational Critical device: tier-aware Critical.');
+        $this->assertSame('warning', $devices->get($fanStandard->device_id)['health'], 'Fan failure, standard device: tier-aware Warning.');
+        $this->assertSame('critical', $devices->get($hardwareStateCritical->device_id)['health'], 'Hardware/state failure, Operational Critical device: tier-aware Critical.');
+
+        $multiIssues = $devices->get($multiCondition->device_id)['issues'];
+        $this->assertSame('critical', $devices->get($multiCondition->device_id)['health'], 'Multi-condition device: final health is Critical because Voltage is Critical, even though Humidity/Temperature are lower priority.');
+        $this->assertTrue($multiIssues->contains(fn (array $issue): bool => $issue['type'] === 'humidity'), 'Multi-condition: Humidity remains visible in device issues.');
+        $this->assertTrue($multiIssues->contains(fn (array $issue): bool => $issue['type'] === 'temperature'), 'Multi-condition: Temperature remains visible in device issues.');
+        $this->assertTrue($multiIssues->contains(fn (array $issue): bool => $issue['type'] === 'voltage' && $issue['severity'] === 'critical'), 'Multi-condition: Voltage remains visible and Critical.');
+
+        $this->assertSame('critical', $devices->get($directDevice->device_id)['health'], 'Direct-severity rule (Cluster - SNMP Down): unchanged, uses the rule\'s own severity directly.');
+
+        $ambiguousDeviceData = $devices->get($ambiguousDevice->device_id);
+        $this->assertSame('critical', $ambiguousDeviceData['health'], 'Ambiguous Condition-policy rule (no currently-violating sensor/service to correlate to) fails safe to the rule\'s own Direct severity — never silently dropped.');
+        $this->assertContains(
+            'Custom Condition Rule With No Sensor Match',
+            $ambiguousDeviceData['condition_policy_fail_safe_rule_names'],
+            'The fail-safe is tracked by name for Support\PolicyHealth to surface administrator-wide.'
+        );
+
+        $monitorDeviceData = $devices->get($monitorDevice->device_id);
+        $this->assertSame('healthy', $monitorDeviceData['health'], 'Monitor-handling rule ("Device rebooted"): never elevates device health, regardless of its own configured severity.');
+        $this->assertTrue(
+            $monitorDeviceData['issues']->contains(fn (array $issue): bool => $issue['source'] === 'alert' && ! $issue['actionable']),
+            'Monitor-handling rule: the issue exists (visible) but is not actionable.'
+        );
+
+        $this->assertSame('healthy', $devices->get($excludedDevice->device_id)['health'], 'Include=false: no alert issue at all, regardless of Handling.');
+        $this->assertTrue($devices->get($excludedDevice->device_id)['issues']->isEmpty());
+    }
+
+    /**
+     * TV Presentation Policy (Support\TvPresentationPolicy) — TV Mode is
+     * a curated wall/NOC projection, a strictly narrower question than
+     * "is this actionable." Proves TV curation operates PER CAUSE, not
+     * per device, and — critically — that it can never alter operational
+     * truth: the same payload's normal-dashboard collections
+     * ($otherLocations, priorityAttention, visibleSummary) must be
+     * byte-for-byte identical regardless of what TV settings say.
+     */
+    public function testTvPresentationPolicyCuratesWithoutAlteringOperationalSeverity(): void
+    {
+        $location = Location::factory()->create(['location' => 'TV Presentation Fixture']);
+        $criticalGroup = DeviceGroup::factory()->create(['name' => 'Operational Critical']);
+
+        $makeDevice = static fn (string $hostname, int $status = 1): Device => Device::factory()->create([
+            'hostname' => $hostname,
+            'location_id' => $location->id,
+            'type' => 'server',
+            'status' => $status,
+            'disabled' => 0,
+            'ignore' => 0,
+        ]);
+
+        // Humidity Monitor (non-actionable) — never shown on TV, no
+        // dedicated setting needed; visible in normal device details.
+        $humidityMonitor = $makeDevice('tv-humidity-monitor.example.com', 1);
+        Sensor::factory()->for($humidityMonitor)->create([
+            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 80, 'sensor_limit' => 70, 'sensor_limit_warn' => 60,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Temperature Warning on an Operational Critical device — TV
+        // visibility toggles with tv_show_condition_temperature; normal
+        // dashboard severity (Warning) never changes either way.
+        $temperatureWarning = $makeDevice('tv-temperature-warning.example.com', 1);
+        $criticalGroup->devices()->attach($temperatureWarning->device_id);
+        Sensor::factory()->for($temperatureWarning)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Voltage Critical on an Operational Critical device —
+        // tv_show_condition_voltage defaults ON.
+        $voltageCritical = $makeDevice('tv-voltage-critical.example.com', 1);
+        $criticalGroup->devices()->attach($voltageCritical->device_id);
+        Sensor::factory()->for($voltageCritical)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // Multi-condition: Humidity Monitor + Temperature Warning (TV
+        // disabled by default) + Voltage Critical (TV enabled by
+        // default), same Operational Critical device.
+        $multiCondition = $makeDevice('tv-multi-condition.example.com', 1);
+        $criticalGroup->devices()->attach($multiCondition->device_id);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'humidity', 'sensor_descr' => 'Ambient Humidity',
+            'sensor_current' => 80, 'sensor_limit' => 70, 'sensor_limit_warn' => 60,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+        Sensor::factory()->for($multiCondition)->create([
+            'sensor_class' => 'voltage', 'sensor_descr' => 'Input Voltage',
+            'sensor_current' => 400, 'sensor_limit' => 300, 'sensor_limit_warn' => 250,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // A standard (non-Operational-Critical) device with ONLY a
+        // TV-excluded Warning condition (Temperature, TV disabled) —
+        // must be absent from TV, but remain in normal Priority
+        // Attention.
+        $warningOnlyExcluded = $makeDevice('tv-warning-only-excluded.example.com', 1);
+        Sensor::factory()->for($warningOnlyExcluded)->create([
+            'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
+            'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,
+            'sensor_alert' => 1, 'lastupdate' => now(),
+        ]);
+
+        // A Direct-severity rule (device/hardware-level, bucket =
+        // device_down, TV-eligible by default) — remains visible on TV.
+        $directRule = AlertRule::factory()->create(['name' => 'Cluster - SNMP Down', 'severity' => 'critical']);
+        $directDevice = $makeDevice('tv-direct-cluster.example.com', 1);
+        Alert::factory()->create(['device_id' => $directDevice->device_id, 'rule_id' => $directRule->id]);
+
+        // Printer Down — Warning on a standard device, Device Down
+        // bucket, TV-eligible by default.
+        $printerDown = $makeDevice('tv-printer-down.example.com', 0);
+
+        $user = User::factory()->create(['enabled' => 1]);
+        $user->assignRole('admin');
+        $request = Request::create('/plugin/IdfDashboard');
+        $request->setUserResolver(fn (): User => $user);
+
+        $baseSettings = [
+            'operational_critical_group_name' => 'Operational Critical',
+            AlertRules::SETTING_KEY => [(string) $directRule->id],
+        ];
+
+        // --- Pass 1: TV defaults (Temperature OFF, Voltage/Device Down ON) ---
+        $defaultPayload = (new Page())->data($baseSettings, $request);
+        $defaultTvOtherLocations = collect($defaultPayload['tv']['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertFalse($defaultTvOtherLocations->has($humidityMonitor->device_id), 'Humidity Monitor never appears on TV — no eligible actionable cause exists at all.');
+        $this->assertFalse($defaultTvOtherLocations->has($temperatureWarning->device_id), 'Temperature Warning is absent from TV while tv_show_condition_temperature is off by default.');
+        $this->assertTrue($defaultTvOtherLocations->has($voltageCritical->device_id), 'Voltage Critical is shown on TV — tv_show_condition_voltage defaults on.');
+
+        $multiTv = $defaultTvOtherLocations->get($multiCondition->device_id);
+        $this->assertNotNull($multiTv, 'Multi-condition device appears on TV because Voltage remains TV-eligible even though Humidity/Temperature are not.');
+        $this->assertSame('voltage', $multiTv['primary_issue']['type'] ?? null, 'TV\'s displayed primary cause for the multi-condition device is Voltage, not Humidity/Temperature.');
+        $this->assertSame(1, $multiTv['issues']->count(), 'TV\'s own issue list for this device is narrowed to only the TV-eligible cause (Voltage) — hidden causes do not clutter the TV card.');
+
+        $this->assertFalse($defaultTvOtherLocations->has($warningOnlyExcluded->device_id), 'A device whose only condition is TV-excluded is absent from TV entirely.');
+        $this->assertTrue($defaultTvOtherLocations->has($directDevice->device_id), 'Direct-severity Cluster/SNMP rule remains visible on TV by default.');
+        $this->assertTrue($defaultTvOtherLocations->has($printerDown->device_id), 'Device Down (Printer) remains visible on TV — tv_show_condition_device_down defaults on.');
+
+        // --- Normal dashboard is completely unaffected by TV settings ---
+        $normalDevices = collect($defaultPayload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+        $this->assertSame('warning', $normalDevices->get($temperatureWarning->device_id)['health'], 'Normal dashboard: Temperature Warning device health is Warning regardless of TV exclusion.');
+        $this->assertSame('critical', $normalDevices->get($multiCondition->device_id)['health'], 'Normal dashboard: multi-condition device health is Critical (Voltage), independent of TV curation.');
+        $this->assertSame(3, $normalDevices->get($multiCondition->device_id)['issues']->count(), 'Normal dashboard retains all three conditions for the multi-condition device — TV\'s own narrowed issue list never leaks back.');
+        $this->assertSame('warning', $normalDevices->get($warningOnlyExcluded->device_id)['health'], 'Normal dashboard: a TV-excluded Warning condition still shows as Warning.');
+        $this->assertTrue(
+            collect($defaultPayload['priorityAttention']['items'])->contains('device_id', $warningOnlyExcluded->device_id),
+            'A device absent from TV (Gate 21/23) still appears in normal Priority Attention.'
+        );
+
+        // --- Pass 2: Temperature explicitly enabled on TV — proves TV
+        // settings are genuinely presentation-only and reversible, and
+        // that enabling a condition never changes operational severity.
+        $temperatureEnabledPayload = (new Page())->data($baseSettings + [
+            'tv_show_condition_temperature' => '1',
+        ], $request);
+        $temperatureEnabledTv = collect($temperatureEnabledPayload['tv']['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+
+        $this->assertTrue($temperatureEnabledTv->has($temperatureWarning->device_id), 'With tv_show_condition_temperature on, the Temperature Warning device now appears on TV.');
+        $this->assertTrue($temperatureEnabledTv->has($warningOnlyExcluded->device_id), 'The previously TV-excluded Warning-only device now also appears.');
+
+        $temperatureEnabledNormalDevices = collect($temperatureEnabledPayload['otherLocations'])
+            ->flatMap(fn (array $group): mixed => $group['devices'])
+            ->keyBy('device_id');
+        $this->assertSame(
+            $normalDevices->get($temperatureWarning->device_id)['health'],
+            $temperatureEnabledNormalDevices->get($temperatureWarning->device_id)['health'],
+            'TV isolation (Gate 21): toggling a TV condition setting never changes device health.'
+        );
+        $this->assertSame(
+            $defaultPayload['visibleSummary'],
+            $temperatureEnabledPayload['visibleSummary'],
+            'TV isolation: header Critical/Warning counters are completely unaffected by TV Presentation Policy settings.'
+        );
+        $this->assertSame(
+            collect($defaultPayload['priorityAttention']['items'])->pluck('device_id')->all(),
+            collect($temperatureEnabledPayload['priorityAttention']['items'])->pluck('device_id')->all(),
+            'TV isolation: normal Priority Attention membership is completely unaffected by TV Presentation Policy settings.'
+        );
+    }
+
+    /**
      * Section 25's "Policy Health" panel. RefreshDatabase gives each
      * test its own isolated, rolled-back transaction, so — unlike
      * AlertRules::available()'s own docblock caveat about a shared
      * instance — this fixture can safely assert exact counts for
-     * every one of PolicyHealth's six checks without any risk of
+     * every one of PolicyHealth's eight checks without any risk of
      * leftover state from another test method's own Alert Rule/
      * Device Group fixtures leaking in.
      */
@@ -2708,7 +3138,7 @@ class DeviceAccessTest extends TestCase
         );
 
         $this->assertIsArray($adminPayload['policyHealth'], 'An admin request must receive the Policy Health payload.');
-        $this->assertCount(8, $adminPayload['policyHealth'], 'All eight PolicyHealth checks must be present, in a stable order (Gate D added condition-coverage and fallback-categories checks).');
+        $this->assertCount(8, $adminPayload['policyHealth'], 'All eight PolicyHealth checks must be present, in a stable order (Handling breakdown and condition-policy correlation replaced the old rule-name-substring heuristics).');
 
         $checks = $adminPayload['policyHealth'];
 
@@ -2719,21 +3149,21 @@ class DeviceAccessTest extends TestCase
         $this->assertSame('ok', $checks[1]['status']);
         $this->assertStringContainsString('2 of 2', $checks[1]['label'], 'Both rules are included by default — no explicit idf_included_alert_rule_ids setting was saved in this fixture.');
 
-        $this->assertSame('info', $checks[2]['status']);
-        $this->assertStringContainsString('tagged "Device Down"', $checks[2]['label'], 'Neither rule was tagged "Device Down" in this fixture — informational, never hides the fallback.');
+        $this->assertSame('ok', $checks[2]['status']);
+        $this->assertStringContainsString('2 rule(s) Direct severity, 0 Condition policy, 0 Monitor', $checks[2]['label'], 'Neither rule was given an explicit Handling in this fixture — both default to Direct severity.');
 
-        $this->assertSame('ok', $checks[3]['status']);
-        $this->assertStringContainsString('Device Down — Critical Infrastructure', $checks[3]['label']);
+        $this->assertSame('info', $checks[3]['status']);
+        $this->assertStringContainsString('tagged "Device Down"', $checks[3]['label'], 'Neither rule was tagged "Device Down" in this fixture — informational, never hides the condition policy.');
 
         $this->assertSame('ok', $checks[4]['status']);
-        $this->assertStringContainsString('Sophos Health Check Service', $checks[4]['label']);
+        $this->assertStringContainsString('correlating', $checks[4]['label'], 'No Condition-policy rule fired at all in this fixture, so there is nothing to fail safe on.');
 
         $this->assertSame('ok', $checks[5]['status']);
-        $this->assertStringContainsString('Every fallback category', $checks[5]['label'], 'No fallback_*_enabled setting was saved in this fixture, so every category defaults to enabled.');
+        $this->assertStringContainsString('No condition bucket is set to Ignore', $checks[5]['label'], 'No condition_policy_*_critical_group_severity setting was saved in this fixture, so nothing is Ignored.');
 
         $this->assertSame('info', $checks[6]['status']);
         $this->assertStringContainsString('1 device', $checks[6]['label']);
-        $this->assertStringContainsString('default fallback policy', $checks[6]['label']);
+        $this->assertStringContainsString('condition policy', $checks[6]['label']);
 
         $this->assertSame('warning', $checks[7]['status']);
         $this->assertStringContainsString('1 device', $checks[7]['label']);
@@ -2969,9 +3399,21 @@ class DeviceAccessTest extends TestCase
 
         // Effective policy summary — read-only, sourced live from
         // Support\OperationalPolicy::effectivePolicySummary(), never
-        // hardcoded Blade prose.
+        // hardcoded Blade prose. One row per Support\ConditionBucket,
+        // not a collapsed generic "Sensor Failure" row — the whole
+        // point of the noise-reduction redesign is that each condition
+        // type gets its own visible, distinct operational priority.
         $this->assertStringContainsString('Device Down', $html);
-        $this->assertStringContainsString('Sensor Failure', $html);
+        $this->assertStringContainsString('Voltage', $html);
+        $this->assertStringContainsString('Temperature', $html);
+        $this->assertStringContainsString('Humidity', $html);
+
+        // Handling column — the noise-reduction redesign's one new
+        // meaningful Alert Rules control.
+        $this->assertStringContainsString('>Handling<', $html);
+        $this->assertStringContainsString('Direct severity', $html);
+        $this->assertStringContainsString('Condition policy', $html);
+        $this->assertStringContainsString('Monitor', $html);
     }
 
     private function writeVisualFixture(string $name, string $html): void

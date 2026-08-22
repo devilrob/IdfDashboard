@@ -58,6 +58,36 @@ class Config
         'tv_hide_maintenance' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide Maintenance in TV Mode', 'group' => 'tv', 'help' => ''],
         'tv_hide_no_sensor' => ['type' => 'bool', 'default' => false, 'label' => 'Additionally hide "No sensor installed" in TV Mode', 'group' => 'tv', 'help' => ''],
 
+        // TV Presentation Policy (Support\TvPresentationPolicy) — TV Mode
+        // is a wall/NOC projection, not the normal dashboard rendered
+        // full-screen: its job is showing only what deserves immediate
+        // visual attention, a narrower question than "is this
+        // technically actionable." These settings are pure PRESENTATION
+        // filters over already-computed, already-actionable Critical/
+        // Warning issues — they can never change device health, location
+        // health, normal Priority Attention, header counters, Alert Rule
+        // inclusion, or telemetry (see Support\TvPresentationPolicy's own
+        // docblock). Monitor issues (actionable=false) are already
+        // excluded from TV by that same actionable check, with no
+        // dedicated setting needed — forcing Monitor into a toggle here
+        // would mean a second severity engine, which this redesign
+        // exists to avoid.
+        'tv_show_severity_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Show Critical on TV', 'group' => 'tv', 'help' => ''],
+        'tv_show_severity_warning' => ['type' => 'bool', 'default' => true, 'label' => 'Show Warning on TV', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_device_down' => ['type' => 'bool', 'default' => true, 'label' => 'Device Down', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_hardware_state' => ['type' => 'bool', 'default' => true, 'label' => 'Hardware / State Failure', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_voltage' => ['type' => 'bool', 'default' => true, 'label' => 'Voltage', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_battery' => ['type' => 'bool', 'default' => true, 'label' => 'Battery', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_fan' => ['type' => 'bool', 'default' => true, 'label' => 'Fan', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_service_critical' => ['type' => 'bool', 'default' => true, 'label' => 'Service Critical', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_service_warning' => ['type' => 'bool', 'default' => false, 'label' => 'Service Warning', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_temperature' => ['type' => 'bool', 'default' => false, 'label' => 'Temperature', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_humidity' => ['type' => 'bool', 'default' => false, 'label' => 'Humidity', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_cpu' => ['type' => 'bool', 'default' => false, 'label' => 'CPU', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_memory' => ['type' => 'bool', 'default' => false, 'label' => 'Memory', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_storage' => ['type' => 'bool', 'default' => false, 'label' => 'Storage', 'group' => 'tv', 'help' => ''],
+        'tv_show_condition_other' => ['type' => 'bool', 'default' => false, 'label' => 'Other', 'group' => 'tv', 'help' => ''],
+
         // --- Updates --------------------------------------------------
         'update_check_enabled' => [
             'type' => 'bool', 'default' => true,
@@ -81,31 +111,39 @@ class Config
         ],
 
         // --- Advanced -----------------------------------------------------
-        // Detailed Operational Priority overrides. Every setting here
-        // governs Support\OperationalPolicy's fallback safety net ONLY —
-        // the severity this dashboard shows for a technical condition
-        // (device down / sensor / service) that no active, administrator-
-        // selected Alert Rule EXACTLY covers for that same device. Device
-        // Down is the one condition where a rule tagged as covering it
-        // (see "Alert Rules" below) shares a real, exact identifier
-        // (device_id) with the fallback it replaces — no other condition
-        // can be exactly correlated with today's LibreNMS alert schema,
-        // so an unrelated Alert Rule can never suppress a sensor/service
-        // fallback here. Defaults below intentionally reproduce this
-        // project's original policy matrix exactly, so upgrading changes
-        // zero effective behavior for an administrator who has not opened
-        // this section. Choices are deliberately only 'critical'/
-        // 'warning'/'disabled' — Severity::UNKNOWN ("Needs Review") is a
-        // real, distinct technical state and is never offered here as a
-        // stand-in for "Informational". 'disabled' means this specific
-        // fallback slot never generates an issue (the underlying
-        // technical telemetry/service state remains visible regardless).
+        // Detailed Operational Priority overrides. Every choice-type
+        // setting here governs the operational severity this dashboard
+        // assigns to a real technical condition — either Support\
+        // OperationalPolicy's Device Down/Service handling (exact,
+        // device/service-identity-based — unchanged by this redesign,
+        // see Support\AlertRules::DEVICE_DOWN_SETTING_KEY), or the
+        // condition-bucket policy (Support\ConditionBucket +
+        // Support\OperationalPolicy::resolveConditionOutcome()) applied
+        // to whichever sensor/service condition is CURRENTLY violating
+        // on a device — never a raw Alert Rule's own severity for a rule
+        // marked "Condition policy" Handling (see Support\AlertRules'
+        // own docblock). Defaults below intentionally reproduce this
+        // project's original policy matrix for Device Down/Service, and
+        // the audited noise-reduction target matrix for every other
+        // condition, so upgrading from a fresh install changes nothing
+        // until an administrator opens this section. Choices are
+        // 'critical'/'warning'/'monitor'/'disabled':
+        // Severity::UNKNOWN ("Needs Review") is a real, distinct
+        // technical state and is never offered here as a stand-in for
+        // "Informational". 'monitor' means the issue exists (visible in
+        // device telemetry/details) but is never actionable — never
+        // enters Priority Attention, never elevates device/location
+        // health, never fills TV Mode by default (Severity::worst()'s
+        // existing actionable filter is the only mechanism this reuses —
+        // see IssueBuilder::make()). 'disabled' means this specific slot
+        // never generates an issue at all (the underlying technical
+        // telemetry/service state remains visible regardless).
         //
         // There is deliberately no single global "Fallback Safety Net
-        // enabled" master switch here: the four *_enabled toggles below
-        // already let an administrator disable each category
-        // independently, and a second master switch would just be a
-        // second, competing authority over the same decision.
+        // enabled" master switch here: 'disabled' on any one condition
+        // already achieves that per-condition, and a second master
+        // switch would just be a second, competing authority over the
+        // same decision.
         'fallback_device_down_enabled' => [
             'type' => 'bool', 'default' => true,
             'label' => 'Enable Device Down fallback',
@@ -114,74 +152,28 @@ class Config
         ],
         'fallback_device_down_critical_group_severity' => [
             'type' => 'choice', 'default' => 'critical',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
             'label' => 'Device Down severity — Operational Critical Device Groups',
             'group' => 'advanced',
             'help' => 'Applied only when no active, selected Alert Rule tagged "Device Down" already covers this device.',
         ],
         'fallback_device_down_normal_severity' => [
             'type' => 'choice', 'default' => 'warning',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
             'label' => 'Device Down severity — every other device',
             'group' => 'advanced',
             'help' => 'Applied only when no active, selected Alert Rule tagged "Device Down" already covers this device.',
         ],
-        'fallback_numeric_sensor_enabled' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Enable numeric sensor fallback',
-            'group' => 'advanced',
-            'help' => 'When off, this dashboard never synthesizes an issue from a numeric sensor threshold on its own — the sensor reading stays visible, just not flagged as an issue.',
-        ],
-        'fallback_numeric_sensor_critical_group_severity' => [
-            'type' => 'choice', 'default' => 'critical',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'Numeric sensor severity — Operational Critical Device Groups',
-            'group' => 'advanced',
-            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — no Alert Rule tag can suppress this (no exact per-sensor identity exists to correlate against).',
-        ],
-        'fallback_numeric_sensor_normal_severity' => [
-            'type' => 'choice', 'default' => 'warning',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'Numeric sensor severity — every other device',
-            'group' => 'advanced',
-            'help' => 'Applied whenever the sensor itself has crossed a Critical threshold — no Alert Rule tag can suppress this (no exact per-sensor identity exists to correlate against).',
-        ],
-        'fallback_state_sensor_enabled' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Enable state sensor fallback',
-            'group' => 'advanced',
-            'help' => 'When off, this dashboard never synthesizes an issue from a state/discrete sensor (e.g. "Power Supply Failed") on its own — the decoded state stays visible, just not flagged as an issue.',
-        ],
-        'fallback_state_sensor_critical_group_severity' => [
-            'type' => 'choice', 'default' => 'critical',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'State sensor severity — Operational Critical Device Groups',
-            'group' => 'advanced',
-            'help' => 'Applied whenever the state sensor itself already decoded to Critical — no Alert Rule tag can suppress this. UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
-        ],
-        'fallback_state_sensor_normal_severity' => [
-            'type' => 'choice', 'default' => 'warning',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
-            'label' => 'State sensor severity — every other device',
-            'group' => 'advanced',
-            'help' => 'Applied whenever the state sensor itself already decoded to Critical — no Alert Rule tag can suppress this. UNKNOWN/NO_SENSOR sensor states are never affected by this setting.',
-        ],
-        'fallback_service_enabled' => [
-            'type' => 'bool', 'default' => true,
-            'label' => 'Enable service check fallback',
-            'group' => 'advanced',
-            'help' => 'When off, this dashboard never synthesizes an issue from a LibreNMS service check on its own — the service status stays visible, just not flagged as an issue.',
-        ],
         'fallback_service_critical_severity' => [
             'type' => 'choice', 'default' => 'critical',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
             'label' => 'Service severity — status CRITICAL',
             'group' => 'advanced',
             'help' => 'Applies to every device by default (a failing service check is a stronger, more specific signal than infrastructure tier) — no Alert Rule tag can suppress this (no exact per-service identity exists to correlate against).',
         ],
         'fallback_service_warning_severity' => [
             'type' => 'choice', 'default' => 'warning',
-            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
             'label' => 'Service severity — status WARNING',
             'group' => 'advanced',
             'help' => '',
@@ -191,7 +183,164 @@ class Config
             'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'disabled' => 'Disabled (no fallback)'],
             'label' => 'Service severity — status UNKNOWN',
             'group' => 'advanced',
-            'help' => 'A service check that could not determine its own state — never Critical by default, since that would manufacture an outage signal from a data-quality gap.',
+            'help' => 'A service check that could not determine its own state — never Critical by default, since that would manufacture an outage signal from a data-quality gap. Deliberately not part of the condition-bucket matrix below, and no "Monitor" choice — this is a data-quality gap, not a real technical condition, and this dashboard\'s existing safe semantics for it are unchanged.',
+        ],
+
+        // Condition-bucket policy (Support\ConditionBucket) — replaces
+        // the old numeric-sensor/state-sensor split entirely. That split
+        // was never the right operational-priority axis: a numeric
+        // Critical temperature reading and a numeric Critical voltage
+        // reading used to get the exact same severity, which is the
+        // root cause the noise-reduction audit identified (a humidity
+        // reading counted the same as a failed power supply). Severity
+        // is now selected by WHICH CONDITION a sensor represents
+        // (Page::metricProblemType(), translated to a bucket by
+        // Support\ConditionBucket::forMetricProblemType()), independent
+        // of whether the underlying LibreNMS threshold math is numeric
+        // or state-decoded — that mechanic is now purely internal to
+        // sensor evaluation (Page::sensorState()/IssueBuilder::
+        // evaluateNumericSensor()), never an operational severity
+        // authority on its own. 'other' covers every sensor_class this
+        // dashboard has no dedicated bucket for.
+        'condition_policy_hardware_state_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Hardware / State Failure — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => 'A decoded state/discrete sensor (e.g. "Power Supply Failed") already showing Critical or Warning.',
+        ],
+        'condition_policy_hardware_state_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Hardware / State Failure — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_voltage_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Voltage — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_voltage_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Voltage — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_battery_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Battery — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_battery_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Battery — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_fan_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'critical',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Fan — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_fan_normal_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Fan — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_temperature_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Temperature — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_temperature_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Temperature — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_humidity_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Humidity — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_humidity_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Humidity — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_cpu_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'CPU — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_cpu_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'CPU — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_memory_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Memory — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_memory_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Memory — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_storage_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Storage — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_storage_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Storage — every other device',
+            'group' => 'advanced',
+            'help' => '',
+        ],
+        'condition_policy_other_critical_group_severity' => [
+            'type' => 'choice', 'default' => 'warning',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Other — Operational Critical Device Groups',
+            'group' => 'advanced',
+            'help' => 'Any sensor this dashboard has no dedicated condition bucket for.',
+        ],
+        'condition_policy_other_normal_severity' => [
+            'type' => 'choice', 'default' => 'monitor',
+            'options' => ['critical' => 'Critical', 'warning' => 'Warning', 'monitor' => 'Monitor', 'disabled' => 'Ignore (no issue)'],
+            'label' => 'Other — every other device',
+            'group' => 'advanced',
+            'help' => '',
         ],
 
         // Legacy, hidden field — see Support\DeviceGroups::

@@ -23,6 +23,17 @@ final class UpdateStatus
             'installed' => Version::VERSION,
             'latest' => null,
             'update_available' => false,
+            // Gate 15/19 of the noise-reduction audit: installed vs.
+            // published-stable is a real three-way comparison, not a
+            // boolean. Previously only 'update_available' existed, so
+            // "installed newer than the latest published tag" (e.g. a
+            // merge to main with no corresponding release/tag pushed
+            // yet) collapsed into the same generic "current" message as
+            // "installed == stable" — technically not a lie (no update
+            // IS available), but misleading: the installation is not
+            // actually caught up to a matching release, it is ahead of
+            // one. Computed once $latest is known, below.
+            'ahead_of_stable' => false,
             'release_url' => null,
             'checked_at' => null,
             'error' => null,
@@ -63,6 +74,11 @@ final class UpdateStatus
                 $result['update_available'] = version_compare(
                     $latest['version'],
                     Version::VERSION,
+                    '>'
+                );
+                $result['ahead_of_stable'] = version_compare(
+                    Version::VERSION,
+                    $latest['version'],
                     '>'
                 );
             }

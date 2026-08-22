@@ -6,6 +6,7 @@ use App\Models\AlertSchedule;
 use App\Models\User;
 use App\Plugins\Hooks\PageHook;
 use App\Plugins\IdfDashboard\Support\AlertRules;
+use App\Plugins\IdfDashboard\Support\ConditionBucket;
 use App\Plugins\IdfDashboard\Support\Config;
 use App\Plugins\IdfDashboard\Support\DeviceAccess;
 use App\Plugins\IdfDashboard\Support\DeviceClassifier;
@@ -16,6 +17,7 @@ use App\Plugins\IdfDashboard\Support\OperationalPolicy;
 use App\Plugins\IdfDashboard\Support\PolicyHealth;
 use App\Plugins\IdfDashboard\Support\ProblemPolicy;
 use App\Plugins\IdfDashboard\Support\Severity;
+use App\Plugins\IdfDashboard\Support\TvPresentationPolicy;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\Request;
@@ -206,7 +208,7 @@ class Page extends PageHook
         /*
          * Which included Alert Rules an administrator has explicitly
          * tagged "Device Down" — see
-         * OperationalPolicy::resolveFallbackIssues()'s own docblock for
+         * OperationalPolicy::resolveConditionIssues()'s own docblock for
          * why Device Down is the only condition with a real exact
          * identity to correlate against, and why it is administrator-
          * declared rather than auto-detected from the rule's own
@@ -216,6 +218,18 @@ class Page extends PageHook
          */
         $deviceDownTaggedIds = AlertRules::resolveDeviceDownTaggedIds(
             $settings[AlertRules::DEVICE_DOWN_SETTING_KEY] ?? null,
+            $availableAlertRules
+        );
+
+        /*
+         * Every included Alert Rule's administrator-declared Handling
+         * (Direct/Condition policy/Monitor) — see
+         * Support\AlertRules::resolveHandling()'s own docblock and
+         * Page::buildDeviceIssues()'s docblock for exactly how each
+         * value changes what issue(s) a firing rule produces.
+         */
+        $handlingByRuleId = AlertRules::resolveHandling(
+            $settings[AlertRules::HANDLING_SETTING_KEY] ?? null,
             $availableAlertRules
         );
 
@@ -452,6 +466,7 @@ class Page extends PageHook
                 $maintenanceMap,
                 $operationalCriticalDeviceIds,
                 $deviceDownTaggedIds,
+                $handlingByRuleId,
                 $policyConfig
             ): array {
                 $deviceId = (int) $device->device_id;
@@ -471,6 +486,7 @@ class Page extends PageHook
                     $maintenanceMap->get($deviceId),
                     $operationalCriticalDeviceIds->contains($deviceId),
                     $deviceDownTaggedIds,
+                    $handlingByRuleId,
                     $policyConfig
                 );
             })
@@ -530,31 +546,97 @@ class Page extends PageHook
         $otherLocations = $this->buildLocationGroups($otherDevices);
 
         /*
-         * TV Mode's own collections, filtered server-side through the
-         * exact same $tvPolicy every other TV consumer (Priority
-         * Attention, future views) uses — the browser never receives a
-         * Healthy/disabled-severity device's markup for TV at all
-         * (bounding TV's DOM/HTML size), and TV's JS-side
-         * tvDeviceMatches() check on top of this is now pure defense in
-         * depth against a stale client-side settings cache, not the
-         * only enforcement point. Desktop's own $idfLocations/
+         * TV Presentation Policy (Gate 18 of the noise-reduction audit)
+         * — TV Mode is a curated wall/NOC projection, not the normal
+         * dashboard rendered full-screen. For a Healthy/Unknown/Stale/
+         * Maintenance/No-sensor device, TV visibility is unchanged: the
+         * existing $tvPolicy (tv_hide_*) severity-tier gate, exactly as
+         * before. For a Critical/Warning device specifically, visibility
+         * is now decided PER CAUSE, not per device: Support\
+         * TvPresentationPolicy::eligibleCauses() filters that device's
+         * own already-computed, already-actionable issues down to
+         * whichever ones are TV-enabled by condition bucket
+         * (Support\ConditionBucket) and severity
+         * (tv_show_severity_critical/warning) — a device with three
+         * simultaneous conditions where only one is TV-eligible still
+         * appears on TV, credited to that one cause (see
+         * Support\TvPresentationPolicy's own docblock for why this can
+         * never change device health, location health, normal Priority
+         * Attention, header counters, Alert Rule inclusion, or
+         * telemetry — it is a pure filter over already-computed data).
+         * TV's JS-side tvDeviceMatches() check on top of this is pure
+         * defense in depth against a stale client-side settings cache,
+         * not the only enforcement point. Desktop's own $idfLocations/
          * $otherLocations/$mdfServers/etc. above are deliberately left
-         * as the full authorized set — desktop's "Problems only"/"View
-         * all" toggle is a genuine per-viewer *session* override (see
-         * settings.blade.php's own header text), which only makes sense
-         * against an unfiltered base collection.
+         * as the full authorized set, each device's real issues intact —
+         * desktop's "Problems only"/"View all" toggle is a genuine
+         * per-viewer *session* override (see settings.blade.php's own
+         * header text), which only makes sense against an unfiltered
+         * base collection.
          */
-        $tvVisible = fn (array $device): bool => ProblemPolicy::deviceVisible($device, $tvPolicy);
+        // Only the tv_show_severity_*/tv_show_condition_* keys — narrowed
+        // by key prefix rather than a second field-attribute convention,
+        // so TvPresentationPolicy never has to guess which 'tv' group
+        // fields are presentation-eligibility settings versus the
+        // pre-existing tv_hide_*/tv_default_*/tv_maximum_* ones.
+        $tvConditionConfig = array_filter(
+            $config,
+            static fn ($value, string $key): bool => str_starts_with($key, 'tv_show_'),
+            ARRAY_FILTER_USE_BOTH
+        );
 
-        $tvIdfDevices = $idfDevices->filter($tvVisible)->values();
+        $tvEligibleCausesFor = fn (array $device): Collection => TvPresentationPolicy::eligibleCauses($device['issues'], $tvConditionConfig);
+
+        $tvVisible = function (array $device) use ($tvPolicy, $tvEligibleCausesFor): bool {
+            if (in_array($device['health'], [Severity::CRITICAL, Severity::WARNING], true)) {
+                return $tvEligibleCausesFor($device)->isNotEmpty();
+            }
+
+            return ProblemPolicy::deviceVisible($device, $tvPolicy);
+        };
+
+        /*
+         * Overrides a Critical/Warning device's displayed primary cause
+         * and rendered issue list to the TV-eligible subset only, so a
+         * TV card never shows an excluded condition (e.g. Humidity) as
+         * its reason when a different, TV-enabled condition (e.g.
+         * Voltage) is why the device is on screen at all — while the
+         * SEPARATE, un-transformed $devices/$idfLocations/etc. collections
+         * feeding the normal dashboard keep every condition untouched
+         * (see this block's own docblock above).
+         */
+        $toTvDevice = function (array $device) use ($tvEligibleCausesFor): array {
+            if (! in_array($device['health'], [Severity::CRITICAL, Severity::WARNING], true)) {
+                return $device;
+            }
+
+            $eligible = $tvEligibleCausesFor($device);
+            $primary = $eligible->first();
+
+            if ($primary === null) {
+                return $device;
+            }
+
+            // Same shape as normalizeDevice()'s own $primaryIssue (the
+            // raw IssueBuilder::make() issue, no extra decoration) —
+            // page.blade.php's $cause() closure and 'down_since' block
+            // already read this generically for both contexts.
+            $device['issues'] = $eligible;
+            $device['primary_issue'] = $primary;
+            $device['issue_count'] = $eligible->count();
+
+            return $device;
+        };
+
+        $tvIdfDevices = $idfDevices->filter($tvVisible)->map($toTvDevice)->values();
         $tvIdfLocations = $this->buildLocationGroups($tvIdfDevices);
 
-        $tvOtherDevices = $otherDevices->filter($tvVisible)->values();
+        $tvOtherDevices = $otherDevices->filter($tvVisible)->map($toTvDevice)->values();
         $tvOtherLocations = $this->buildLocationGroups($tvOtherDevices);
 
-        $tvMdfServers = $this->sortDevices($mdfServers->filter($tvVisible)->values());
-        $tvMdfPower = $this->sortDevices($mdfPower->filter($tvVisible)->values());
-        $tvMdfInfrastructure = $this->sortDevices($mdfInfrastructure->filter($tvVisible)->values());
+        $tvMdfServers = $this->sortDevices($mdfServers->filter($tvVisible)->map($toTvDevice)->values());
+        $tvMdfPower = $this->sortDevices($mdfPower->filter($tvVisible)->map($toTvDevice)->values());
+        $tvMdfInfrastructure = $this->sortDevices($mdfInfrastructure->filter($tvVisible)->map($toTvDevice)->values());
 
         /*
          * Defensive DOM-size ceiling: even after severity filtering, a
@@ -788,6 +870,7 @@ class Page extends PageHook
                 $operationalCriticalDeviceIds->count(),
                 $devices,
                 $deviceDownTaggedIds,
+                $handlingByRuleId,
                 $policyConfig
             )
             : null;
@@ -1272,6 +1355,7 @@ class Page extends PageHook
         ?object $maintenance = null,
         bool $operationallyCritical = false,
         array $deviceDownTaggedIds = [],
+        array $handlingByRuleId = [],
         array $policyConfig = []
     ): array {
         $name = $this->deviceName($device);
@@ -1390,7 +1474,7 @@ class Page extends PageHook
                 ? Carbon::createFromTimestamp((int) $recentRecovery->up_again)
                 : null;
 
-        $issues = $this->buildDeviceIssues(
+        $deviceIssueResult = $this->buildDeviceIssues(
             $device,
             $location,
             $sensors,
@@ -1401,8 +1485,11 @@ class Page extends PageHook
             $maintenanceActive,
             $operationallyCritical,
             $deviceDownTaggedIds,
+            $handlingByRuleId,
             $policyConfig
         );
+        $issues = $deviceIssueResult['issues'];
+        $conditionPolicyFailSafeRuleNames = $deviceIssueResult['condition_policy_fail_safe_rule_names'];
 
         $health = Severity::worst(
             $issues
@@ -1543,6 +1630,7 @@ class Page extends PageHook
             'recovered_recently' => $recoveredAt !== null,
             'issues' => $issues,
             'primary_issue' => $primaryIssue,
+            'condition_policy_fail_safe_rule_names' => $conditionPolicyFailSafeRuleNames,
             'issue_count' => $issues->where('actionable', true)->count(),
             'no_sensor_count' => $issues->where('severity', Severity::NO_SENSOR)->count(),
             'has_issue' => Severity::metadata($health, $health === Severity::STALE)['actionable'],
@@ -1560,19 +1648,40 @@ class Page extends PageHook
      * re-interpreting sensor/service/alert state.
      */
     /**
-     * Severity for Device Down, Service Issue, and per-sensor Critical/
-     * Warning thresholds is preferentially sourced from administrator-
-     * selected LibreNMS Alert Rules (source 'alert', below) — never
-     * duplicated as a second, independently-computed opinion while a
-     * matching rule is actively firing for a device (the admin
-     * screenshots this redesign was originally built from show "Cisco
-     * Switch Down", "Critical Devices - Device Down", "Service
-     * Critical/Warning" and "Sensor over/under limit - Check Device
-     * Health Settings" already configured). A core LibreNMS principle
-     * this plugin does not re-litigate: "a technical failure is not
-     * automatically an operationally critical incident" — a kitchen
-     * printer being technically DOWN is not the same as a production
-     * cluster being unreachable.
+     * Every included Alert Rule has an administrator-declared Handling
+     * (Support\AlertRules::resolveHandling(), self::HANDLING_SETTING_KEY —
+     * default HANDLING_DIRECT for any rule never explicitly declared,
+     * fail-safe/backward-compatible with this plugin's pre-redesign
+     * behavior):
+     *
+     * - HANDLING_DIRECT: the rule's own `alert_rules.severity` becomes
+     *   its own separate 'alert'-sourced issue, unchanged from this
+     *   plugin's original design. Reserved for rules whose condition
+     *   already IS the device/hardware state itself ("Cisco Switch
+     *   Down", "Cluster - SNMP Down", "Firewall-X1") — there is no
+     *   finer-grained technical condition to separate, so a category
+     *   bucket of DEVICE_DOWN is assigned for TV purposes.
+     * - HANDLING_CONDITION_POLICY: the rule's own severity is NOT used
+     *   for an issue at all — the rule firing only proves a real
+     *   technical condition exists on this device. Support\
+     *   OperationalPolicy::resolveConditionIssues() below (which
+     *   already runs unconditionally, for every device, from already-
+     *   loaded telemetry/service data — no additional query) is the
+     *   SOLE severity authority for this rule's condition. If that
+     *   engine produces zero actionable sensor/service issues for this
+     *   device despite a Condition-policy rule firing (this plugin
+     *   could not correlate any currently-violating sensor/service to
+     *   it), this fails safe to the rule's own Direct severity for that
+     *   one rule — see the fail-safe block below — so a real failure
+     *   can never be silently dropped just because correlation failed.
+     * - HANDLING_MONITOR: the rule firing creates its own visible,
+     *   non-actionable 'alert' issue (actionable=false) — for
+     *   informational/noisy rules (e.g. "Device rebooted").
+     *
+     * A core LibreNMS principle this plugin does not re-litigate: "a
+     * technical failure is not automatically an operationally critical
+     * incident" — a kitchen printer being technically DOWN is not the
+     * same as a production cluster being unreachable.
      *
      * Two conditions genuinely have no LibreNMS Alert Rule equivalent
      * at all — because a rule can only ever evaluate a sensor that
@@ -1584,19 +1693,17 @@ class Page extends PageHook
      * native (Support\ProblemPolicy::staleEscalates()) since no Alert
      * Rule expresses "this sensor stopped updating" either.
      *
-     * For everything else — Device Down, Service status 1/2/3, numeric/
-     * state sensor Critical/Warning — if this device currently has ZERO
-     * active alert-sourced issues at all (no matching rule fired, or no
-     * administrator has configured one yet), Support\OperationalPolicy
-     * supplies a bounded fallback: a real technical failure must never
-     * be silently hidden just because no Alert Rule was written for it
-     * yet, but that fallback's own severity is deliberately governed by
-     * whether this specific device is a member of the administrator-
-     * controlled "Operational Critical" LibreNMS Device Group — not by
-     * device type/role/hostname guessing. The moment a real Alert Rule
-     * exists for a condition, its issue (PRIORITY_*_ALERT) always
-     * outranks and effectively replaces this fallback
-     * (PRIORITY_*_POLICY_FALLBACK) for that device.
+     * Support\OperationalPolicy::resolveConditionIssues() runs for
+     * EVERY device, regardless of Alert Rules — it is the condition-
+     * bucket-driven severity source for Device Down, Service, and every
+     * sensor condition, and can coexist alongside a Direct-severity
+     * 'alert' issue for the same device without conflict (see that
+     * method's own docblock): a Direct rule adds its own device/
+     * hardware-level signal; this engine independently scores whichever
+     * specific sensor/service conditions are currently violating.
+     */
+    /**
+     * @return array{issues: Collection<int, array<string, mixed>>, condition_policy_fail_safe_rule_names: array<int, string>}
      */
     private function buildDeviceIssues(
         object $device,
@@ -1609,8 +1716,9 @@ class Page extends PageHook
         bool $maintenanceActive,
         bool $operationallyCritical,
         array $deviceDownTaggedIds,
+        array $handlingByRuleId,
         array $policyConfig
-    ): Collection {
+    ): array {
         $deviceId = (int) $device->device_id;
         $locationId = $device->location_id !== null ? (int) $device->location_id : null;
         $deviceUrl = url('device/device=' . $deviceId);
@@ -1721,15 +1829,28 @@ class Page extends PageHook
 
         // $alerts already only contains the rules an administrator
         // explicitly included (Support\AlertRules, filtered in
-        // loadActiveAlerts()) — this is now the *only* source of
-        // Critical/Warning severity for device-down, service and
-        // sensor-threshold conditions alike. See this function's own
-        // docblock above.
+        // loadActiveAlerts()) — dispatched per rule's own declared
+        // Handling (see this method's own docblock). Condition-policy
+        // rules deliberately build no issue here at all — their
+        // severity comes entirely from OperationalPolicy::
+        // resolveConditionIssues() below; only the rule's name is
+        // remembered, for the fail-safe check after that engine runs.
+        $conditionPolicyRuleNames = [];
+
         foreach ($alerts as $alert) {
             $name = trim((string) $alert['name']);
+            $ruleId = (int) ($alert['rule_id'] ?? 0);
+            $handling = $handlingByRuleId[$ruleId] ?? AlertRules::HANDLING_DIRECT;
             $severity = ($alert['severity_class'] ?? '') === Severity::CRITICAL
                 ? Severity::CRITICAL
                 : Severity::WARNING;
+
+            if ($handling === AlertRules::HANDLING_CONDITION_POLICY) {
+                $conditionPolicyRuleNames[$ruleId] = $name !== '' ? $name : 'rule name unavailable';
+
+                continue;
+            }
+
             $issues->push(IssueBuilder::make([
                 'key' => 'alert:' . $deviceId . ':' . md5($name),
                 'device_id' => $deviceId,
@@ -1737,26 +1858,28 @@ class Page extends PageHook
                 'severity' => $severity,
                 'source' => 'alert',
                 'type' => 'alert',
+                'condition_bucket' => ConditionBucket::DEVICE_DOWN,
                 'title' => 'Active alert',
                 'description' => 'Active alert — ' . ($name !== '' ? $name : 'rule name unavailable'),
                 'timestamp' => $alert['timestamp'] ?? null,
-                'actionable' => true,
+                'actionable' => $handling !== AlertRules::HANDLING_MONITOR,
                 'device_url' => $deviceUrl,
             ]));
         }
 
-        // Layer 3 fallback — see this method's own docblock. The Device
-        // Down fallback alone is ever suppressed, and only when one of
-        // this device's currently active alerts is sourced from a rule
-        // an administrator has explicitly tagged "Device Down"
+        // Layer 3 condition policy — see this method's own docblock and
+        // Support\OperationalPolicy::resolveConditionIssues()'s own. The
+        // Device Down condition alone is ever suppressed, and only when
+        // one of this device's currently active alerts is sourced from
+        // a rule an administrator has explicitly tagged "Device Down"
         // (Support\AlertRules::resolveDeviceDownTaggedIds()) — the only
         // condition with a real, exact device_id shared between the
-        // rule and the fallback it replaces.
+        // rule and the condition-policy issue it replaces.
         $deviceDownCovered = $alerts->contains(
             fn (array $alert): bool => in_array((int) ($alert['rule_id'] ?? 0), $deviceDownTaggedIds, true)
         );
 
-        $issues = $issues->concat(OperationalPolicy::resolveFallbackIssues(
+        $conditionIssues = OperationalPolicy::resolveConditionIssues(
             $deviceId,
             $locationId,
             $deviceUrl,
@@ -1767,12 +1890,68 @@ class Page extends PageHook
             $services,
             $telemetry,
             $policyConfig
-        ));
+        );
 
-        return $issues
-            ->unique('key')
-            ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
-            ->values();
+        // Fail-safe (Gate 10 of the noise-reduction audit): a Condition-
+        // policy rule firing PROVES a real technical condition exists.
+        // If the condition engine above found zero actionable sensor/
+        // service evidence for THIS device despite that, this plugin
+        // could not correlate the failure to any currently-violating
+        // sensor/service — a real failure must never be silently
+        // dropped just because correlation failed, so each such rule
+        // gets its own Direct-severity-shaped issue instead, clearly
+        // labeled as a fail-safe (Support\PolicyHealth surfaces the
+        // aggregate count administrator-wide).
+        $conditionPolicyFailSafeRuleNames = [];
+
+        if ($conditionPolicyRuleNames !== []) {
+            $hasConditionEvidence = $conditionIssues->contains(
+                fn (array $issue): bool => $issue['actionable']
+                    && in_array($issue['source'], ['sensor', 'service'], true)
+            );
+
+            if (! $hasConditionEvidence) {
+                foreach ($alerts as $alert) {
+                    $ruleId = (int) ($alert['rule_id'] ?? 0);
+
+                    if (! array_key_exists($ruleId, $conditionPolicyRuleNames)) {
+                        continue;
+                    }
+
+                    $name = $conditionPolicyRuleNames[$ruleId];
+                    $conditionPolicyFailSafeRuleNames[] = $name;
+                    $severity = ($alert['severity_class'] ?? '') === Severity::CRITICAL
+                        ? Severity::CRITICAL
+                        : Severity::WARNING;
+
+                    $issues->push(IssueBuilder::make([
+                        'key' => 'alert:' . $deviceId . ':' . md5($name) . ':failsafe',
+                        'device_id' => $deviceId,
+                        'location_id' => $locationId,
+                        'severity' => $severity,
+                        'source' => 'alert',
+                        'type' => 'alert',
+                        'condition_bucket' => ConditionBucket::DEVICE_DOWN,
+                        'title' => 'Active alert (condition correlation failed)',
+                        'description' => 'Active alert — ' . $name
+                            . ' (Condition policy could not correlate this to a currently-violating sensor/service on this device — showing the rule\'s own severity directly, fail-safe)',
+                        'timestamp' => $alert['timestamp'] ?? null,
+                        'actionable' => true,
+                        'device_url' => $deviceUrl,
+                    ]));
+                }
+            }
+        }
+
+        $issues = $issues->concat($conditionIssues);
+
+        return [
+            'issues' => $issues
+                ->unique('key')
+                ->sortBy(fn (array $issue): array => [$issue['priority'], $issue['key']])
+                ->values(),
+            'condition_policy_fail_safe_rule_names' => $conditionPolicyFailSafeRuleNames,
+        ];
     }
 
     /**

@@ -2,6 +2,91 @@
 
 All notable changes follow semantic versioning.
 
+## [1.5.0] - 2026-08-21
+
+### Changed — Operational noise reduction (Condition Policy + curated TV Mode)
+
+Follows an explicit audit (see PR history) that traced the root cause of
+excessive Critical noise: generic Alert Rules (e.g. "Sensor over/under
+limit - Check Device Health Settings") applied their own blanket severity
+to every device they fired on, and this dashboard's own fallback used
+only a numeric-vs-state axis — neither distinguished a humidity reading
+from a failed power supply.
+
+- **New: Support\ConditionBucket** — the single, centralized vocabulary
+  (`device_down`, `hardware_state`, `voltage`, `battery`, `fan`,
+  `temperature`, `humidity`, `cpu`, `memory`, `storage`,
+  `service_critical`, `service_warning`, `other`) every severity and TV
+  decision now reads, translated once from the existing
+  `Page::metricProblemType()` classification — never duplicated in
+  Blade, Page, OperationalPolicy, or TV filtering.
+- **New: per-condition-bucket Operational Priority policy**
+  (`Support\OperationalPolicy::resolveConditionIssues()`, replacing
+  `resolveFallbackIssues()`) — Critical/Warning/Monitor/Ignore is now
+  selected by condition bucket × Operational Critical tier, not by a
+  numeric-vs-state axis. Runs unconditionally for every device from
+  already-loaded sensor/service data (no additional query), independent
+  of whether any Alert Rule exists. Default matrix matches the audited
+  target: Device Down/Hardware-State/Voltage/Battery/Fan stay
+  Critical/Warning (unchanged); Temperature is now Warning/Monitor;
+  Humidity, CPU are Monitor on both tiers; Memory/Storage are
+  Warning/Monitor — quieting exactly the noise the audit identified,
+  without hiding it (Monitor issues remain visible, just non-actionable).
+- **New: Alert Rule Handling** (`Support\AlertRules::HANDLING_*`,
+  `idf_alert_rule_handling`) — a third column in the Alert Rules table.
+  `Direct severity` (the default, fail-safe, backward-compatible
+  behavior) uses the rule's own severity as-is. `Condition policy`
+  treats a firing rule only as proof a real condition exists — actual
+  severity comes entirely from the condition-bucket policy above,
+  falling back to the rule's own Direct severity if this plugin cannot
+  correlate the firing to any currently-violating sensor/service on that
+  device (a real failure is never silently dropped). `Monitor` keeps a
+  rule's firing visible without ever becoming Critical/Warning.
+- **New: Monitor is not a new severity tier.** Implemented entirely via
+  the existing `actionable` mechanism on an issue — visible in device
+  telemetry/details, never in Priority Attention, device/location
+  health, header counters, or TV Mode. No second severity engine.
+- **New: TV Presentation Policy** (`Support\TvPresentationPolicy`,
+  `tv_show_severity_critical`/`tv_show_severity_warning`,
+  `tv_show_condition_*`) — TV Mode is now a curated wall/NOC projection,
+  filtered per issue/cause (not per device) using the same condition
+  buckets, entirely on top of already-computed severity. A device with
+  several simultaneous conditions still appears on TV if any one remains
+  TV-eligible, credited to that cause; its TV card shows only the
+  TV-eligible causes, while the normal dashboard keeps every condition
+  untouched. Pure presentation — provably cannot alter device health,
+  location health, Priority Attention, header counters, Alert Rule
+  inclusion, or telemetry. Defaults: Device Down/Hardware-State/
+  Voltage/Battery/Fan/Service Critical on; Service Warning/Temperature/
+  Humidity/CPU/Memory/Storage/Other off. The five pre-existing
+  `tv_hide_*` settings (Healthy/Unknown/Stale/Maintenance/No-sensor) are
+  unchanged — they govern non-problem severity tiers the condition-bucket
+  system deliberately never touches.
+- **Removed:** the numeric-sensor/state-sensor fallback split
+  (`fallback_numeric_sensor_*`, `fallback_state_sensor_*`) and the old
+  rule-name-substring Policy Health heuristics
+  (`deviceDownRuleCheck`/`serviceRuleCheck`) — both superseded by the
+  explicit, administrator-declared mechanisms above. Policy Health now
+  reports a Handling breakdown and Condition-policy correlation status
+  instead.
+- **Fixed:** `Support\UpdateStatus`/Settings now distinguish all three
+  installed-vs-stable states (`installed < stable` → update available,
+  `== ` → current, `>` → "running ahead of the latest published stable
+  release") — previously the third state silently displayed the same
+  "installed version is current" message as the second.
+- **Audited, not changed:** two suspicious threshold readings found
+  during the audit (`Voltage 0V — below low limit 0V`,
+  `Temperature 105.8°F — below warning limit 221°F`) were traced to
+  `IssueBuilder::evaluateNumericSensor()`/`Page::sensorThreshold()`.
+  Both comparisons execute exactly as designed; the underlying values
+  point to bad/misassigned LibreNMS-side threshold data (a 0 low-voltage
+  threshold with no way to distinguish "configured" from "default", and
+  an implausible 221°F low-temperature limit) rather than a bug in this
+  plugin. Deliberately left unchanged rather than blanket-treating every
+  zero threshold as unset, which would risk silently ignoring a
+  legitimately-configured 0V floor — see `tests/run.php`'s own
+  regression-pinning tests for both cases.
+
 ## [1.4.0] - 2026-08-21
 
 ### Changed
