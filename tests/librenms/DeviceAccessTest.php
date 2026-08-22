@@ -2369,7 +2369,7 @@ class DeviceAccessTest extends TestCase
         $this->assertTrue($devices->get($criticalServerSensor->device_id)['issues']->contains(
             fn (array $issue): bool => $issue['source'] === 'sensor'
                 && $issue['severity'] === 'critical'
-                && str_contains($issue['description'], 'no active Alert Rule covers this')
+                && str_contains($issue['description'], 'operational condition policy')
         ));
 
         $this->assertSame('critical', $devices->get($clusterStateSensorFailed->device_id)['health'], 'Caso 4: a Critical state sensor (Power Supply 2 = Failed) on a critical cluster is Critical.');
@@ -2524,14 +2524,19 @@ class DeviceAccessTest extends TestCase
 
         // Case F (UNKNOWN semantics): a legacy-persisted 'unknown'
         // value (from before this hardening, when it was briefly
-        // offered as a fake "Informational") must fail safely to the
-        // exact same documented default as any other invalid value
-        // (actionable Warning — Support\OperationalPolicy::
-        // resolveConditionOutcome()'s own docblock), REGARDLESS of
-        // Operational Critical tier — the fail-safe direction never
-        // varies by tier, only a recognized choice does. Never treated
-        // as a real choice, since UNKNOWN is not (and must never
-        // become) a policy option.
+        // offered as a fake "Informational") must fail safely — never
+        // treated as a real choice, since UNKNOWN is not (and must
+        // never become) a policy option. The actual fail-safe authority
+        // is Support\Config::resolve()'s own choice-type validation: an
+        // unrecognized value never reaches OperationalPolicy at all, it
+        // resolves to THIS FIELD's own declared default
+        // (condition_policy_hardware_state_critical_group_severity's
+        // default is 'critical', matching this project's original
+        // policy matrix) — OperationalPolicy::resolveConditionOutcome()'s
+        // own "unrecognized => Warning" branch is defense in depth for
+        // a value that reaches it directly (e.g. a future caller that
+        // skips Config::resolve()), not what fires for a value saved
+        // through Settings.
         $legacyUnknownConfigDevice = $makeDevice('legacy-unknown-config.example.com', 1);
         $criticalGroup->devices()->attach($legacyUnknownConfigDevice->device_id);
         $legacyUnknownPsu = Sensor::factory()->for($legacyUnknownConfigDevice)->create([
@@ -2640,15 +2645,16 @@ class DeviceAccessTest extends TestCase
         }
 
         // A legacy-persisted 'unknown' value (saved before this
-        // hardening) must fail safely to the exact same documented
-        // default as the "banana" case above (actionable Warning) even
-        // on an Operational Critical device — the fail-safe direction
-        // never varies by tier, only a recognized choice does — never
-        // treated as a real choice.
+        // hardening) must fail safely to THIS FIELD's own declared
+        // default (Support\Config::resolve()'s choice-type validation
+        // is the actual authority — 'unknown' never reaches
+        // OperationalPolicy at all) — 'critical', matching this
+        // project's original policy matrix for a critical-group
+        // hardware/state failure — never treated as a real choice.
         $this->assertSame(
-            'warning',
+            'critical',
             $devices->get($legacyUnknownConfigDevice->device_id)['health'],
-            'Case F: a legacy-persisted "unknown" severity value safely falls back to the documented default (Warning) on any tier, never a fake Informational state.'
+            'Case F: a legacy-persisted "unknown" severity value safely falls back to this field\'s own declared default (Critical), never a fake Informational state.'
         );
 
         $this->assertSame(
@@ -2985,11 +2991,16 @@ class DeviceAccessTest extends TestCase
             'sensor_alert' => 1, 'lastupdate' => now(),
         ]);
 
-        // A standard (non-Operational-Critical) device with ONLY a
-        // TV-excluded Warning condition (Temperature, TV disabled) —
-        // must be absent from TV, but remain in normal Priority
-        // Attention.
+        // An Operational Critical device with ONLY a TV-excluded
+        // Warning condition (Temperature — Warning by default only on
+        // the Operational Critical tier; Monitor on the standard tier,
+        // which would never be TV-eligible regardless of any toggle,
+        // so this deliberately uses the critical-group tier to
+        // meaningfully exercise the tv_show_condition_temperature
+        // toggle) — must be absent from TV, but remain in normal
+        // Priority Attention.
         $warningOnlyExcluded = $makeDevice('tv-warning-only-excluded.example.com', 1);
+        $criticalGroup->devices()->attach($warningOnlyExcluded->device_id);
         Sensor::factory()->for($warningOnlyExcluded)->create([
             'sensor_class' => 'temperature', 'sensor_descr' => 'Ambient',
             'sensor_current' => 95, 'sensor_limit' => 80, 'sensor_limit_warn' => 70,

@@ -589,6 +589,17 @@ class Page extends PageHook
 
         $tvVisible = function (array $device) use ($tvPolicy, $tvEligibleCausesFor): bool {
             if (in_array($device['health'], [Severity::CRITICAL, Severity::WARNING], true)) {
+                // The pre-existing default_severity_critical/warning
+                // toggle still governs whether this severity TIER is
+                // shown at all (unchanged from before this redesign —
+                // an administrator turning Warning off must still turn
+                // Warning off, TV Presentation Policy is an additional
+                // per-cause narrowing on top of this, never a
+                // replacement for it).
+                if (! (bool) ($tvPolicy[$device['health']] ?? true)) {
+                    return false;
+                }
+
                 return $tvEligibleCausesFor($device)->isNotEmpty();
             }
 
@@ -1894,20 +1905,27 @@ class Page extends PageHook
 
         // Fail-safe (Gate 10 of the noise-reduction audit): a Condition-
         // policy rule firing PROVES a real technical condition exists.
-        // If the condition engine above found zero actionable sensor/
-        // service evidence for THIS device despite that, this plugin
+        // If the condition engine above found NO sensor/service
+        // evidence at all for THIS device despite that, this plugin
         // could not correlate the failure to any currently-violating
         // sensor/service — a real failure must never be silently
         // dropped just because correlation failed, so each such rule
         // gets its own Direct-severity-shaped issue instead, clearly
         // labeled as a fail-safe (Support\PolicyHealth surfaces the
-        // aggregate count administrator-wide).
+        // aggregate count administrator-wide). Deliberately NOT gated
+        // on 'actionable' — a Monitor-tier sensor/service issue is
+        // still genuine, successful correlation (the condition was
+        // found; policy just chose to de-prioritize it), so it must
+        // NOT trigger this fail-safe. Requiring 'actionable' here was a
+        // real bug caught by CI: it fired the fail-safe (and its own
+        // full Direct-severity issue) for e.g. a Humidity condition
+        // deliberately policed to Monitor, silently re-escalating
+        // exactly the noise this whole redesign exists to quiet.
         $conditionPolicyFailSafeRuleNames = [];
 
         if ($conditionPolicyRuleNames !== []) {
             $hasConditionEvidence = $conditionIssues->contains(
-                fn (array $issue): bool => $issue['actionable']
-                    && in_array($issue['source'], ['sensor', 'service'], true)
+                fn (array $issue): bool => in_array($issue['source'], ['sensor', 'service'], true)
             );
 
             if (! $hasConditionEvidence) {
